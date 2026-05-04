@@ -118,6 +118,30 @@ func TestRoutePolicySkipsRateLimitedOrConcurrencyFullAccounts(t *testing.T) {
 	}
 }
 
+func TestRoutePolicyUsesStableAccountTieBreakForSameModelAlias(t *testing.T) {
+	profile := DefaultTaskProfile()
+
+	accountA := candidate("same-model", CapabilityBalanced, PriceLow, LatencyNormalClass, false)
+	accountA.AccountAlias = "account-a"
+	accountB := candidate("same-model", CapabilityBalanced, PriceLow, LatencyNormalClass, false)
+	accountB.AccountAlias = "account-b"
+
+	for name, candidates := range map[string][]Candidate{
+		"forward": {accountA, accountB},
+		"reverse": {accountB, accountA},
+	} {
+		t.Run(name, func(t *testing.T) {
+			decision, err := RoutePolicy{}.Select(profile, candidates)
+			if err != nil {
+				t.Fatalf("Select returned error: %v", err)
+			}
+			if decision.Selected.AccountAlias != "account-a" {
+				t.Fatalf("Selected.AccountAlias = %q, want %q; decision=%+v", decision.Selected.AccountAlias, "account-a", decision)
+			}
+		})
+	}
+}
+
 func TestRoutePolicyReturnsClearErrorWhenNoCandidateAvailable(t *testing.T) {
 	profile := DefaultTaskProfile()
 	profile.NeedsJSON = true

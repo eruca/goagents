@@ -29,12 +29,12 @@ type CandidateScore struct {
 // RouteDecision is the deterministic routing result and its traceable
 // explanation.
 type RouteDecision struct {
-	Selected       Candidate      `json:"selected"`
-	SelectedAlias  string         `json:"selected_alias,omitempty"`
-	Score          int            `json:"score"`
-	ScoreBreakdown map[string]int `json:"score_breakdown,omitempty"`
-	Reason         string         `json:"reason,omitempty"`
-	Candidates     []CandidateScore
+	Selected       Candidate        `json:"selected"`
+	SelectedAlias  string           `json:"selected_alias,omitempty"`
+	Score          int              `json:"score"`
+	ScoreBreakdown map[string]int   `json:"score_breakdown,omitempty"`
+	Reason         string           `json:"reason,omitempty"`
+	Candidates     []CandidateScore `json:"candidates"`
 }
 
 // RoutePolicy selects a candidate using hard filters followed by stable
@@ -84,7 +84,7 @@ func (p RoutePolicy) Select(profile TaskProfile, candidates []Candidate) (RouteD
 		if available[i].score.Score != available[j].score.Score {
 			return available[i].score.Score > available[j].score.Score
 		}
-		return available[i].candidate.Model.Alias < available[j].candidate.Model.Alias
+		return stableCandidateKey(available[i].candidate) < stableCandidateKey(available[j].candidate)
 	})
 
 	best := available[0]
@@ -101,6 +101,14 @@ func (p RoutePolicy) Select(profile TaskProfile, candidates []Candidate) (RouteD
 type scoredCandidate struct {
 	candidate Candidate
 	score     CandidateScore
+}
+
+func stableCandidateKey(candidate Candidate) string {
+	return strings.Join([]string{
+		candidate.Model.Alias,
+		candidate.AccountAlias,
+		candidate.Model.Provider,
+	}, "\x00")
 }
 
 func unavailableReason(profile TaskProfile, candidate Candidate) string {
