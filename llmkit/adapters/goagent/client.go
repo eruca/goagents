@@ -4,6 +4,7 @@ package goagent
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/eruca/goagent/ports"
 	"github.com/eruca/llmkit/llmkit"
@@ -77,13 +78,18 @@ func (c *Client) Chat(ctx context.Context, req ports.ChatRequest) (*ports.ChatRe
 		profile = c.profileProvider(ctx, req)
 	}
 
-	decision, err := c.policy.Select(profile, c.candidates)
+	candidates := c.availableCandidates()
+	decision, err := c.policy.Select(profile, candidates)
 	if err != nil {
 		return nil, err
 	}
 
 	if c.recorder != nil {
-		if err := c.recorder.RecordRoute(ctx, c.routeTrace(ctx, req, profile, decision)); err != nil {
+		trace, err := c.routeTrace(ctx, req, profile, decision)
+		if err != nil {
+			return nil, err
+		}
+		if err := c.recorder.RecordRoute(ctx, trace); err != nil {
 			return nil, err
 		}
 	}
@@ -95,10 +101,28 @@ func (c *Client) Chat(ctx context.Context, req ports.ChatRequest) (*ports.ChatRe
 	return provider.Chat(ctx, req)
 }
 
-func (c *Client) routeTrace(ctx context.Context, req ports.ChatRequest, profile llmkit.TaskProfile, decision llmkit.RouteDecision) llmkit.RouteTrace {
+func (c *Client) availableCandidates() []llmkit.Candidate {
+	if len(c.candidates) == 0 {
+		return nil
+	}
+	available := make([]llmkit.Candidate, 0, len(c.candidates))
+	for _, candidate := range c.candidates {
+		provider := c.providers[candidate.Model.Alias]
+		if provider == nil {
+			continue
+		}
+		available = append(available, candidate)
+	}
+	return available
+}
+
+func (c *Client) routeTrace(ctx context.Context, req ports.ChatRequest, profile llmkit.TaskProfile, decision llmkit.RouteDecision) (llmkit.RouteTrace, error) {
 	metadata := RouteMetadata{}
 	if c.routeMetadataProvider != nil {
 		metadata = c.routeMetadataProvider(ctx, req)
+	}
+	if err := validateRouteMetadata(metadata); err != nil {
+		return llmkit.RouteTrace{}, err
 	}
 	return llmkit.RouteTrace{
 		RouteID:               metadata.RouteID,
@@ -113,7 +137,20 @@ func (c *Client) routeTrace(ctx context.Context, req ports.ChatRequest, profile 
 		Score:                 decision.Score,
 		ScoreBreakdown:        copyScoreBreakdown(decision.ScoreBreakdown),
 		CandidateModelAliases: candidateModelAliases(decision.Candidates),
+	}, nil
+}
+
+func validateRouteMetadata(metadata RouteMetadata) error {
+	if strings.TrimSpace(metadata.RouteID) == "" {
+		return fmt.Errorf("route_id is required")
 	}
+	if strings.TrimSpace(metadata.TaskID) == "" {
+		return fmt.Errorf("task_id is required")
+	}
+	if metadata.Attempt <= 0 {
+		return fmt.Errorf("attempt must be greater than zero")
+	}
+	return nil
 }
 
 func candidateModelAliases(candidates []llmkit.CandidateScore) []string {

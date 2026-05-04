@@ -143,19 +143,73 @@ func TestClientRoutesHardProfileToSelectedProviderAndRecordsTrace(t *testing.T) 
 	}
 }
 
-func TestClientReturnsErrorWhenSelectedProviderIsMissing(t *testing.T) {
+func TestClientSkipsCandidateWithoutProvider(t *testing.T) {
+	cloud := &fakeProviderClient{response: &ports.ChatResponse{Content: "cloud"}}
+	recorder := &fakeRecorder{}
+
+	client := NewClient(Config{
+		Candidates: testCandidates(),
+		Providers: map[string]ProviderClient{
+			"cloud-advanced": cloud,
+		},
+		ProfileProvider: fixedProfile(simpleProfile()),
+		RouteMetadataProvider: fixedRouteMetadata(RouteMetadata{
+			RouteID: "route-provider-filter",
+			TaskID:  "task-provider-filter",
+			Attempt: 1,
+		}),
+		Recorder: recorder,
+	})
+
+	resp, err := client.Chat(context.Background(), ports.ChatRequest{})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if resp.Content != "cloud" {
+		t.Fatalf("Chat() response content = %q, want cloud", resp.Content)
+	}
+	if len(cloud.requests) != 1 {
+		t.Fatalf("cloud provider calls = %d, want 1", len(cloud.requests))
+	}
+	trace := recorder.singleRouteTrace(t)
+	if trace.ModelAlias != "cloud-advanced" {
+		t.Fatalf("trace ModelAlias = %q, want cloud-advanced", trace.ModelAlias)
+	}
+}
+
+func TestClientReturnsErrorWhenNoProviderBackedCandidateCanHandleTask(t *testing.T) {
 	client := NewClient(Config{
 		Candidates:      testCandidates(),
 		Providers:       map[string]ProviderClient{"local-small": &fakeProviderClient{}},
 		ProfileProvider: fixedProfile(hardProfile()),
 		RouteMetadataProvider: fixedRouteMetadata(RouteMetadata{
 			RouteID: "route-missing",
+			TaskID:  "task-missing",
+			Attempt: 1,
 		}),
 	})
 
 	_, err := client.Chat(context.Background(), ports.ChatRequest{})
 	if err == nil {
-		t.Fatal("Chat() error = nil, want missing provider error")
+		t.Fatal("Chat() error = nil, want no available candidates error")
+	}
+}
+
+func TestClientRequiresRouteMetadataWhenRecording(t *testing.T) {
+	recorder := &fakeRecorder{}
+	client := NewClient(Config{
+		Candidates:      testCandidates(),
+		Providers:       map[string]ProviderClient{"local-small": &fakeProviderClient{}},
+		ProfileProvider: fixedProfile(simpleProfile()),
+		Recorder:        recorder,
+	})
+
+	_, err := client.Chat(context.Background(), ports.ChatRequest{})
+	if err == nil {
+		t.Fatal("Chat() error = nil, want metadata validation error")
+	}
+	if len(recorder.routes) != 0 {
+		t.Fatalf("recorded route traces = %d, want 0", len(recorder.routes))
 	}
 }
 
