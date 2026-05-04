@@ -44,6 +44,7 @@ type RouteTrace struct {
 type TaskOutcome struct {
 	RouteID        string    `json:"route_id,omitempty"`
 	TaskID         string    `json:"task_id,omitempty"`
+	Attempt        int       `json:"attempt,omitempty"`
 	RecordedAt     time.Time `json:"recorded_at,omitempty"`
 	TaskType       string    `json:"task_type,omitempty"`
 	AccountAlias   string    `json:"account_alias,omitempty"`

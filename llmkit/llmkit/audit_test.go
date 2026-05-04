@@ -69,6 +69,7 @@ func TestJSONLRecorderRecordsTaskOutcome(t *testing.T) {
 	outcome := TaskOutcome{
 		RouteID:        "route-123",
 		TaskID:         "task-456",
+		Attempt:        2,
 		RecordedAt:     time.Date(2026, 5, 4, 10, 31, 0, 0, time.UTC),
 		TaskType:       "extract",
 		AccountAlias:   "backup-account",
@@ -97,7 +98,7 @@ func TestJSONLRecorderRecordsTaskOutcome(t *testing.T) {
 	if got.TaskType != outcome.TaskType || got.AccountAlias != outcome.AccountAlias || got.ModelAlias != outcome.ModelAlias || got.Provider != outcome.Provider {
 		t.Fatalf("task outcome changed audit identity fields: got=%+v want=%+v", got, outcome)
 	}
-	if got.RouteID != outcome.RouteID || got.TaskID != outcome.TaskID || !got.RecordedAt.Equal(outcome.RecordedAt) {
+	if got.RouteID != outcome.RouteID || got.TaskID != outcome.TaskID || got.Attempt != outcome.Attempt || !got.RecordedAt.Equal(outcome.RecordedAt) {
 		t.Fatalf("task outcome changed correlation fields: got=%+v want=%+v", got, outcome)
 	}
 	if got.Success || got.ErrorCode != "rate_limited" || got.LatencyMillis != 1234 {
