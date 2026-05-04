@@ -1,0 +1,12 @@
+.DS_Store
+.playwright-cli/
+*.log
+*.tmp
+tmp/
+dist/
+build/
+worktrees/
+coverage.out
+*.db
+*.db-shm
+*.db-wal

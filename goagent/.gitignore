@@ -1,0 +1,18 @@
+# Build outputs
+bin/
+dist/
+*.test
+*.out
+coverage.out
+
+# Local editor and OS files
+.DS_Store
+.idea/
+.vscode/
+
+# Temporary files
+tmp/
+*.log
+
+# Local git worktrees
+.worktrees/
