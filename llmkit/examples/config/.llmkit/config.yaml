@@ -1,0 +1,74 @@
+# Example llmkit configuration.
+# This file intentionally uses account/model aliases and api_key_env names only.
+home: .llmkit
+
+audit:
+  enabled: true
+  route_events_file: route-events.jsonl
+  outcomes_file: outcomes.jsonl
+
+accounts:
+  - alias: local-dev
+    provider: local
+    api_key_env: LLMKIT_LOCAL_API_KEY
+    max_concurrency: 4
+
+  - alias: cloud-primary
+    provider: openai
+    api_key_env: OPENAI_API_KEY
+    max_concurrency: 8
+
+models:
+  - alias: local-free
+    provider: local
+    account_alias: local-dev
+    is_local: true
+    capability_level: simple
+    context_window_class: medium
+    price_class: free
+    latency_class: fast
+    max_concurrency: 4
+    tags:
+      - local
+      - free
+      - simple
+
+  - alias: cloud-advanced
+    provider: openai
+    account_alias: cloud-primary
+    is_local: false
+    capability_level: advanced
+    supports_tools: true
+    supports_json: true
+    context_window_class: long
+    price_class: high
+    latency_class: normal
+    max_concurrency: 8
+    tags:
+      - advanced
+      - reasoning
+      - high-failure-cost
+
+routing:
+  intent:
+    simple_tasks: prefer local-free for low-cost local-first execution
+    hard_tasks: prefer cloud-advanced when complexity or failure cost is high
+  defaults:
+    complexity: medium
+    latency_requirement: normal
+    failure_cost: medium
+    privacy_level: cloud_allowed
+  rules:
+    - when:
+        complexity: simple
+        failure_cost: low
+      prefer:
+        - local-free
+    - when:
+        complexity: hard
+      prefer:
+        - cloud-advanced
+    - when:
+        failure_cost: high
+      prefer:
+        - cloud-advanced
