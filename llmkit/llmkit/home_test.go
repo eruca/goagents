@@ -1,7 +1,6 @@
 package llmkit
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 )
@@ -25,12 +24,9 @@ func TestResolveHomeUsesLLMKITHomeWhenSet(t *testing.T) {
 	}
 }
 
-func TestResolveHomeUsesDevelopmentDirectoryWhenEnvMissing(t *testing.T) {
+func TestResolveHomeUsesDevelopmentDirectoryWhenEnvMissingWithoutExistingDirectory(t *testing.T) {
 	cwd := t.TempDir()
 	llmkitHome := filepath.Join(cwd, ".llmkit")
-	if err := os.Mkdir(llmkitHome, 0o755); err != nil {
-		t.Fatalf("create .llmkit fixture: %v", err)
-	}
 
 	got, err := ResolveHome(cwd, func(string) string {
 		return ""

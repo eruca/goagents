@@ -26,15 +26,7 @@ func ResolveHome(cwd string, getenv func(string) string, mode HomeMode) (string,
 
 	switch mode {
 	case HomeModeDevelopment:
-		home := filepath.Join(cwd, ".llmkit")
-		info, err := os.Stat(home)
-		if err == nil && info.IsDir() {
-			return filepath.Clean(home), nil
-		}
-		if err != nil && !os.IsNotExist(err) {
-			return "", fmt.Errorf("resolve llmkit development home: %w", err)
-		}
-		return "", fmt.Errorf("LLMKIT_HOME is required when %s does not exist", home)
+		return cleanHome(cwd, ".llmkit"), nil
 	case HomeModeProduction:
 		return "", fmt.Errorf("LLMKIT_HOME is required in production mode")
 	default:
