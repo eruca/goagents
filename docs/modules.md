@@ -14,9 +14,12 @@ Core modules:
 - `github.com/eruca/ocrs` in `ocrs/`
 - `github.com/eruca/workflowkit` in `workflowkit/`
 
-Optional adapter modules:
+Optional adapter/capability modules:
 
 - `github.com/eruca/workflowkit/agentstep` in `workflowkit/agentstep/`
+- `github.com/eruca/llmkit` in `llmkit/` for LLM routing, account/model policy,
+  and audit contracts. It is optional host-side capability, not part of
+  `goagent` core.
 
 Verification/example modules:
 
@@ -31,16 +34,18 @@ required runtime dependencies for users.
 Keep core modules independent:
 
 ```text
-goagent       must not import workflowkit, contextkit, or ocrs
+goagent       must not import workflowkit, contextkit, ocrs, or llmkit
 workflowkit   must not import goagent, contextkit, ocrs, or workflowkit/agentstep
 contextkit    must not import goagent, workflowkit, or ocrs
 ocrs          must not import goagent, workflowkit, or contextkit
+llmkit        must not import goagent from its core routing package
 ```
 
 Adapter and composition modules may depend on multiple core modules:
 
 ```text
 workflowkit/agentstep        may import workflowkit + goagent
+llmkit adapters              may import llmkit + goagent
 examples/agent-approval      may import workflowkit + agentstep + goagent
 examples/ocr-review          may import workflowkit + agentstep + goagent + contextkit + ocrs
 host applications            compose whatever modules they need
@@ -64,6 +69,7 @@ contextkit/v0.1.0
 ocrs/v0.1.0
 workflowkit/v0.1.0
 workflowkit/agentstep/v0.1.0
+llmkit/v0.1.0
 ```
 
 Only tag modules that changed. If `workflowkit/agentstep` changes without a core
@@ -82,6 +88,7 @@ Module-specific checks:
 ```bash
 (cd contextkit && go test ./...)
 (cd ocrs && go test ./...)
+(cd llmkit && go test ./...)
 (cd goagent && make verify)
 (cd workflowkit && ./scripts/verify-e2e.sh)
 ```
