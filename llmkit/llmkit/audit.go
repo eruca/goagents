@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -16,13 +17,17 @@ const (
 )
 
 var (
-	apiKeyTokenPattern = regexp.MustCompile(`(?i)api[_-]?key|secret[_-]?key|bearer`)
-	skTokenPattern     = regexp.MustCompile(`(?i)sk-[a-z0-9_-]+`)
+	credentialTokenPattern = regexp.MustCompile(`(?i)secret[_-]?key|bearer`)
+	skTokenPattern         = regexp.MustCompile(`(?i)sk-[a-z0-9_-]{8,}`)
 )
 
 // RouteTrace is the allowlisted audit record for a routing decision. It stores
 // aliases and routing explanations only; host-owned secrets must not be added.
 type RouteTrace struct {
+	RouteID               string         `json:"route_id,omitempty"`
+	TaskID                string         `json:"task_id,omitempty"`
+	Attempt               int            `json:"attempt,omitempty"`
+	RecordedAt            time.Time      `json:"recorded_at,omitempty"`
 	TaskType              string         `json:"task_type,omitempty"`
 	AccountAlias          string         `json:"account_alias,omitempty"`
 	ModelAlias            string         `json:"model_alias,omitempty"`
@@ -37,16 +42,19 @@ type RouteTrace struct {
 // TaskOutcome is the allowlisted audit record for the result of an LLM task.
 // It records outcome metadata, not prompts, responses, API keys, or headers.
 type TaskOutcome struct {
-	TaskType       string `json:"task_type,omitempty"`
-	AccountAlias   string `json:"account_alias,omitempty"`
-	ModelAlias     string `json:"model_alias,omitempty"`
-	Provider       string `json:"provider,omitempty"`
-	Success        bool   `json:"success"`
-	ErrorCode      string `json:"error_code,omitempty"`
-	LatencyMillis  int    `json:"latency_ms,omitempty"`
-	InputTokens    int    `json:"input_tokens,omitempty"`
-	OutputTokens   int    `json:"output_tokens,omitempty"`
-	EstimatedCents int    `json:"estimated_cents,omitempty"`
+	RouteID        string    `json:"route_id,omitempty"`
+	TaskID         string    `json:"task_id,omitempty"`
+	RecordedAt     time.Time `json:"recorded_at,omitempty"`
+	TaskType       string    `json:"task_type,omitempty"`
+	AccountAlias   string    `json:"account_alias,omitempty"`
+	ModelAlias     string    `json:"model_alias,omitempty"`
+	Provider       string    `json:"provider,omitempty"`
+	Success        bool      `json:"success"`
+	ErrorCode      string    `json:"error_code,omitempty"`
+	LatencyMillis  int       `json:"latency_ms,omitempty"`
+	InputTokens    int       `json:"input_tokens,omitempty"`
+	OutputTokens   int       `json:"output_tokens,omitempty"`
+	EstimatedCents int       `json:"estimated_cents,omitempty"`
 }
 
 // Recorder persists routing and outcome audit records.
@@ -55,9 +63,9 @@ type Recorder interface {
 	RecordOutcome(context.Context, TaskOutcome) error
 }
 
-// JSONLRecorder appends one JSON object per line under Home.
+// JSONLRecorder appends one JSON object per line under its configured home.
 type JSONLRecorder struct {
-	Home string
+	home string
 
 	mu sync.Mutex
 }
@@ -66,10 +74,10 @@ type JSONLRecorder struct {
 // exists. It writes route-events.jsonl and outcomes.jsonl under home.
 func NewJSONLRecorder(home string) (*JSONLRecorder, error) {
 	clean := filepath.Clean(home)
-	if err := os.MkdirAll(clean, 0o755); err != nil {
+	if err := ensurePrivateDir(clean); err != nil {
 		return nil, err
 	}
-	return &JSONLRecorder{Home: clean}, nil
+	return &JSONLRecorder{home: clean}, nil
 }
 
 // RecordRoute appends a sanitized routing trace to route-events.jsonl.
@@ -95,15 +103,23 @@ func (r *JSONLRecorder) appendJSONL(ctx context.Context, name string, record any
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(r.Home, 0o755); err != nil {
+	if err := ensurePrivateDir(r.home); err != nil {
 		return err
 	}
 
-	file, err := os.OpenFile(filepath.Join(r.Home, name), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	path := filepath.Join(r.home, name)
+	if err := chmodExistingFile(path, 0o600); err != nil {
+		return err
+	}
+
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
+	if err := file.Chmod(0o600); err != nil {
+		return err
+	}
 
 	encoded, err := json.Marshal(record)
 	if err != nil {
@@ -112,10 +128,18 @@ func (r *JSONLRecorder) appendJSONL(ctx context.Context, name string, record any
 	if _, err := file.Write(append(encoded, '\n')); err != nil {
 		return err
 	}
+	if err := file.Chmod(0o600); err != nil {
+		return err
+	}
 	return nil
 }
 
 func sanitizeRouteTrace(trace RouteTrace) RouteTrace {
+	if trace.RecordedAt.IsZero() {
+		trace.RecordedAt = time.Now().UTC()
+	}
+	trace.RouteID = sanitizeAuditString(trace.RouteID)
+	trace.TaskID = sanitizeAuditString(trace.TaskID)
 	trace.TaskType = sanitizeAuditString(trace.TaskType)
 	trace.AccountAlias = sanitizeAuditString(trace.AccountAlias)
 	trace.ModelAlias = sanitizeAuditString(trace.ModelAlias)
@@ -127,6 +151,11 @@ func sanitizeRouteTrace(trace RouteTrace) RouteTrace {
 }
 
 func sanitizeTaskOutcome(outcome TaskOutcome) TaskOutcome {
+	if outcome.RecordedAt.IsZero() {
+		outcome.RecordedAt = time.Now().UTC()
+	}
+	outcome.RouteID = sanitizeAuditString(outcome.RouteID)
+	outcome.TaskID = sanitizeAuditString(outcome.TaskID)
 	outcome.TaskType = sanitizeAuditString(outcome.TaskType)
 	outcome.AccountAlias = sanitizeAuditString(outcome.AccountAlias)
 	outcome.ModelAlias = sanitizeAuditString(outcome.ModelAlias)
@@ -148,6 +177,20 @@ func sanitizeAuditStrings(values []string) []string {
 
 func sanitizeAuditString(value string) string {
 	value = skTokenPattern.ReplaceAllString(value, "[redacted]")
-	value = apiKeyTokenPattern.ReplaceAllString(value, "credential")
+	value = credentialTokenPattern.ReplaceAllString(value, "credential")
 	return strings.TrimSpace(value)
+}
+
+func ensurePrivateDir(path string) error {
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o700)
+}
+
+func chmodExistingFile(path string, mode os.FileMode) error {
+	if err := os.Chmod(path, mode); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }

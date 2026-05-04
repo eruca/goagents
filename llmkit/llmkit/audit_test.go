@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestJSONLRecorderRecordsRouteEvent(t *testing.T) {
@@ -17,6 +18,10 @@ func TestJSONLRecorderRecordsRouteEvent(t *testing.T) {
 	}
 
 	trace := RouteTrace{
+		RouteID:               "route-123",
+		TaskID:                "task-456",
+		Attempt:               2,
+		RecordedAt:            time.Date(2026, 5, 4, 10, 30, 0, 0, time.UTC),
 		TaskType:              "summarize",
 		AccountAlias:          "primary-account",
 		ModelAlias:            "fast-json",
@@ -46,6 +51,9 @@ func TestJSONLRecorderRecordsRouteEvent(t *testing.T) {
 	if got.TaskType != trace.TaskType || got.AccountAlias != trace.AccountAlias || got.ModelAlias != trace.ModelAlias || got.Provider != trace.Provider {
 		t.Fatalf("route event changed audit identity fields: got=%+v want=%+v", got, trace)
 	}
+	if got.RouteID != trace.RouteID || got.TaskID != trace.TaskID || got.Attempt != trace.Attempt || !got.RecordedAt.Equal(trace.RecordedAt) {
+		t.Fatalf("route event changed correlation fields: got=%+v want=%+v", got, trace)
+	}
 	if got.ScoreBreakdown["latency"] != 20 || len(got.CandidateModelAliases) != 2 {
 		t.Fatalf("route event did not preserve explainability fields: %+v", got)
 	}
@@ -59,6 +67,9 @@ func TestJSONLRecorderRecordsTaskOutcome(t *testing.T) {
 	}
 
 	outcome := TaskOutcome{
+		RouteID:        "route-123",
+		TaskID:         "task-456",
+		RecordedAt:     time.Date(2026, 5, 4, 10, 31, 0, 0, time.UTC),
 		TaskType:       "extract",
 		AccountAlias:   "backup-account",
 		ModelAlias:     "reliable-json",
@@ -86,9 +97,39 @@ func TestJSONLRecorderRecordsTaskOutcome(t *testing.T) {
 	if got.TaskType != outcome.TaskType || got.AccountAlias != outcome.AccountAlias || got.ModelAlias != outcome.ModelAlias || got.Provider != outcome.Provider {
 		t.Fatalf("task outcome changed audit identity fields: got=%+v want=%+v", got, outcome)
 	}
+	if got.RouteID != outcome.RouteID || got.TaskID != outcome.TaskID || !got.RecordedAt.Equal(outcome.RecordedAt) {
+		t.Fatalf("task outcome changed correlation fields: got=%+v want=%+v", got, outcome)
+	}
 	if got.Success || got.ErrorCode != "rate_limited" || got.LatencyMillis != 1234 {
 		t.Fatalf("task outcome did not preserve outcome fields: %+v", got)
 	}
+}
+
+func TestJSONLRecorderRestrictsDirectoryAndLogFilePermissions(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "llmkit")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	for _, name := range []string{"route-events.jsonl", "outcomes.jsonl"} {
+		if err := os.WriteFile(filepath.Join(home, name), []byte{}, 0o644); err != nil {
+			t.Fatalf("WriteFile(%s) returned error: %v", name, err)
+		}
+	}
+
+	recorder, err := NewJSONLRecorder(home)
+	if err != nil {
+		t.Fatalf("NewJSONLRecorder returned error: %v", err)
+	}
+	if err := recorder.RecordRoute(context.Background(), RouteTrace{RouteID: "route-1", TaskID: "task-1"}); err != nil {
+		t.Fatalf("RecordRoute returned error: %v", err)
+	}
+	if err := recorder.RecordOutcome(context.Background(), TaskOutcome{RouteID: "route-1", TaskID: "task-1"}); err != nil {
+		t.Fatalf("RecordOutcome returned error: %v", err)
+	}
+
+	assertMode(t, home, 0o700)
+	assertMode(t, filepath.Join(home, "route-events.jsonl"), 0o600)
+	assertMode(t, filepath.Join(home, "outcomes.jsonl"), 0o600)
 }
 
 func TestJSONLRecorderDoesNotWriteAPIKeyFields(t *testing.T) {
@@ -99,6 +140,8 @@ func TestJSONLRecorderDoesNotWriteAPIKeyFields(t *testing.T) {
 	}
 
 	if err := recorder.RecordRoute(context.Background(), RouteTrace{
+		RouteID:      "route-secret",
+		TaskID:       "task-secret",
 		TaskType:     "chat",
 		AccountAlias: "account-openai-prod",
 		ModelAlias:   "gpt-prod",
@@ -108,6 +151,8 @@ func TestJSONLRecorderDoesNotWriteAPIKeyFields(t *testing.T) {
 		t.Fatalf("RecordRoute returned error: %v", err)
 	}
 	if err := recorder.RecordOutcome(context.Background(), TaskOutcome{
+		RouteID:      "route-secret",
+		TaskID:       "task-secret",
 		TaskType:     "chat",
 		AccountAlias: "account-openai-prod",
 		ModelAlias:   "gpt-prod",
@@ -123,11 +168,30 @@ func TestJSONLRecorderDoesNotWriteAPIKeyFields(t *testing.T) {
 			t.Fatalf("ReadFile(%s) returned error: %v", name, err)
 		}
 		lower := strings.ToLower(string(raw))
-		for _, forbidden := range []string{"api_key", "apikey", "secret_key", "bearer", "sk-test-should-not-appear"} {
+		for _, forbidden := range []string{"secret_key", "bearer", "sk-test-should-not-appear"} {
 			if strings.Contains(lower, forbidden) {
 				t.Fatalf("%s contains forbidden sensitive marker %q: %s", name, forbidden, string(raw))
 			}
 		}
+
+		var fields map[string]any
+		if err := json.Unmarshal(bytesBeforeNewline(raw), &fields); err != nil {
+			t.Fatalf("%s first line is not a JSON object: %v; raw=%s", name, err, string(raw))
+		}
+		for _, forbidden := range []string{"api_key", "apiKey", "token", "authorization", "headers", "secret"} {
+			if _, ok := fields[forbidden]; ok {
+				t.Fatalf("%s contains forbidden top-level credential field %q: %v", name, forbidden, fields)
+			}
+		}
+	}
+
+	lines := readJSONLLines(t, filepath.Join(home, "outcomes.jsonl"))
+	var outcome TaskOutcome
+	if err := json.Unmarshal([]byte(lines[0]), &outcome); err != nil {
+		t.Fatalf("outcome is not valid JSON: %v", err)
+	}
+	if outcome.ErrorCode != "invalid_api_key" {
+		t.Fatalf("ErrorCode = %q, want invalid_api_key", outcome.ErrorCode)
 	}
 }
 
@@ -143,4 +207,23 @@ func readJSONLLines(t *testing.T, path string) []string {
 		return nil
 	}
 	return strings.Split(trimmed, "\n")
+}
+
+func assertMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat(%s) returned error: %v", path, err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Fatalf("%s mode = %#o, want %#o", path, got, want)
+	}
+}
+
+func bytesBeforeNewline(raw []byte) []byte {
+	if index := strings.IndexByte(string(raw), '\n'); index >= 0 {
+		return raw[:index]
+	}
+	return raw
 }
