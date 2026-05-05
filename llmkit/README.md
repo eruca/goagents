@@ -74,14 +74,16 @@ if err != nil {
     return err
 }
 
+providers, err := goagentadapter.OpenAICompatibleProvidersFromConfig(*config, os.Getenv, nil)
+if err != nil {
+    return err
+}
+
 client := goagentadapter.NewClient(goagentadapter.Config{
     Candidates: config.Candidates(),
-    Providers: map[string]goagentadapter.ProviderClient{
-        "local-free":     localProvider,
-        "cloud-advanced": cloudProvider,
-    },
+    Providers:  providers,
     ProfileProvider: func(ctx context.Context, req ports.ChatRequest) llmkit.TaskProfile {
-        profile := llmkit.DefaultTaskProfile()
+        profile := config.DefaultTaskProfile()
         profile.Source = llmkit.ProfileSourceHost
         profile.TaskType = "answer"
         profile.Complexity = llmkit.ComplexityHard
@@ -110,6 +112,8 @@ import (
 ```
 
 The provider map keys must match `Candidate.Model.Alias`. Missing provider-backed candidates are skipped before routing.
+
+`OpenAICompatibleProvidersFromConfig` supports `provider: openai`, `provider: openai_compatible`, and local OpenAI-compatible servers. It uses account `base_url`, model `model`, and account `api_key_env`; if `model` is omitted, the model alias is used as the provider model id. Passing `nil` as the HTTP client uses the default client.
 
 ## Independent Testing
 

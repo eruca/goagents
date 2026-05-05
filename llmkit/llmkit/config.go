@@ -32,6 +32,7 @@ type AuditConfig struct {
 type AccountConfig struct {
 	Alias          string `yaml:"alias,omitempty" json:"alias,omitempty"`
 	Provider       string `yaml:"provider,omitempty" json:"provider,omitempty"`
+	BaseURL        string `yaml:"base_url,omitempty" json:"base_url,omitempty"`
 	APIKeyEnv      string `yaml:"api_key_env,omitempty" json:"api_key_env,omitempty"`
 	APIKey         string `yaml:"api_key,omitempty" json:"-"`
 	MaxConcurrency int    `yaml:"max_concurrency,omitempty" json:"max_concurrency,omitempty"`
@@ -40,6 +41,7 @@ type AccountConfig struct {
 // ModelConfig describes one configured model/account route candidate.
 type ModelConfig struct {
 	Alias              string             `yaml:"alias,omitempty" json:"alias,omitempty"`
+	ModelName          string             `yaml:"model,omitempty" json:"model,omitempty"`
 	Provider           string             `yaml:"provider,omitempty" json:"provider,omitempty"`
 	AccountAlias       string             `yaml:"account_alias,omitempty" json:"account_alias,omitempty"`
 	IsLocal            bool               `yaml:"is_local,omitempty" json:"is_local,omitempty"`

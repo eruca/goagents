@@ -10,16 +10,19 @@ audit:
 accounts:
   - alias: local-dev
     provider: local
+    base_url: http://127.0.0.1:1234/v1
     api_key_env: LLMKIT_LOCAL_API_KEY
     max_concurrency: 4
 
   - alias: cloud-primary
-    provider: openai
+    provider: openai_compatible
+    base_url: https://api.example.com/v1
     api_key_env: OPENAI_API_KEY
     max_concurrency: 8
 
 models:
   - alias: local-free
+    model: local-small
     provider: local
     account_alias: local-dev
     is_local: true
@@ -34,7 +37,8 @@ models:
       - simple
 
   - alias: cloud-advanced
-    provider: openai
+    model: gpt-advanced
+    provider: openai_compatible
     account_alias: cloud-primary
     is_local: false
     capability_level: advanced

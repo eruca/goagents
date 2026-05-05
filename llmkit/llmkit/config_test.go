@@ -15,14 +15,17 @@ audit:
 accounts:
   - alias: local-dev
     provider: local
+    base_url: http://127.0.0.1:1234/v1
     api_key_env: LLMKIT_LOCAL_API_KEY
     max_concurrency: 4
   - alias: cloud-primary
     provider: openai
+    base_url: https://api.example.com/v1
     api_key_env: OPENAI_API_KEY
     max_concurrency: 8
 models:
   - alias: local-free
+    model: local-small
     provider: local
     account_alias: local-dev
     is_local: true
@@ -32,6 +35,7 @@ models:
     latency_class: fast
     max_concurrency: 4
   - alias: cloud-advanced
+    model: gpt-advanced
     provider: openai
     account_alias: cloud-primary
     capability_level: advanced
@@ -88,8 +92,14 @@ routing:
 	if local.AccountMaxConcurrency != 4 {
 		t.Fatalf("local account max concurrency = %d, want 4", local.AccountMaxConcurrency)
 	}
+	if config.Accounts[0].BaseURL != "http://127.0.0.1:1234/v1" {
+		t.Fatalf("local base URL = %q, want local server", config.Accounts[0].BaseURL)
+	}
 	if !local.Model.IsLocal {
 		t.Fatal("local model IsLocal = false, want true")
+	}
+	if config.Models[0].ModelName != "local-small" {
+		t.Fatalf("local model name = %q, want local-small", config.Models[0].ModelName)
 	}
 	if local.Model.PriceClass != PriceFree {
 		t.Fatalf("local price class = %q, want free", local.Model.PriceClass)
