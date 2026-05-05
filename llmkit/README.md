@@ -51,6 +51,18 @@ Hosts provide `TaskProfile`; llmkit does not infer business risk from prompt tex
 
 Audit records intentionally avoid prompts, responses, headers, and API keys. The recorder also sanitizes key-like strings before writing JSONL.
 
+Hosts can periodically rebuild `model-stats.json` from those audit files:
+
+```go
+stats, err := llmkit.RefreshModelStats(llmkitHome)
+if err != nil {
+    return err
+}
+_ = stats
+```
+
+`model-stats.json` groups records by `task_type`, `account_alias`, `model_alias`, and `provider`. Each bucket includes route attempts, completed outcomes, pending outcomes, success/failure rates, average latency, average token counts, average estimated cents, and last seen time. The file is derived data: keep `route-events.jsonl` and `outcomes.jsonl` as the append-only source of truth.
+
 ## API Keys
 
 Do not store plaintext API keys in llmkit config files or audit files. Configuration should reference secret material through environment variable names such as `api_key_env: OPENAI_API_KEY`, account aliases, or a host-owned secret store.
@@ -117,7 +129,7 @@ The provider map keys must match `Candidate.Model.Alias`. Missing provider-backe
 
 When a selected provider fails, the adapter removes that candidate and asks the policy to select the next best provider-backed candidate. Each attempted route is recorded with an incremented `attempt` value when a recorder is configured.
 
-See `examples/goagent-routing` for a minimal host-style example that loads `LLMKIT_HOME/config.yaml`, builds OpenAI-compatible providers, wires the goagent adapter, runs one request, writes `route-events.jsonl`, and then writes a host-owned `outcomes.jsonl` record.
+See `examples/goagent-routing` for a minimal host-style example that loads `LLMKIT_HOME/config.yaml`, builds OpenAI-compatible providers, wires the goagent adapter, runs one request, and writes `route-events.jsonl` plus `outcomes.jsonl`.
 
 ## Independent Testing
 
