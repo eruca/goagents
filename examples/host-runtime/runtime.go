@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/eruca/artifactkit"
 	"github.com/eruca/goagent/agentcore"
 	"github.com/eruca/goagent/ports"
 	goagentadapter "github.com/eruca/llmkit/adapters/goagent"
@@ -28,13 +29,8 @@ type Approval struct {
 	Note       string
 }
 
-type Artifact struct {
-	Ref     string
-	Content string
-}
-
 type Runtime struct {
-	Artifacts *MemoryArtifactStore
+	Artifacts artifactkit.Store
 	AgentRuns *MemoryAgentRunStore
 
 	store    workflowkit.Store
@@ -45,7 +41,7 @@ func NewRuntime(config Config) (*Runtime, error) {
 	if strings.TrimSpace(config.LLMKitHome) == "" {
 		return nil, fmt.Errorf("LLMKitHome is required")
 	}
-	artifacts := NewMemoryArtifactStore()
+	artifacts := artifactkit.NewMemoryStore()
 	agentRuns := NewMemoryAgentRunStore()
 	runtime := &Runtime{
 		Artifacts: artifacts,
@@ -65,7 +61,7 @@ func (r *Runtime) Start(ctx context.Context, task Task) (workflowkit.WorkflowRun
 		return workflowkit.WorkflowRun{}, fmt.Errorf("task ID is required")
 	}
 	inputRef := "artifact:" + task.ID + ":input"
-	if err := r.Artifacts.Put(ctx, Artifact{Ref: inputRef, Content: task.Input}); err != nil {
+	if err := putTextArtifact(ctx, r.Artifacts, inputRef, task.Input); err != nil {
 		return workflowkit.WorkflowRun{}, err
 	}
 	return r.executor.Run(ctx, workflowkit.WorkflowRun{
@@ -102,7 +98,7 @@ func (r *Runtime) agentReviewStep(llmkitHome string) workflowkit.Step {
 	}, agentstep.WithResultMapper(func(run workflowkit.WorkflowRun, result *agentcore.RunResult) workflowkit.StepResult {
 		outputRef := "artifact:" + run.ID + ":agent-output"
 		if result != nil {
-			_ = r.Artifacts.Put(context.Background(), Artifact{Ref: outputRef, Content: result.Content})
+			_ = putTextArtifact(context.Background(), r.Artifacts, outputRef, result.Content)
 		}
 		agentRunID := ""
 		if result != nil {
@@ -122,7 +118,7 @@ func (r *Runtime) agentReviewStep(llmkitHome string) workflowkit.Step {
 }
 
 type ingestStep struct {
-	artifacts *MemoryArtifactStore
+	artifacts artifactkit.Store
 }
 
 func (s ingestStep) Name() string {
@@ -143,7 +139,7 @@ func (s ingestStep) Run(ctx context.Context, run workflowkit.WorkflowRun) (workf
 }
 
 type finalizeStep struct {
-	artifacts *MemoryArtifactStore
+	artifacts artifactkit.Store
 }
 
 func (s finalizeStep) Name() string {
@@ -160,10 +156,8 @@ func (s finalizeStep) Run(ctx context.Context, run workflowkit.WorkflowRun) (wor
 		return workflowkit.StepResult{}, err
 	}
 	outputRef := "artifact:" + run.ID + ":final"
-	if err := s.artifacts.Put(ctx, Artifact{
-		Ref:     outputRef,
-		Content: source.Content + "\n\napproved by " + approvedBy,
-	}); err != nil {
+	content := string(source.Content) + "\n\napproved by " + approvedBy
+	if err := putTextArtifact(ctx, s.artifacts, outputRef, content); err != nil {
 		return workflowkit.StepResult{}, err
 	}
 	return workflowkit.StepResult{
@@ -261,39 +255,12 @@ func (p staticProvider) Chat(context.Context, ports.ChatRequest) (*ports.ChatRes
 	}, nil
 }
 
-type MemoryArtifactStore struct {
-	mu        sync.RWMutex
-	artifacts map[string]Artifact
-}
-
-func NewMemoryArtifactStore() *MemoryArtifactStore {
-	return &MemoryArtifactStore{artifacts: map[string]Artifact{}}
-}
-
-func (s *MemoryArtifactStore) Put(ctx context.Context, artifact Artifact) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if strings.TrimSpace(artifact.Ref) == "" {
-		return fmt.Errorf("artifact ref is required")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.artifacts[artifact.Ref] = artifact
-	return nil
-}
-
-func (s *MemoryArtifactStore) Get(ctx context.Context, ref string) (Artifact, error) {
-	if err := ctx.Err(); err != nil {
-		return Artifact{}, err
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	artifact, ok := s.artifacts[ref]
-	if !ok {
-		return Artifact{}, fmt.Errorf("artifact %q not found", ref)
-	}
-	return artifact, nil
+func putTextArtifact(ctx context.Context, store artifactkit.Store, ref string, content string) error {
+	return store.Put(ctx, artifactkit.Artifact{
+		Ref:         ref,
+		Content:     []byte(content),
+		ContentType: "text/plain",
+	})
 }
 
 type MemoryAgentRunStore struct {

@@ -42,8 +42,8 @@ func TestRuntimeRunsAgentWorkflowWithArtifactsAuditAndLLMRouting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Artifacts.Get(agent output) returned error: %v", err)
 	}
-	if !strings.Contains(agentOutput.Content, "host runtime draft") {
-		t.Fatalf("agent output content = %q, want host runtime draft", agentOutput.Content)
+	if !strings.Contains(string(agentOutput.Content), "host runtime draft") {
+		t.Fatalf("agent output content = %q, want host runtime draft", string(agentOutput.Content))
 	}
 
 	events := runtime.AgentRuns.Events(run.AgentRunID)
@@ -80,8 +80,8 @@ func TestRuntimeRunsAgentWorkflowWithArtifactsAuditAndLLMRouting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Artifacts.Get(final output) returned error: %v", err)
 	}
-	if !strings.Contains(finalArtifact.Content, "approved by operator-1") {
-		t.Fatalf("final artifact content = %q, want approval marker", finalArtifact.Content)
+	if !strings.Contains(string(finalArtifact.Content), "approved by operator-1") {
+		t.Fatalf("final artifact content = %q, want approval marker", string(finalArtifact.Content))
 	}
 }
 

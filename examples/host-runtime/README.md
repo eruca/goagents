@@ -6,7 +6,8 @@ new core framework. It shows how an application can compose existing modules:
 - `workflowkit` owns the application workflow lifecycle.
 - `goagent` owns the single ReAct-style agent run.
 - `llmkit` owns LLM model/account routing and route/outcome audit files.
-- Host-owned stores keep artifacts and agent events behind refs.
+- `artifactkit` keeps full payloads behind artifact refs.
+- A host-owned store keeps agent events behind refs.
 
 The example workflow is:
 
@@ -29,8 +30,8 @@ LLMKIT_HOME=/tmp/host-runtime-llmkit go run .
 ```
 
 The runtime writes `route-events.jsonl` and `outcomes.jsonl` under
-`LLMKIT_HOME`, while artifacts and agent events stay in process-local memory for
-this skeleton.
+`LLMKIT_HOME`, while `artifactkit.MemoryStore` and the agent event store stay in
+process-local memory for this skeleton.
 
 This example deliberately leaves production concerns to the host application:
 HTTP APIs, durable database schemas, artifact blob storage, authentication,
