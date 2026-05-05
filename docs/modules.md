@@ -23,6 +23,7 @@ Optional adapter/capability modules:
 
 Verification/example modules:
 
+- `github.com/eruca/goagents/examples/host-runtime`
 - `github.com/eruca/workflowkit/examples/agent-approval`
 - `github.com/eruca/workflowkit/examples/ocr-review`
 
@@ -46,6 +47,7 @@ Adapter and composition modules may depend on multiple core modules:
 ```text
 workflowkit/agentstep        may import workflowkit + goagent
 llmkit adapters              may import llmkit + goagent
+examples/host-runtime        may import workflowkit + agentstep + goagent + llmkit
 examples/agent-approval      may import workflowkit + agentstep + goagent
 examples/ocr-review          may import workflowkit + agentstep + goagent + contextkit + ocrs
 host applications            compose whatever modules they need
@@ -89,16 +91,13 @@ Module-specific checks:
 (cd contextkit && go test ./...)
 (cd ocrs && go test ./...)
 (cd llmkit && go test ./...)
+(cd examples/host-runtime && go test ./...)
 (cd goagent && make verify)
 (cd workflowkit && ./scripts/verify-e2e.sh)
 ```
 
-## Current Git Migration Note
+## Repository Layout Note
 
-`goagent/` currently contains its own `.git` directory and remote history. Until
-that history is intentionally absorbed or the directory is converted to a
-submodule, the root repository should avoid broad `git add .` commits that would
-accidentally stage `goagent` as a gitlink.
-
-Preferred end state: root repository tracks all module contents directly, with
-independent module tags as described above.
+The root repository tracks module contents directly. Keep feature work in
+isolated branches or worktrees, and keep generated worktree directories ignored
+by git.

@@ -5,6 +5,7 @@ use (
 	./goagent
 	./llmkit
 	./ocrs
+	./examples/host-runtime
 	./workflowkit
 	./workflowkit/agentstep
 	./workflowkit/examples/agent-approval
