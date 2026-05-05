@@ -27,6 +27,11 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	routeMetadata := goagentadapter.RouteMetadata{
+		RouteID: "route-example-1",
+		TaskID:  "task-example-1",
+		Attempt: 1,
+	}
 	providers, err := goagentadapter.OpenAICompatibleProvidersFromConfig(*config, os.Getenv, nil)
 	if err != nil {
 		panic(err)
@@ -45,13 +50,10 @@ func main() {
 			return profile
 		},
 		RouteMetadataProvider: func(context.Context, ports.ChatRequest) goagentadapter.RouteMetadata {
-			return goagentadapter.RouteMetadata{
-				RouteID: "route-example-1",
-				TaskID:  "task-example-1",
-				Attempt: 1,
-			}
+			return routeMetadata
 		},
-		Recorder: recorder,
+		Recorder:       recorder,
+		RecordOutcomes: true,
 	})
 
 	agent, err := agentcore.NewAgent(

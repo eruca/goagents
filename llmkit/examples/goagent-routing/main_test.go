@@ -62,6 +62,41 @@ func TestGoagentRoutingExampleWritesRouteAudit(t *testing.T) {
 	if event.Provider != "local" {
 		t.Fatalf("event provider = %q, want local", event.Provider)
 	}
+
+	outcomeData, err := os.ReadFile(filepath.Join(home, "outcomes.jsonl"))
+	if err != nil {
+		t.Fatalf("read outcomes: %v", err)
+	}
+	outcomeLines := strings.Split(strings.TrimSpace(string(outcomeData)), "\n")
+	if len(outcomeLines) != 1 {
+		t.Fatalf("outcome lines = %d, want 1", len(outcomeLines))
+	}
+	var outcome struct {
+		RouteID      string `json:"route_id"`
+		TaskID       string `json:"task_id"`
+		Attempt      int    `json:"attempt"`
+		ModelAlias   string `json:"model_alias"`
+		AccountAlias string `json:"account_alias"`
+		Provider     string `json:"provider"`
+		Success      bool   `json:"success"`
+		InputTokens  int    `json:"input_tokens"`
+		OutputTokens int    `json:"output_tokens"`
+	}
+	if err := json.Unmarshal([]byte(outcomeLines[0]), &outcome); err != nil {
+		t.Fatalf("decode outcome: %v", err)
+	}
+	if outcome.RouteID != event.RouteID || outcome.TaskID != event.TaskID || outcome.Attempt != event.Attempt {
+		t.Fatalf("outcome metadata = %+v, want same route/task/attempt as %+v", outcome, event)
+	}
+	if !outcome.Success {
+		t.Fatal("outcome success = false, want true")
+	}
+	if outcome.ModelAlias != "local-free" || outcome.AccountAlias != "local-dev" || outcome.Provider != "local" {
+		t.Fatalf("outcome route fields = %+v, want local-free/local-dev/local", outcome)
+	}
+	if outcome.InputTokens != 4 || outcome.OutputTokens != 5 {
+		t.Fatalf("outcome usage = %d/%d, want 4/5", outcome.InputTokens, outcome.OutputTokens)
+	}
 }
 
 func startOpenAICompatibleServer(t *testing.T) *httptest.Server {

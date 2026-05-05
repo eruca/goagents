@@ -177,6 +177,100 @@ func TestClientSkipsCandidateWithoutProvider(t *testing.T) {
 	}
 }
 
+func TestClientFallsBackToNextCandidateWhenSelectedProviderFails(t *testing.T) {
+	local := &fakeProviderClient{err: errors.New("local unavailable")}
+	cloud := &fakeProviderClient{response: &ports.ChatResponse{Content: "cloud fallback"}}
+	recorder := &fakeRecorder{}
+
+	client := NewClient(Config{
+		Candidates: testCandidates(),
+		Providers: map[string]ProviderClient{
+			"local-small":    local,
+			"cloud-advanced": cloud,
+		},
+		ProfileProvider: fixedProfile(simpleProfile()),
+		RouteMetadataProvider: fixedRouteMetadata(RouteMetadata{
+			RouteID: "route-fallback",
+			TaskID:  "task-fallback",
+			Attempt: 1,
+		}),
+		Recorder: recorder,
+	})
+
+	resp, err := client.Chat(context.Background(), ports.ChatRequest{})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if resp.Content != "cloud fallback" {
+		t.Fatalf("Chat() response content = %q, want cloud fallback", resp.Content)
+	}
+	if len(local.requests) != 1 {
+		t.Fatalf("local provider calls = %d, want 1", len(local.requests))
+	}
+	if len(cloud.requests) != 1 {
+		t.Fatalf("cloud provider calls = %d, want 1", len(cloud.requests))
+	}
+	if len(recorder.routes) != 2 {
+		t.Fatalf("recorded route traces = %d, want 2", len(recorder.routes))
+	}
+	if recorder.routes[0].ModelAlias != "local-small" || recorder.routes[0].Attempt != 1 {
+		t.Fatalf("first route = %+v, want local-small attempt 1", recorder.routes[0])
+	}
+	if recorder.routes[1].ModelAlias != "cloud-advanced" || recorder.routes[1].Attempt != 2 {
+		t.Fatalf("second route = %+v, want cloud-advanced attempt 2", recorder.routes[1])
+	}
+}
+
+func TestClientRecordsOutcomesForFallbackAttemptsWhenEnabled(t *testing.T) {
+	local := &fakeProviderClient{err: errors.New("local unavailable")}
+	cloud := &fakeProviderClient{response: &ports.ChatResponse{
+		Content: "cloud fallback",
+		Usage: ports.Usage{
+			InputTokens:  7,
+			OutputTokens: 11,
+		},
+	}}
+	recorder := &fakeRecorder{}
+
+	client := NewClient(Config{
+		Candidates: testCandidates(),
+		Providers: map[string]ProviderClient{
+			"local-small":    local,
+			"cloud-advanced": cloud,
+		},
+		ProfileProvider: fixedProfile(simpleProfile()),
+		RouteMetadataProvider: fixedRouteMetadata(RouteMetadata{
+			RouteID: "route-outcome-fallback",
+			TaskID:  "task-outcome-fallback",
+			Attempt: 1,
+		}),
+		Recorder:       recorder,
+		RecordOutcomes: true,
+	})
+
+	resp, err := client.Chat(context.Background(), ports.ChatRequest{})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if resp.Content != "cloud fallback" {
+		t.Fatalf("Chat() response content = %q, want cloud fallback", resp.Content)
+	}
+	if len(recorder.outcomes) != 2 {
+		t.Fatalf("recorded outcomes = %d, want 2", len(recorder.outcomes))
+	}
+	first := recorder.outcomes[0]
+	if first.Success || first.ModelAlias != "local-small" || first.Attempt != 1 || first.ErrorCode == "" {
+		t.Fatalf("first outcome = %+v, want failed local attempt", first)
+	}
+	second := recorder.outcomes[1]
+	if !second.Success || second.ModelAlias != "cloud-advanced" || second.Attempt != 2 {
+		t.Fatalf("second outcome = %+v, want successful cloud attempt", second)
+	}
+	if second.InputTokens != 7 || second.OutputTokens != 11 {
+		t.Fatalf("second outcome usage = %d/%d, want 7/11", second.InputTokens, second.OutputTokens)
+	}
+}
+
 func TestClientReturnsErrorWhenNoProviderBackedCandidateCanHandleTask(t *testing.T) {
 	client := NewClient(Config{
 		Candidates:      testCandidates(),
@@ -293,6 +387,7 @@ func (f *fakeProviderClient) Chat(_ context.Context, req ports.ChatRequest) (*po
 type fakeRecorder struct {
 	routeErr error
 	routes   []llmkit.RouteTrace
+	outcomes []llmkit.TaskOutcome
 }
 
 func (f *fakeRecorder) RecordRoute(_ context.Context, trace llmkit.RouteTrace) error {
@@ -303,8 +398,9 @@ func (f *fakeRecorder) RecordRoute(_ context.Context, trace llmkit.RouteTrace) e
 	return nil
 }
 
-func (f *fakeRecorder) RecordOutcome(context.Context, llmkit.TaskOutcome) error {
-	return errors.New("outcome recording is not used by goagent adapter")
+func (f *fakeRecorder) RecordOutcome(_ context.Context, outcome llmkit.TaskOutcome) error {
+	f.outcomes = append(f.outcomes, outcome)
+	return nil
 }
 
 func (f *fakeRecorder) singleRouteTrace(t *testing.T) llmkit.RouteTrace {
