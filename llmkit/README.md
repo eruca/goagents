@@ -63,6 +63,23 @@ _ = stats
 
 `model-stats.json` groups records by `task_type`, `account_alias`, `model_alias`, and `provider`. Each bucket includes route attempts, completed outcomes, pending outcomes, success/failure rates, average latency, average token counts, average estimated cents, and last seen time. The file is derived data: keep `route-events.jsonl` and `outcomes.jsonl` as the append-only source of truth.
 
+To make routing use this history, load the generated stats and pass them to the adapter:
+
+```go
+modelStats, err := llmkit.LoadModelStats(llmkitHome)
+if err != nil {
+    return err
+}
+
+client := goagentadapter.NewClient(goagentadapter.Config{
+    Candidates: config.Candidates(),
+    Providers:  providers,
+    ModelStats: modelStats,
+})
+```
+
+The adapter applies stats after it receives the current `TaskProfile`, so history is task-type aware. Without `ModelStats`, routing behavior is unchanged.
+
 ## API Keys
 
 Do not store plaintext API keys in llmkit config files or audit files. Configuration should reference secret material through environment variable names such as `api_key_env: OPENAI_API_KEY`, account aliases, or a host-owned secret store.

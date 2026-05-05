@@ -82,6 +82,60 @@ func TestClientRoutesSimpleProfileToSelectedProviderAndRecordsTrace(t *testing.T
 	}
 }
 
+func TestClientAppliesModelStatsAfterProfileSelection(t *testing.T) {
+	local := &fakeProviderClient{response: &ports.ChatResponse{Content: "local"}}
+	cloud := &fakeProviderClient{response: &ports.ChatResponse{Content: "cloud"}}
+	recorder := &fakeRecorder{}
+	stats := &llmkit.ModelStats{
+		Models: map[string]llmkit.ModelStatsEntry{
+			"simple|local-account|local-small|local": {
+				TaskType:         "simple",
+				AccountAlias:     "local-account",
+				ModelAlias:       "local-small",
+				Provider:         "local",
+				OutcomeCount:     10,
+				Failures:         9,
+				FailureRate:      0.9,
+				AvgLatencyMillis: 200,
+			},
+		},
+	}
+
+	client := NewClient(Config{
+		Candidates: testCandidates(),
+		Providers: map[string]ProviderClient{
+			"local-small":    local,
+			"cloud-advanced": cloud,
+		},
+		ProfileProvider: fixedProfile(simpleProfile()),
+		RouteMetadataProvider: fixedRouteMetadata(RouteMetadata{
+			RouteID: "route-stats",
+			TaskID:  "task-stats",
+			Attempt: 1,
+		}),
+		Recorder:   recorder,
+		ModelStats: stats,
+	})
+
+	resp, err := client.Chat(context.Background(), ports.ChatRequest{})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if resp.Content != "cloud" {
+		t.Fatalf("Chat() response content = %q, want cloud", resp.Content)
+	}
+	if len(local.requests) != 0 {
+		t.Fatalf("local provider calls = %d, want 0", len(local.requests))
+	}
+	if len(cloud.requests) != 1 {
+		t.Fatalf("cloud provider calls = %d, want 1", len(cloud.requests))
+	}
+	trace := recorder.singleRouteTrace(t)
+	if trace.ModelAlias != "cloud-advanced" {
+		t.Fatalf("trace ModelAlias = %q, want cloud-advanced", trace.ModelAlias)
+	}
+}
+
 func TestClientRoutesHardProfileToSelectedProviderAndRecordsTrace(t *testing.T) {
 	local := &fakeProviderClient{response: &ports.ChatResponse{Content: "local"}}
 	cloud := &fakeProviderClient{response: &ports.ChatResponse{Content: "cloud"}}

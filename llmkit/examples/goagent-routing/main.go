@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
@@ -36,24 +37,33 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	exampleProfile := config.DefaultTaskProfile()
+	exampleProfile.Source = llmkit.ProfileSourceHost
+	exampleProfile.TaskType = "example"
+	exampleProfile.Complexity = llmkit.ComplexitySimple
+	exampleProfile.FailureCost = llmkit.FailureCostLow
+	exampleProfile.Privacy = llmkit.PrivacyLocalPreferred
+
+	var modelStats *llmkit.ModelStats
+	loadedStats, err := llmkit.LoadModelStats(home)
+	if err == nil {
+		modelStats = loadedStats
+	} else if !errors.Is(err, os.ErrNotExist) {
+		panic(err)
+	}
 
 	client := goagentadapter.NewClient(goagentadapter.Config{
 		Candidates: config.Candidates(),
 		Providers:  providers,
 		ProfileProvider: func(context.Context, ports.ChatRequest) llmkit.TaskProfile {
-			profile := config.DefaultTaskProfile()
-			profile.Source = llmkit.ProfileSourceHost
-			profile.TaskType = "example"
-			profile.Complexity = llmkit.ComplexitySimple
-			profile.FailureCost = llmkit.FailureCostLow
-			profile.Privacy = llmkit.PrivacyLocalPreferred
-			return profile
+			return exampleProfile
 		},
 		RouteMetadataProvider: func(context.Context, ports.ChatRequest) goagentadapter.RouteMetadata {
 			return routeMetadata
 		},
 		Recorder:       recorder,
 		RecordOutcomes: true,
+		ModelStats:     modelStats,
 	})
 
 	agent, err := agentcore.NewAgent(

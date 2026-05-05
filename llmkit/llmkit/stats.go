@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -77,6 +78,47 @@ func BuildModelStats(home string) (*ModelStats, error) {
 	}
 
 	return builder.stats(), nil
+}
+
+// LoadModelStats reads model-stats.json from home.
+func LoadModelStats(home string) (*ModelStats, error) {
+	raw, err := os.ReadFile(filepath.Join(home, modelStatsFile))
+	if err != nil {
+		return nil, err
+	}
+	var stats ModelStats
+	if err := json.Unmarshal(raw, &stats); err != nil {
+		return nil, err
+	}
+	if stats.Models == nil {
+		stats.Models = map[string]ModelStatsEntry{}
+	}
+	return &stats, nil
+}
+
+// ApplyModelStats returns a candidate copy enriched with task-specific history.
+// Hosts call this explicitly when they want model-stats.json to influence route
+// scoring through ModelCapability recent reliability fields.
+func ApplyModelStats(stats ModelStats, profile TaskProfile, candidates []Candidate) []Candidate {
+	if len(candidates) == 0 || len(stats.Models) == 0 {
+		return append([]Candidate(nil), candidates...)
+	}
+
+	enriched := make([]Candidate, len(candidates))
+	copy(enriched, candidates)
+	for i := range enriched {
+		entry, ok := stats.Models[modelStatsKey(profile.TaskType, enriched[i].AccountAlias, enriched[i].Model.Alias, enriched[i].Model.Provider)]
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(entry.TaskType) != "" && entry.TaskType != profile.TaskType {
+			continue
+		}
+		enriched[i].Model.RecentFailureCount = entry.Failures
+		enriched[i].Model.RecentFailureRate = entry.FailureRate
+		enriched[i].Model.RecentLatencyMillis = entry.AvgLatencyMillis
+	}
+	return enriched
 }
 
 // WriteModelStats writes model-stats.json under home with private permissions.

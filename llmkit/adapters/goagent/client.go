@@ -41,6 +41,7 @@ type Config struct {
 	RouteMetadataProvider RouteMetadataProvider
 	Recorder              llmkit.Recorder
 	RecordOutcomes        bool
+	ModelStats            *llmkit.ModelStats
 }
 
 // Client implements goagent's LLMClient by routing to a provider client.
@@ -52,6 +53,7 @@ type Client struct {
 	routeMetadataProvider RouteMetadataProvider
 	recorder              llmkit.Recorder
 	recordOutcomes        bool
+	modelStats            *llmkit.ModelStats
 }
 
 // NewClient creates a goagent LLMClient adapter.
@@ -72,6 +74,7 @@ func NewClient(config Config) *Client {
 		routeMetadataProvider: config.RouteMetadataProvider,
 		recorder:              config.Recorder,
 		recordOutcomes:        config.RecordOutcomes,
+		modelStats:            config.ModelStats,
 	}
 }
 
@@ -83,7 +86,7 @@ func (c *Client) Chat(ctx context.Context, req ports.ChatRequest) (*ports.ChatRe
 		profile = c.profileProvider(ctx, req)
 	}
 
-	candidates := c.availableCandidates()
+	candidates := c.availableCandidates(profile)
 	var failures []error
 	for attemptOffset := 0; len(candidates) > 0; attemptOffset++ {
 		decision, err := c.policy.Select(profile, candidates)
@@ -149,7 +152,7 @@ func (c *Client) recordOutcome(ctx context.Context, trace llmkit.RouteTrace, res
 	return c.recorder.RecordOutcome(ctx, outcome)
 }
 
-func (c *Client) availableCandidates() []llmkit.Candidate {
+func (c *Client) availableCandidates(profile llmkit.TaskProfile) []llmkit.Candidate {
 	if len(c.candidates) == 0 {
 		return nil
 	}
@@ -160,6 +163,9 @@ func (c *Client) availableCandidates() []llmkit.Candidate {
 			continue
 		}
 		available = append(available, candidate)
+	}
+	if c.modelStats != nil {
+		available = llmkit.ApplyModelStats(*c.modelStats, profile, available)
 	}
 	return available
 }

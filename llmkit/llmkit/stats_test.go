@@ -176,3 +176,143 @@ func TestRefreshModelStatsAggregatesOutcomesAndPendingRoutes(t *testing.T) {
 		t.Fatalf("model-stats.json did not persist aggregated stats: %+v", fromDisk)
 	}
 }
+
+func TestApplyModelStatsMakesPolicyPreferReliableModelForHighFailureCostTask(t *testing.T) {
+	profile := DefaultTaskProfile()
+	profile.TaskType = "rewrite"
+	profile.FailureCost = FailureCostHigh
+
+	stats := ModelStats{
+		Models: map[string]ModelStatsEntry{
+			"rewrite|local-account|local-balanced|local": {
+				TaskType:         "rewrite",
+				AccountAlias:     "local-account",
+				ModelAlias:       "local-balanced",
+				Provider:         "local",
+				OutcomeCount:     10,
+				Failures:         8,
+				FailureRate:      0.8,
+				AvgLatencyMillis: 200,
+			},
+			"rewrite|cloud-account|cloud-balanced|openai": {
+				TaskType:         "rewrite",
+				AccountAlias:     "cloud-account",
+				ModelAlias:       "cloud-balanced",
+				Provider:         "openai",
+				OutcomeCount:     10,
+				Failures:         0,
+				FailureRate:      0,
+				AvgLatencyMillis: 900,
+			},
+		},
+	}
+	local := candidate("local-balanced", CapabilityBalanced, PriceFree, LatencyFastClass, true)
+	local.AccountAlias = "local-account"
+	local.Model.Provider = "local"
+	cloud := candidate("cloud-balanced", CapabilityBalanced, PriceLow, LatencyNormalClass, false)
+	cloud.AccountAlias = "cloud-account"
+	cloud.Model.Provider = "openai"
+
+	candidates := ApplyModelStats(stats, profile, []Candidate{local, cloud})
+	decision, err := RoutePolicy{}.Select(profile, candidates)
+	if err != nil {
+		t.Fatalf("Select returned error: %v", err)
+	}
+
+	if decision.SelectedAlias != "cloud-balanced" {
+		t.Fatalf("SelectedAlias = %q, want cloud-balanced; decision=%+v", decision.SelectedAlias, decision)
+	}
+	if decision.ScoreBreakdown["reliability"] != 0 {
+		t.Fatalf("selected cloud reliability = %d, want 0", decision.ScoreBreakdown["reliability"])
+	}
+	localScore := findCandidateScore(t, decision.Candidates, "local-balanced")
+	if localScore.ScoreBreakdown["reliability"] >= 0 {
+		t.Fatalf("local reliability score should be negative after stats enrichment: %+v", localScore.ScoreBreakdown)
+	}
+}
+
+func TestApplyModelStatsKeepsLocalPreferenceForSimpleTaskWithAcceptableHistory(t *testing.T) {
+	profile := DefaultTaskProfile()
+	profile.TaskType = "rewrite"
+	profile.Complexity = ComplexitySimple
+	profile.Latency = LatencyNone
+	profile.FailureCost = FailureCostLow
+	profile.Privacy = PrivacyLocalPreferred
+
+	stats := ModelStats{
+		Models: map[string]ModelStatsEntry{
+			"rewrite|local-account|local-simple|local": {
+				TaskType:         "rewrite",
+				AccountAlias:     "local-account",
+				ModelAlias:       "local-simple",
+				Provider:         "local",
+				OutcomeCount:     20,
+				Failures:         2,
+				FailureRate:      0.1,
+				AvgLatencyMillis: 250,
+			},
+		},
+	}
+	local := candidate("local-simple", CapabilitySimple, PriceFree, LatencyNormalClass, true)
+	local.AccountAlias = "local-account"
+	local.Model.Provider = "local"
+	cloud := candidate("cloud-balanced", CapabilityBalanced, PriceLow, LatencyNormalClass, false)
+	cloud.AccountAlias = "cloud-account"
+	cloud.Model.Provider = "openai"
+
+	candidates := ApplyModelStats(stats, profile, []Candidate{local, cloud})
+	decision, err := RoutePolicy{}.Select(profile, candidates)
+	if err != nil {
+		t.Fatalf("Select returned error: %v", err)
+	}
+
+	if decision.SelectedAlias != "local-simple" {
+		t.Fatalf("SelectedAlias = %q, want local-simple; decision=%+v", decision.SelectedAlias, decision)
+	}
+	if decision.ScoreBreakdown["reliability"] >= 0 {
+		t.Fatalf("selected local should carry a small history penalty: %+v", decision.ScoreBreakdown)
+	}
+}
+
+func TestLoadModelStatsReadsGeneratedStatsFile(t *testing.T) {
+	home := t.TempDir()
+	written := ModelStats{
+		GeneratedAt: time.Date(2026, 5, 5, 10, 0, 0, 0, time.UTC),
+		Models: map[string]ModelStatsEntry{
+			"rewrite|local|local-small|local": {
+				TaskType:      "rewrite",
+				AccountAlias:  "local",
+				ModelAlias:    "local-small",
+				Provider:      "local",
+				OutcomeCount:  4,
+				Failures:      1,
+				FailureRate:   0.25,
+				SuccessRate:   0.75,
+				RouteAttempts: 4,
+			},
+		},
+	}
+	if err := WriteModelStats(home, written); err != nil {
+		t.Fatalf("WriteModelStats returned error: %v", err)
+	}
+
+	loaded, err := LoadModelStats(home)
+	if err != nil {
+		t.Fatalf("LoadModelStats returned error: %v", err)
+	}
+	got := loaded.Models["rewrite|local|local-small|local"]
+	if got.FailureRate != 0.25 || got.SuccessRate != 0.75 || got.RouteAttempts != 4 {
+		t.Fatalf("loaded stats entry changed: %+v", got)
+	}
+}
+
+func findCandidateScore(t *testing.T, scores []CandidateScore, alias string) CandidateScore {
+	t.Helper()
+	for _, score := range scores {
+		if score.Alias == alias {
+			return score
+		}
+	}
+	t.Fatalf("candidate score %q not found in %+v", alias, scores)
+	return CandidateScore{}
+}
