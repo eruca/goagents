@@ -18,6 +18,20 @@ export LLMKIT_HOME=/srv/my-agent/.llmkit
 
 See `examples/config/.llmkit/config.yaml` for a configuration shape that uses only aliases and environment variable names.
 
+Load the host configuration explicitly:
+
+```go
+config, err := llmkit.LoadConfigFromEnv(os.Getenv)
+if err != nil {
+    return err
+}
+
+candidates := config.Candidates()
+defaultProfile := config.DefaultTaskProfile()
+```
+
+`LoadConfigFromEnv` resolves `LLMKIT_HOME` in production mode and reads `config.yaml`. `LoadConfig(home)` is available when a host has already resolved the directory. The loader validates account/model references and rejects plaintext `api_key`; it does not construct provider clients or read secret values from `api_key_env`.
+
 ## Routing Intent
 
 The default policy applies hard filters first, then ranks eligible candidates by capability, price, locality, latency, and recent reliability.
@@ -61,7 +75,7 @@ if err != nil {
 }
 
 client := goagentadapter.NewClient(goagentadapter.Config{
-    Candidates: candidates,
+    Candidates: config.Candidates(),
     Providers: map[string]goagentadapter.ProviderClient{
         "local-free":     localProvider,
         "cloud-advanced": cloudProvider,
