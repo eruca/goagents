@@ -109,20 +109,30 @@ type llmRoutesResponse struct {
 }
 
 type llmRouteResponse struct {
-	RouteID               string                   `json:"route_id,omitempty"`
-	TaskID                string                   `json:"task_id,omitempty"`
-	Attempt               int                      `json:"attempt,omitempty"`
-	TaskType              string                   `json:"task_type,omitempty"`
-	TaskProfile           *taskProfileResponse     `json:"task_profile,omitempty"`
-	AccountAlias          string                   `json:"account_alias,omitempty"`
-	ModelAlias            string                   `json:"model_alias,omitempty"`
-	Provider              string                   `json:"provider,omitempty"`
-	Selected              bool                     `json:"selected"`
-	Reason                string                   `json:"reason,omitempty"`
-	Score                 int                      `json:"score,omitempty"`
-	ScoreBreakdown        map[string]int           `json:"score_breakdown,omitempty"`
-	CandidateModelAliases []string                 `json:"candidate_model_aliases,omitempty"`
-	Outcome               *llmRouteOutcomeResponse `json:"outcome,omitempty"`
+	RouteID               string                      `json:"route_id,omitempty"`
+	TaskID                string                      `json:"task_id,omitempty"`
+	Attempt               int                         `json:"attempt,omitempty"`
+	TaskType              string                      `json:"task_type,omitempty"`
+	TaskProfile           *taskProfileResponse        `json:"task_profile,omitempty"`
+	AccountAlias          string                      `json:"account_alias,omitempty"`
+	ModelAlias            string                      `json:"model_alias,omitempty"`
+	Provider              string                      `json:"provider,omitempty"`
+	Selected              bool                        `json:"selected"`
+	Reason                string                      `json:"reason,omitempty"`
+	Score                 int                         `json:"score,omitempty"`
+	ScoreBreakdown        map[string]int              `json:"score_breakdown,omitempty"`
+	CandidateModelAliases []string                    `json:"candidate_model_aliases,omitempty"`
+	Candidates            []llmRouteCandidateResponse `json:"candidates,omitempty"`
+	Outcome               *llmRouteOutcomeResponse    `json:"outcome,omitempty"`
+}
+
+type llmRouteCandidateResponse struct {
+	Alias          string         `json:"alias,omitempty"`
+	AccountAlias   string         `json:"account_alias,omitempty"`
+	Available      bool           `json:"available"`
+	Score          int            `json:"score,omitempty"`
+	ScoreBreakdown map[string]int `json:"score_breakdown,omitempty"`
+	Reason         string         `json:"reason,omitempty"`
 }
 
 type llmRouteOutcomeResponse struct {
@@ -679,6 +689,7 @@ func llmRouteToResponse(record llmkit.RouteAuditRecord) llmRouteResponse {
 		Score:                 route.Score,
 		ScoreBreakdown:        copyScoreBreakdown(route.ScoreBreakdown),
 		CandidateModelAliases: append([]string(nil), route.CandidateModelAliases...),
+		Candidates:            routeCandidatesToResponse(route.Candidates),
 	}
 	if record.Outcome != nil {
 		outcome := record.Outcome
@@ -690,6 +701,24 @@ func llmRouteToResponse(record llmkit.RouteAuditRecord) llmRouteResponse {
 			OutputTokens:   outcome.OutputTokens,
 			EstimatedCents: outcome.EstimatedCents,
 		}
+	}
+	return response
+}
+
+func routeCandidatesToResponse(candidates []llmkit.CandidateScore) []llmRouteCandidateResponse {
+	if len(candidates) == 0 {
+		return nil
+	}
+	response := make([]llmRouteCandidateResponse, 0, len(candidates))
+	for _, candidate := range candidates {
+		response = append(response, llmRouteCandidateResponse{
+			Alias:          candidate.Alias,
+			AccountAlias:   candidate.AccountAlias,
+			Available:      candidate.Available,
+			Score:          candidate.Score,
+			ScoreBreakdown: copyScoreBreakdown(candidate.ScoreBreakdown),
+			Reason:         candidate.Reason,
+		})
 	}
 	return response
 }

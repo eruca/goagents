@@ -208,6 +208,7 @@ func (c *Client) routeTrace(ctx context.Context, req ports.ChatRequest, profile 
 		Score:                 decision.Score,
 		ScoreBreakdown:        copyScoreBreakdown(decision.ScoreBreakdown),
 		CandidateModelAliases: candidateModelAliases(decision.Candidates),
+		Candidates:            copyCandidateScores(decision.Candidates),
 	}, nil
 }
 
@@ -259,6 +260,24 @@ func candidateModelAliases(candidates []llmkit.CandidateScore) []string {
 		aliases = append(aliases, candidate.Alias)
 	}
 	return aliases
+}
+
+func copyCandidateScores(in []llmkit.CandidateScore) []llmkit.CandidateScore {
+	if in == nil {
+		return nil
+	}
+	out := make([]llmkit.CandidateScore, len(in))
+	for i, score := range in {
+		out[i] = llmkit.CandidateScore{
+			Alias:          score.Alias,
+			AccountAlias:   score.AccountAlias,
+			Available:      score.Available,
+			Score:          score.Score,
+			ScoreBreakdown: copyScoreBreakdown(score.ScoreBreakdown),
+			Reason:         score.Reason,
+		}
+	}
+	return out
 }
 
 func copyScoreBreakdown(in map[string]int) map[string]int {

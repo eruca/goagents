@@ -86,9 +86,9 @@ Endpoints:
 
 `GET /workflows/{id}/llm-routes` returns the sanitized llmkit routing audit for
 that workflow: effective task profile, selected model/account aliases, provider,
-reason, score breakdown, candidate aliases, and outcome metadata such as
-success, latency, tokens, and estimated cents. It does not return prompts,
-responses, headers, or API keys.
+reason, score breakdown, candidate aliases, full candidate-level scores or
+filter reasons, and outcome metadata such as success, latency, tokens, and
+estimated cents. It does not return prompts, responses, headers, or API keys.
 
 `POST /workflows` accepts optional `run_mode`. The current example implements
 only `sync`, which is also the default. `queued` is reserved for a future worker

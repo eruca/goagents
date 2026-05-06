@@ -24,20 +24,21 @@ var (
 // RouteTrace is the allowlisted audit record for a routing decision. It stores
 // aliases and routing explanations only; host-owned secrets must not be added.
 type RouteTrace struct {
-	RouteID               string         `json:"route_id,omitempty"`
-	TaskID                string         `json:"task_id,omitempty"`
-	Attempt               int            `json:"attempt,omitempty"`
-	RecordedAt            time.Time      `json:"recorded_at,omitempty"`
-	TaskType              string         `json:"task_type,omitempty"`
-	TaskProfile           *TaskProfile   `json:"task_profile,omitempty"`
-	AccountAlias          string         `json:"account_alias,omitempty"`
-	ModelAlias            string         `json:"model_alias,omitempty"`
-	Provider              string         `json:"provider,omitempty"`
-	Selected              bool           `json:"selected,omitempty"`
-	Reason                string         `json:"reason,omitempty"`
-	Score                 int            `json:"score,omitempty"`
-	ScoreBreakdown        map[string]int `json:"score_breakdown,omitempty"`
-	CandidateModelAliases []string       `json:"candidate_model_aliases,omitempty"`
+	RouteID               string           `json:"route_id,omitempty"`
+	TaskID                string           `json:"task_id,omitempty"`
+	Attempt               int              `json:"attempt,omitempty"`
+	RecordedAt            time.Time        `json:"recorded_at,omitempty"`
+	TaskType              string           `json:"task_type,omitempty"`
+	TaskProfile           *TaskProfile     `json:"task_profile,omitempty"`
+	AccountAlias          string           `json:"account_alias,omitempty"`
+	ModelAlias            string           `json:"model_alias,omitempty"`
+	Provider              string           `json:"provider,omitempty"`
+	Selected              bool             `json:"selected,omitempty"`
+	Reason                string           `json:"reason,omitempty"`
+	Score                 int              `json:"score,omitempty"`
+	ScoreBreakdown        map[string]int   `json:"score_breakdown,omitempty"`
+	CandidateModelAliases []string         `json:"candidate_model_aliases,omitempty"`
+	Candidates            []CandidateScore `json:"candidates,omitempty"`
 }
 
 // TaskOutcome is the allowlisted audit record for the result of an LLM task.
@@ -200,8 +201,27 @@ func sanitizeRouteTrace(trace RouteTrace) RouteTrace {
 	trace.Provider = sanitizeAuditString(trace.Provider)
 	trace.Reason = sanitizeAuditString(trace.Reason)
 	trace.CandidateModelAliases = sanitizeAuditStrings(trace.CandidateModelAliases)
+	trace.Candidates = sanitizeCandidateScores(trace.Candidates)
 	trace.ScoreBreakdown = copyBreakdown(trace.ScoreBreakdown)
 	return trace
+}
+
+func sanitizeCandidateScores(scores []CandidateScore) []CandidateScore {
+	if scores == nil {
+		return nil
+	}
+	copied := make([]CandidateScore, len(scores))
+	for i, score := range scores {
+		copied[i] = CandidateScore{
+			Alias:          sanitizeAuditString(score.Alias),
+			AccountAlias:   sanitizeAuditString(score.AccountAlias),
+			Available:      score.Available,
+			Score:          score.Score,
+			ScoreBreakdown: copyBreakdown(score.ScoreBreakdown),
+			Reason:         sanitizeAuditString(score.Reason),
+		}
+	}
+	return copied
 }
 
 func sanitizeTaskProfile(profile *TaskProfile) *TaskProfile {

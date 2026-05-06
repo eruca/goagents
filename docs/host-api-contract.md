@@ -189,6 +189,29 @@ Response:
         "health": 2
       },
       "candidate_model_aliases": ["local-free", "cloud-advanced"],
+      "candidates": [
+        {
+          "alias": "local-free",
+          "account_alias": "local-dev",
+          "available": false,
+          "reason": "model does not match task requirements"
+        },
+        {
+          "alias": "cloud-advanced",
+          "account_alias": "cloud-prod",
+          "available": true,
+          "score": 73,
+          "score_breakdown": {
+            "capability": 54,
+            "price": 0,
+            "local": 0,
+            "latency": 5,
+            "reliability": 0,
+            "health": 2
+          },
+          "reason": "selected cloud-advanced with score 73 (...)"
+        }
+      ],
       "outcome": {
         "success": true,
         "latency_ms": 1200,
@@ -202,6 +225,9 @@ Response:
 ```
 
 The endpoint does not return prompts, responses, headers, or API keys.
+`candidate_model_aliases` is a compact compatibility field. `candidates`
+contains the full candidate-level explanation, including filtered candidates
+with `available: false` and their rejection reason.
 
 ## GET /agent-runs/{id}
 

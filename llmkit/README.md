@@ -81,7 +81,7 @@ Hosts provide `TaskProfile`; llmkit does not infer business risk from prompt tex
 
 `JSONLRecorder` writes two append-only audit files under `LLMKIT_HOME`:
 
-- `route-events.jsonl`: sanitized routing decisions, effective task profile, selected aliases, provider name, score, score breakdown, and candidate aliases.
+- `route-events.jsonl`: sanitized routing decisions, effective task profile, selected aliases, provider name, score, score breakdown, compact candidate aliases, and full candidate-level score/filter explanations.
 - `outcomes.jsonl`: sanitized outcome metadata such as success, error code, latency, token counts, and estimated cents.
 
 Audit records intentionally avoid prompts, responses, headers, and API keys. The recorder also sanitizes key-like strings before writing JSONL.

@@ -86,6 +86,17 @@ func TestClientRoutesSimpleProfileToSelectedProviderAndRecordsTrace(t *testing.T
 	if len(trace.CandidateModelAliases) != 2 {
 		t.Fatalf("trace candidate aliases len = %d, want 2", len(trace.CandidateModelAliases))
 	}
+	if len(trace.Candidates) != 2 {
+		t.Fatalf("trace candidates len = %d, want 2", len(trace.Candidates))
+	}
+	localScore := routeCandidateScore(t, trace.Candidates, "local-small")
+	if !localScore.Available || localScore.Score == 0 || localScore.ScoreBreakdown["price"] == 0 {
+		t.Fatalf("local candidate score missing explanation: %+v", localScore)
+	}
+	cloudScore := routeCandidateScore(t, trace.Candidates, "cloud-advanced")
+	if !cloudScore.Available || cloudScore.Score == 0 || cloudScore.Reason == "" {
+		t.Fatalf("cloud candidate score missing explanation: %+v", cloudScore)
+	}
 }
 
 func TestClientAppliesModelStatsAfterProfileSelection(t *testing.T) {
@@ -512,4 +523,15 @@ func (f *fakeRecorder) singleRouteTrace(t *testing.T) llmkit.RouteTrace {
 		t.Fatalf("recorded route traces = %d, want 1", len(f.routes))
 	}
 	return f.routes[0]
+}
+
+func routeCandidateScore(t *testing.T, scores []llmkit.CandidateScore, alias string) llmkit.CandidateScore {
+	t.Helper()
+	for _, score := range scores {
+		if score.Alias == alias {
+			return score
+		}
+	}
+	t.Fatalf("candidate score %q not found: %+v", alias, scores)
+	return llmkit.CandidateScore{}
 }

@@ -153,6 +153,17 @@ func TestHostAPIReturnsWorkflowLLMRouteAudit(t *testing.T) {
 	if got.Score == 0 || got.ScoreBreakdown["price"] == 0 || len(got.CandidateModelAliases) != 2 {
 		t.Fatalf("route explainability fields missing: %+v", got)
 	}
+	if len(got.Candidates) != 2 {
+		t.Fatalf("route candidates len = %d, want 2: %+v", len(got.Candidates), got.Candidates)
+	}
+	localScore := routeCandidate(t, got.Candidates, "local-free")
+	if !localScore.Available || localScore.Score == 0 || localScore.ScoreBreakdown["price"] == 0 {
+		t.Fatalf("local candidate explanation missing: %+v", localScore)
+	}
+	cloudScore := routeCandidate(t, got.Candidates, "cloud-advanced")
+	if !cloudScore.Available || cloudScore.Score == 0 || cloudScore.Reason == "" {
+		t.Fatalf("cloud candidate explanation missing: %+v", cloudScore)
+	}
 	if got.Outcome == nil || !got.Outcome.Success || got.Outcome.InputTokens != 5 || got.Outcome.OutputTokens != 7 {
 		t.Fatalf("route outcome = %+v, want successful token outcome", got.Outcome)
 	}
@@ -582,4 +593,15 @@ func containsString(values []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+func routeCandidate(t *testing.T, candidates []llmRouteCandidateResponse, alias string) llmRouteCandidateResponse {
+	t.Helper()
+	for _, candidate := range candidates {
+		if candidate.Alias == alias {
+			return candidate
+		}
+	}
+	t.Fatalf("route candidate %q not found: %+v", alias, candidates)
+	return llmRouteCandidateResponse{}
 }

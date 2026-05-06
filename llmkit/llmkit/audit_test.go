@@ -32,6 +32,22 @@ func TestJSONLRecorderRecordsRouteEvent(t *testing.T) {
 		Score:                 42,
 		ScoreBreakdown:        map[string]int{"latency": 20, "price": 10},
 		CandidateModelAliases: []string{"fast-json", "local-small"},
+		Candidates: []CandidateScore{
+			{
+				Alias:          "fast-json",
+				AccountAlias:   "primary-account",
+				Available:      true,
+				Score:          42,
+				ScoreBreakdown: map[string]int{"latency": 20, "price": 10},
+				Reason:         "lowest latency available",
+			},
+			{
+				Alias:        "local-small",
+				AccountAlias: "local-account",
+				Available:    false,
+				Reason:       "model does not match task requirements",
+			},
+		},
 	}
 	if err := recorder.RecordRoute(context.Background(), trace); err != nil {
 		t.Fatalf("RecordRoute returned error: %v", err)
@@ -60,6 +76,15 @@ func TestJSONLRecorderRecordsRouteEvent(t *testing.T) {
 	}
 	if got.ScoreBreakdown["latency"] != 20 || len(got.CandidateModelAliases) != 2 {
 		t.Fatalf("route event did not preserve explainability fields: %+v", got)
+	}
+	if len(got.Candidates) != 2 {
+		t.Fatalf("route event candidates len = %d, want 2: %+v", len(got.Candidates), got.Candidates)
+	}
+	if got.Candidates[0].Alias != "fast-json" || got.Candidates[0].ScoreBreakdown["price"] != 10 {
+		t.Fatalf("selected candidate explanation not preserved: %+v", got.Candidates[0])
+	}
+	if got.Candidates[1].Available || got.Candidates[1].Reason == "" {
+		t.Fatalf("filtered candidate explanation not preserved: %+v", got.Candidates[1])
 	}
 }
 
