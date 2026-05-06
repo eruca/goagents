@@ -4,13 +4,13 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 
 	"github.com/eruca/artifactkit"
 	"github.com/eruca/goagent/agentcore"
 	"github.com/eruca/goagent/ports"
 	goagentadapter "github.com/eruca/llmkit/adapters/goagent"
 	"github.com/eruca/llmkit/llmkit"
+	"github.com/eruca/runkit"
 	"github.com/eruca/workflowkit"
 	"github.com/eruca/workflowkit/agentstep"
 )
@@ -31,7 +31,7 @@ type Approval struct {
 
 type Runtime struct {
 	Artifacts artifactkit.Store
-	AgentRuns *MemoryAgentRunStore
+	AgentRuns runkit.Store
 
 	store    workflowkit.Store
 	executor *workflowkit.Executor
@@ -42,7 +42,7 @@ func NewRuntime(config Config) (*Runtime, error) {
 		return nil, fmt.Errorf("LLMKitHome is required")
 	}
 	artifacts := artifactkit.NewMemoryStore()
-	agentRuns := NewMemoryAgentRunStore()
+	agentRuns := runkit.NewMemoryStore()
 	runtime := &Runtime{
 		Artifacts: artifacts,
 		AgentRuns: agentRuns,
@@ -86,7 +86,7 @@ func (r *Runtime) Approve(ctx context.Context, workflowID string, approval Appro
 func (r *Runtime) agentReviewStep(llmkitHome string) workflowkit.Step {
 	runner := routingAgentRunner{
 		llmkitHome: llmkitHome,
-		events:     r.AgentRuns,
+		runs:       r.AgentRuns,
 	}
 	return agentstep.New("agent_review", runner, func(run workflowkit.WorkflowRun) agentcore.RunRequest {
 		return agentcore.RunRequest{
@@ -99,6 +99,15 @@ func (r *Runtime) agentReviewStep(llmkitHome string) workflowkit.Step {
 		outputRef := "artifact:" + run.ID + ":agent-output"
 		if result != nil {
 			_ = putTextArtifact(context.Background(), r.Artifacts, outputRef, result.Content)
+			_ = r.AgentRuns.Complete(context.Background(), result.RunID.String(), runkit.TerminalSummary{
+				Status:       runkit.StatusSucceeded,
+				ContentRef:   outputRef,
+				InputTokens:  result.Usage.InputTokens,
+				OutputTokens: result.Usage.OutputTokens,
+				LLMCalls:     result.ExecutionSummary.LLMCalls,
+				ToolCalls:    result.ExecutionSummary.ToolCalls,
+				UsedTools:    result.ExecutionSummary.UsedTools,
+			})
 		}
 		agentRunID := ""
 		if result != nil {
@@ -169,7 +178,7 @@ func (s finalizeStep) Run(ctx context.Context, run workflowkit.WorkflowRun) (wor
 
 type routingAgentRunner struct {
 	llmkitHome string
-	events     *MemoryAgentRunStore
+	runs       runkit.Store
 }
 
 func (r routingAgentRunner) RunDetailed(ctx context.Context, req agentcore.RunRequest) (*agentcore.RunResult, error) {
@@ -233,7 +242,14 @@ func (r routingAgentRunner) RunDetailed(ctx context.Context, req agentcore.RunRe
 	})
 	agent, err := agentcore.NewAgent(
 		agentcore.WithLLM(client),
-		agentcore.WithEventSink(r.events),
+		agentcore.WithEventSink(runkit.NewGoagentEventSink(r.runs, func(event agentcore.Event) runkit.RunRecord {
+			return runkit.RunRecord{
+				RunID:      event.RunID.String(),
+				WorkflowID: workflowID,
+				TaskID:     workflowID,
+				Status:     runkit.StatusRunning,
+			}
+		})),
 	)
 	if err != nil {
 		return nil, err
@@ -261,30 +277,4 @@ func putTextArtifact(ctx context.Context, store artifactkit.Store, ref string, c
 		Content:     []byte(content),
 		ContentType: "text/plain",
 	})
-}
-
-type MemoryAgentRunStore struct {
-	mu     sync.RWMutex
-	events map[string][]agentcore.Event
-}
-
-func NewMemoryAgentRunStore() *MemoryAgentRunStore {
-	return &MemoryAgentRunStore{events: map[string][]agentcore.Event{}}
-}
-
-func (s *MemoryAgentRunStore) Emit(ctx context.Context, event agentcore.Event) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	key := event.RunID.String()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.events[key] = append(s.events[key], event)
-	return nil
-}
-
-func (s *MemoryAgentRunStore) Events(agentRunID string) []agentcore.Event {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return append([]agentcore.Event(nil), s.events[agentRunID]...)
 }

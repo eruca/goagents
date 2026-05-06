@@ -7,7 +7,7 @@ new core framework. It shows how an application can compose existing modules:
 - `goagent` owns the single ReAct-style agent run.
 - `llmkit` owns LLM model/account routing and route/outcome audit files.
 - `artifactkit` keeps full payloads behind artifact refs.
-- A host-owned store keeps agent events behind refs.
+- `runkit` keeps agent run records, lifecycle events, and terminal summaries.
 
 The example workflow is:
 
@@ -30,7 +30,7 @@ LLMKIT_HOME=/tmp/host-runtime-llmkit go run .
 ```
 
 The runtime writes `route-events.jsonl` and `outcomes.jsonl` under
-`LLMKIT_HOME`, while `artifactkit.MemoryStore` and the agent event store stay in
+`LLMKIT_HOME`, while `artifactkit.MemoryStore` and `runkit.MemoryStore` stay in
 process-local memory for this skeleton.
 
 This example deliberately leaves production concerns to the host application:

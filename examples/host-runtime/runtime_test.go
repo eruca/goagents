@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/eruca/goagent/agentcore"
 	"github.com/eruca/llmkit/llmkit"
+	"github.com/eruca/runkit"
 	"github.com/eruca/workflowkit"
 )
 
@@ -46,11 +46,24 @@ func TestRuntimeRunsAgentWorkflowWithArtifactsAuditAndLLMRouting(t *testing.T) {
 		t.Fatalf("agent output content = %q, want host runtime draft", string(agentOutput.Content))
 	}
 
-	events := runtime.AgentRuns.Events(run.AgentRunID)
+	agentRun, err := runtime.AgentRuns.Get(ctx, run.AgentRunID)
+	if err != nil {
+		t.Fatalf("AgentRuns.Get returned error: %v", err)
+	}
+	if agentRun.WorkflowID != run.ID || agentRun.Status != runkit.StatusSucceeded {
+		t.Fatalf("agent run record = %+v, want succeeded correlated run", agentRun)
+	}
+	if agentRun.Summary.ContentRef != run.OutputRef || agentRun.Summary.OutputTokens == 0 {
+		t.Fatalf("agent run summary = %+v, want content ref and token usage", agentRun.Summary)
+	}
+	events, err := runtime.AgentRuns.Events(ctx, run.AgentRunID)
+	if err != nil {
+		t.Fatalf("AgentRuns.Events returned error: %v", err)
+	}
 	if len(events) == 0 {
 		t.Fatal("agent run events should be recorded")
 	}
-	if !hasAgentEvent(events, agentcore.EventFinalized) {
+	if !hasAgentEvent(events, "finalized") {
 		t.Fatalf("agent events should include finalized: %+v", events)
 	}
 
@@ -94,7 +107,7 @@ func containsStep(steps []string, want string) bool {
 	return false
 }
 
-func hasAgentEvent(events []agentcore.Event, want agentcore.EventType) bool {
+func hasAgentEvent(events []runkit.RunEvent, want string) bool {
 	for _, event := range events {
 		if event.Type == want {
 			return true

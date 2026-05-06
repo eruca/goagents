@@ -13,6 +13,7 @@ Core modules:
 - `github.com/eruca/artifactkit` in `artifactkit/`
 - `github.com/eruca/contextkit` in `contextkit/`
 - `github.com/eruca/ocrs` in `ocrs/`
+- `github.com/eruca/runkit` in `runkit/`
 - `github.com/eruca/workflowkit` in `workflowkit/`
 
 Optional adapter/capability modules:
@@ -42,6 +43,7 @@ contextkit    must not import goagent, workflowkit, or ocrs
 ocrs          must not import goagent, workflowkit, or contextkit
 llmkit        must not import goagent from its core routing package
 artifactkit   must not import goagent, workflowkit, llmkit, contextkit, or ocrs
+runkit        must not import workflowkit, llmkit, contextkit, ocrs, or artifactkit
 ```
 
 Adapter and composition modules may depend on multiple core modules:
@@ -49,7 +51,7 @@ Adapter and composition modules may depend on multiple core modules:
 ```text
 workflowkit/agentstep        may import workflowkit + goagent
 llmkit adapters              may import llmkit + goagent
-examples/host-runtime        may import workflowkit + agentstep + goagent + llmkit + artifactkit
+examples/host-runtime        may import workflowkit + agentstep + goagent + llmkit + artifactkit + runkit
 examples/agent-approval      may import workflowkit + agentstep + goagent
 examples/ocr-review          may import workflowkit + agentstep + goagent + contextkit + ocrs
 host applications            compose whatever modules they need
@@ -72,6 +74,7 @@ goagent/v0.1.0
 artifactkit/v0.1.0
 contextkit/v0.1.0
 ocrs/v0.1.0
+runkit/v0.1.0
 workflowkit/v0.1.0
 workflowkit/agentstep/v0.1.0
 llmkit/v0.1.0
@@ -94,6 +97,7 @@ Module-specific checks:
 (cd contextkit && go test ./...)
 (cd artifactkit && go test ./...)
 (cd ocrs && go test ./...)
+(cd runkit && go test ./...)
 (cd llmkit && go test ./...)
 (cd examples/host-runtime && go test ./...)
 (cd goagent && make verify)

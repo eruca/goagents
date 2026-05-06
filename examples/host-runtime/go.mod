@@ -6,6 +6,7 @@ require (
 	github.com/eruca/artifactkit v0.0.0
 	github.com/eruca/goagent v0.0.0
 	github.com/eruca/llmkit v0.0.0
+	github.com/eruca/runkit v0.0.0
 	github.com/eruca/workflowkit v0.0.0
 	github.com/eruca/workflowkit/agentstep v0.0.0
 )
@@ -22,6 +23,8 @@ replace github.com/eruca/artifactkit => ../../artifactkit
 replace github.com/eruca/goagent => ../../goagent
 
 replace github.com/eruca/llmkit => ../../llmkit
+
+replace github.com/eruca/runkit => ../../runkit
 
 replace github.com/eruca/workflowkit => ../../workflowkit
 

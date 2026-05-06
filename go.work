@@ -6,6 +6,7 @@ use (
 	./goagent
 	./llmkit
 	./ocrs
+	./runkit
 	./examples/host-runtime
 	./workflowkit
 	./workflowkit/agentstep
