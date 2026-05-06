@@ -10,7 +10,8 @@ The core `Store` contract is DTO-based:
 - `RunEvent`: ordered lifecycle events with bounded metadata.
 - `TerminalSummary`: content ref, token usage, call counts, tools, abort reason.
 
-The first implementation is `MemoryStore` for examples, tests, and prototypes.
+The core package includes `MemoryStore` for examples, tests, and prototypes.
+The `sqlitestore` package provides SQLite persistence for host-side audit logs.
 
 ## Use
 
@@ -32,6 +33,16 @@ err = store.AppendEvent(ctx, runkit.RunEvent{
     Type:  "stage.started",
     Stage: "think",
 })
+```
+
+For durable audit storage, open a SQLite store instead:
+
+```go
+store, err := sqlitestore.Open("goagents-runs.db")
+if err != nil {
+    return err
+}
+defer store.Close()
 ```
 
 For `goagent`, use the adapter sink:

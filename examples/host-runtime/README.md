@@ -31,7 +31,9 @@ LLMKIT_HOME=/tmp/host-runtime-llmkit go run .
 
 The runtime writes `route-events.jsonl` and `outcomes.jsonl` under
 `LLMKIT_HOME`, while `artifactkit.MemoryStore` and `runkit.MemoryStore` stay in
-process-local memory for this skeleton.
+process-local memory for this skeleton. Production hosts can replace the agent
+run store with `runkit/sqlitestore.Open("goagents-runs.db")` without changing
+the workflow or agent contract.
 
 This example deliberately leaves production concerns to the host application:
 HTTP APIs, durable database schemas, artifact blob storage, authentication,

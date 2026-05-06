@@ -83,6 +83,9 @@ llmkit/v0.1.0
 Only tag modules that changed. If `workflowkit/agentstep` changes without a core
 `workflowkit` change, tag only `workflowkit/agentstep`.
 
+`runkit/sqlitestore` is part of the `github.com/eruca/runkit` module. It is a
+host-side durable audit backend, not a separate module.
+
 ## Verification
 
 Run the whole workspace:
