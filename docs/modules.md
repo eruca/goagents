@@ -25,6 +25,7 @@ Optional adapter/capability modules:
 
 Verification/example modules:
 
+- `github.com/eruca/goagents/examples/host-api`
 - `github.com/eruca/goagents/examples/host-runtime`
 - `github.com/eruca/workflowkit/examples/agent-approval`
 - `github.com/eruca/workflowkit/examples/ocr-review`
@@ -51,6 +52,7 @@ Adapter and composition modules may depend on multiple core modules:
 ```text
 workflowkit/agentstep        may import workflowkit + goagent
 llmkit adapters              may import llmkit + goagent
+examples/host-api            may import workflowkit + agentstep + goagent + llmkit + artifactkit + runkit
 examples/host-runtime        may import workflowkit + agentstep + goagent + llmkit + artifactkit + runkit
 examples/agent-approval      may import workflowkit + agentstep + goagent
 examples/ocr-review          may import workflowkit + agentstep + goagent + contextkit + ocrs
@@ -102,6 +104,7 @@ Module-specific checks:
 (cd ocrs && go test ./...)
 (cd runkit && go test ./...)
 (cd llmkit && go test ./...)
+(cd examples/host-api && go test ./...)
 (cd examples/host-runtime && go test ./...)
 (cd goagent && make verify)
 (cd workflowkit && ./scripts/verify-e2e.sh)
