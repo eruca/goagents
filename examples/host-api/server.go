@@ -41,8 +41,9 @@ type Server struct {
 }
 
 type createWorkflowRequest struct {
-	ID    string `json:"id"`
-	Input string `json:"input"`
+	ID      string `json:"id"`
+	Input   string `json:"input"`
+	RunMode string `json:"run_mode,omitempty"`
 }
 
 type approveWorkflowRequest struct {
@@ -53,6 +54,7 @@ type approveWorkflowRequest struct {
 type workflowResponse struct {
 	ID            string   `json:"id"`
 	Status        string   `json:"status"`
+	RunMode       string   `json:"run_mode"`
 	InputRef      string   `json:"input_ref,omitempty"`
 	OutputRef     string   `json:"output_ref,omitempty"`
 	AgentRunID    string   `json:"agent_run_id,omitempty"`
@@ -61,6 +63,13 @@ type workflowResponse struct {
 	WaitingReason string   `json:"waiting_reason,omitempty"`
 	Completed     []string `json:"completed_steps,omitempty"`
 }
+
+type RunMode string
+
+const (
+	RunModeSync   RunMode = "sync"
+	RunModeQueued RunMode = "queued"
+)
 
 type agentRunResponse struct {
 	RunID      string                 `json:"run_id"`
@@ -169,6 +178,11 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "id is required")
 		return
 	}
+	runMode, ok := parseRunMode(req.RunMode)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "unsupported_run_mode", "only sync run_mode is supported")
+		return
+	}
 	inputRef := "artifact:" + req.ID + ":input"
 	if err := putTextArtifact(r.Context(), s.artifacts, inputRef, req.Input); err != nil {
 		writeError(w, http.StatusInternalServerError, "artifact_error", err.Error())
@@ -185,7 +199,7 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "workflow_error", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusAccepted, workflowToResponse(run))
+	writeJSON(w, http.StatusAccepted, workflowToResponse(run, runMode))
 }
 
 func (s *Server) handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -194,7 +208,7 @@ func (s *Server) handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeWorkflowStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, workflowToResponse(run))
+	writeJSON(w, http.StatusOK, workflowToResponse(run, RunModeSync))
 }
 
 func (s *Server) handleApproveWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -214,7 +228,7 @@ func (s *Server) handleApproveWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeWorkflowStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, workflowToResponse(run))
+	writeJSON(w, http.StatusOK, workflowToResponse(run, RunModeSync))
 }
 
 func (s *Server) handleGetAgentRun(w http.ResponseWriter, r *http.Request) {
@@ -453,10 +467,14 @@ func defaultCandidates() []llmkit.Candidate {
 	}
 }
 
-func workflowToResponse(run workflowkit.WorkflowRun) workflowResponse {
+func workflowToResponse(run workflowkit.WorkflowRun, runMode RunMode) workflowResponse {
+	if runMode == "" {
+		runMode = RunModeSync
+	}
 	return workflowResponse{
 		ID:            run.ID,
 		Status:        string(run.Status),
+		RunMode:       string(runMode),
 		InputRef:      run.InputRef,
 		OutputRef:     run.OutputRef,
 		AgentRunID:    run.AgentRunID,
@@ -464,6 +482,17 @@ func workflowToResponse(run workflowkit.WorkflowRun) workflowResponse {
 		ApprovalRef:   run.ApprovalRef,
 		WaitingReason: run.WaitingReason,
 		Completed:     append([]string(nil), run.CompletedSteps...),
+	}
+}
+
+func parseRunMode(value string) (RunMode, bool) {
+	switch RunMode(strings.TrimSpace(value)) {
+	case "", RunModeSync:
+		return RunModeSync, true
+	case RunModeQueued:
+		return RunModeQueued, false
+	default:
+		return "", false
 	}
 }
 

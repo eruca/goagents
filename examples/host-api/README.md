@@ -29,6 +29,10 @@ Endpoints:
 - `GET /agent-runs/{id}`
 - `GET /llmkit/models`
 
+`POST /workflows` accepts optional `run_mode`. The current example implements
+only `sync`, which is also the default. `queued` is reserved for a future worker
+model and currently returns `unsupported_run_mode`.
+
 Run it:
 
 ```bash

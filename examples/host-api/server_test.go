@@ -27,6 +27,9 @@ func TestHostAPIWorkflowApprovalRunAndModelEndpoints(t *testing.T) {
 	if create.ID != "wf-api-1" || create.Status != string(workflowkit.StatusWaitingApproval) {
 		t.Fatalf("create response = %+v, want waiting workflow", create)
 	}
+	if create.RunMode != string(RunModeSync) {
+		t.Fatalf("create run mode = %q, want sync", create.RunMode)
+	}
 	if create.InputRef == "" || create.OutputRef == "" || create.AgentRunID == "" || create.ApprovalRef == "" {
 		t.Fatalf("create response refs should be populated: %+v", create)
 	}
@@ -142,6 +145,37 @@ func TestHostAPIReturnsJSONErrors(t *testing.T) {
 	server.Handler().ServeHTTP(resp, req)
 	if resp.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestHostAPIRunModeSyncAndQueuedSemantics(t *testing.T) {
+	server, err := NewServer(Config{LLMKitHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+
+	syncRun := doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]string{
+		"id":       "wf-sync",
+		"input":    "Review the sync draft.",
+		"run_mode": "sync",
+	})
+	if syncRun.RunMode != string(RunModeSync) || syncRun.Status != string(workflowkit.StatusWaitingApproval) {
+		t.Fatalf("sync run response = %+v, want sync waiting workflow", syncRun)
+	}
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/workflows", bytes.NewBufferString(`{
+		"id": "wf-queued",
+		"input": "Review later.",
+		"run_mode": "queued"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	server.Handler().ServeHTTP(resp, req)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("queued status = %d, want 400; body=%s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), "unsupported_run_mode") {
+		t.Fatalf("queued body = %s, want unsupported_run_mode", resp.Body.String())
 	}
 }
 
