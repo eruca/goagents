@@ -4,8 +4,9 @@
 It stores full payloads behind refs so workflow records, agent events, tool
 results, and LLM context can carry bounded references instead of raw content.
 
-It is intentionally storage-neutral. The first implementation is an in-process
-`MemoryStore` for tests, examples, and prototypes.
+It is intentionally storage-neutral. The core package includes an in-process
+`MemoryStore` for tests, examples, and prototypes, plus `FileStore` for simple
+durable host-side storage.
 
 ## Use
 
@@ -33,6 +34,19 @@ _ = artifact
 
 `MemoryStore` copies artifacts on read and write so callers cannot mutate stored
 state through shared slices or maps.
+
+For durable storage, open a file-backed store:
+
+```go
+store, err := artifactkit.NewFileStore("/srv/my-agent/runtime/artifacts")
+if err != nil {
+    return err
+}
+```
+
+`FileStore` encodes refs into safe object filenames and stores artifact content,
+content type, metadata, and creation time as JSON. It preserves the same
+copy-on-read/write semantics as `MemoryStore`.
 
 ## Boundary
 

@@ -4,19 +4,14 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 )
 
 func main() {
-	home := os.Getenv("LLMKIT_HOME")
-	if home == "" {
-		temp, err := os.MkdirTemp("", "goagents-host-api-*")
-		if err != nil {
-			panic(err)
-		}
-		home = filepath.Join(temp, ".llmkit")
+	config := Config{
+		RuntimeHome: os.Getenv("HOST_RUNTIME_HOME"),
+		LLMKitHome:  os.Getenv("LLMKIT_HOME"),
 	}
-	server, err := NewServer(Config{LLMKitHome: home})
+	server, err := NewServer(config)
 	if err != nil {
 		panic(err)
 	}
@@ -24,7 +19,7 @@ func main() {
 	if addr == "" {
 		addr = "127.0.0.1:8080"
 	}
-	fmt.Printf("host_api_addr=%s llmkit_home=%s\n", addr, home)
+	fmt.Printf("host_api_addr=%s\n", addr)
 	if err := http.ListenAndServe(addr, server.Handler()); err != nil {
 		panic(err)
 	}

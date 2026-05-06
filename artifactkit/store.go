@@ -59,12 +59,17 @@ func (s *MemoryStore) Get(ctx context.Context, ref string) (Artifact, error) {
 
 func cloneArtifact(artifact Artifact) Artifact {
 	artifact.Content = append([]byte(nil), artifact.Content...)
-	if len(artifact.Metadata) > 0 {
-		metadata := make(map[string]any, len(artifact.Metadata))
-		for key, value := range artifact.Metadata {
-			metadata[key] = value
-		}
-		artifact.Metadata = metadata
-	}
+	artifact.Metadata = cloneMetadata(artifact.Metadata)
 	return artifact
+}
+
+func cloneMetadata(metadata map[string]any) map[string]any {
+	if len(metadata) == 0 {
+		return nil
+	}
+	copied := make(map[string]any, len(metadata))
+	for key, value := range metadata {
+		copied[key] = value
+	}
+	return copied
 }

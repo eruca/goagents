@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -68,6 +70,57 @@ func TestHostAPIWorkflowApprovalRunAndModelEndpoints(t *testing.T) {
 	}
 }
 
+func TestHostAPIDurableRuntimeResumesWorkflowAfterReopen(t *testing.T) {
+	runtimeHome := t.TempDir()
+	server, err := NewServer(Config{RuntimeHome: runtimeHome})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+
+	create := doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]string{
+		"id":    "wf-durable-1",
+		"input": "Review the durable draft through the host API.",
+	})
+	if create.Status != string(workflowkit.StatusWaitingApproval) {
+		t.Fatalf("create status = %q, want waiting_approval", create.Status)
+	}
+
+	reopened, err := NewServer(Config{RuntimeHome: runtimeHome})
+	if err != nil {
+		t.Fatalf("reopen NewServer returned error: %v", err)
+	}
+	loaded := doJSON[workflowResponse](t, reopened.Handler(), http.MethodGet, "/workflows/wf-durable-1", nil)
+	if loaded.ID != create.ID || loaded.AgentRunID != create.AgentRunID || loaded.OutputRef != create.OutputRef {
+		t.Fatalf("loaded after reopen = %+v, want created %+v", loaded, create)
+	}
+
+	run := doJSON[agentRunResponse](t, reopened.Handler(), http.MethodGet, "/agent-runs/"+create.AgentRunID, nil)
+	if run.RunID != create.AgentRunID || run.Summary.ContentRef != create.OutputRef || len(run.Events) == 0 {
+		t.Fatalf("agent run after reopen = %+v, want durable run with events", run)
+	}
+
+	approved := doJSON[workflowResponse](t, reopened.Handler(), http.MethodPost, "/workflows/wf-durable-1/approve", map[string]string{
+		"approved_by": "operator-durable",
+		"note":        "resume after reopen",
+	})
+	if approved.Status != string(workflowkit.StatusSucceeded) {
+		t.Fatalf("approved after reopen = %+v, want succeeded", approved)
+	}
+	if approved.OutputRef == create.OutputRef {
+		t.Fatalf("approved output ref = %q, should point to final artifact", approved.OutputRef)
+	}
+
+	if !fileExists(filepath.Join(runtimeHome, "workflow.db")) {
+		t.Fatalf("workflow db was not created under runtime home")
+	}
+	if !fileExists(filepath.Join(runtimeHome, "agent-runs.db")) {
+		t.Fatalf("agent run db was not created under runtime home")
+	}
+	if !fileExists(filepath.Join(runtimeHome, ".llmkit", "route-events.jsonl")) {
+		t.Fatalf("llmkit route audit was not created under runtime home")
+	}
+}
+
 func TestHostAPIReturnsJSONErrors(t *testing.T) {
 	server, err := NewServer(Config{LLMKitHome: t.TempDir()})
 	if err != nil {
@@ -127,4 +180,9 @@ func hasModel(models []modelResponse, alias string) bool {
 		}
 	}
 	return false
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }

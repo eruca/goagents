@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/eruca/artifactkit"
@@ -14,12 +16,18 @@ import (
 	goagentadapter "github.com/eruca/llmkit/adapters/goagent"
 	"github.com/eruca/llmkit/llmkit"
 	"github.com/eruca/runkit"
+	runsqlite "github.com/eruca/runkit/sqlitestore"
 	"github.com/eruca/workflowkit"
 	"github.com/eruca/workflowkit/agentstep"
+	workflowsqlite "github.com/eruca/workflowkit/sqlitestore"
 )
 
 type Config struct {
-	LLMKitHome string
+	RuntimeHome    string
+	LLMKitHome     string
+	WorkflowDBPath string
+	AgentRunDBPath string
+	ArtifactRoot   string
 }
 
 type Server struct {
@@ -82,18 +90,29 @@ type errorResponse struct {
 }
 
 func NewServer(config Config) (*Server, error) {
-	if strings.TrimSpace(config.LLMKitHome) == "" {
-		return nil, fmt.Errorf("LLMKitHome is required")
+	resolved, err := resolveRuntimeConfig(config)
+	if err != nil {
+		return nil, err
 	}
-	artifacts := artifactkit.NewMemoryStore()
-	runs := runkit.NewMemoryStore()
-	workflows := workflowkit.NewMemoryStore()
+	artifacts, err := artifactkit.NewFileStore(resolved.ArtifactRoot)
+	if err != nil {
+		return nil, err
+	}
+	runs, err := runsqlite.Open(resolved.AgentRunDBPath)
+	if err != nil {
+		return nil, err
+	}
+	workflows, err := workflowsqlite.Open(resolved.WorkflowDBPath)
+	if err != nil {
+		_ = runs.Close()
+		return nil, err
+	}
 	server := &Server{
 		artifacts: artifacts,
 		runs:      runs,
 		workflows: workflows,
 		health:    llmkit.NewMemoryHealthStore(llmkit.HealthPolicy{}),
-		llmHome:   config.LLMKitHome,
+		llmHome:   resolved.LLMKitHome,
 		models:    defaultCandidates(),
 	}
 	server.executor = workflowkit.NewExecutor(workflows, []workflowkit.Step{
@@ -102,6 +121,33 @@ func NewServer(config Config) (*Server, error) {
 		finalizeStep{artifacts: artifacts},
 	})
 	return server, nil
+}
+
+func resolveRuntimeConfig(config Config) (Config, error) {
+	if strings.TrimSpace(config.RuntimeHome) == "" {
+		temp, err := os.MkdirTemp("", "goagents-host-api-*")
+		if err != nil {
+			return Config{}, err
+		}
+		config.RuntimeHome = temp
+	}
+	runtimeHome := filepath.Clean(config.RuntimeHome)
+	if err := os.MkdirAll(runtimeHome, 0o700); err != nil {
+		return Config{}, err
+	}
+	if strings.TrimSpace(config.WorkflowDBPath) == "" {
+		config.WorkflowDBPath = filepath.Join(runtimeHome, "workflow.db")
+	}
+	if strings.TrimSpace(config.AgentRunDBPath) == "" {
+		config.AgentRunDBPath = filepath.Join(runtimeHome, "agent-runs.db")
+	}
+	if strings.TrimSpace(config.ArtifactRoot) == "" {
+		config.ArtifactRoot = filepath.Join(runtimeHome, "artifacts")
+	}
+	if strings.TrimSpace(config.LLMKitHome) == "" {
+		config.LLMKitHome = filepath.Join(runtimeHome, ".llmkit")
+	}
+	return config, nil
 }
 
 func (s *Server) Handler() http.Handler {
