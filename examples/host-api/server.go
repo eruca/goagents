@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/eruca/artifactkit"
@@ -38,6 +39,7 @@ type Server struct {
 	health    *llmkit.MemoryHealthStore
 	llmHome   string
 	models    []llmkit.Candidate
+	stats     *llmkit.ModelStats
 	providers map[string]goagentadapter.ProviderClient
 }
 
@@ -98,6 +100,7 @@ type agentRunResponse struct {
 type modelsResponse struct {
 	Models []modelResponse               `json:"models"`
 	Health llmkit.ProviderHealthSnapshot `json:"health"`
+	Stats  []modelStatsResponse          `json:"stats,omitempty"`
 }
 
 type llmRoutesResponse struct {
@@ -151,6 +154,24 @@ type modelResponse struct {
 	PriceClass   string `json:"price_class"`
 }
 
+type modelStatsResponse struct {
+	TaskType          string  `json:"task_type,omitempty"`
+	AccountAlias      string  `json:"account_alias,omitempty"`
+	ModelAlias        string  `json:"model_alias,omitempty"`
+	Provider          string  `json:"provider,omitempty"`
+	RouteAttempts     int     `json:"route_attempts"`
+	OutcomeCount      int     `json:"outcome_count"`
+	PendingOutcomes   int     `json:"pending_outcomes"`
+	Successes         int     `json:"successes"`
+	Failures          int     `json:"failures"`
+	SuccessRate       float64 `json:"success_rate"`
+	FailureRate       float64 `json:"failure_rate"`
+	AvgLatencyMillis  int     `json:"avg_latency_ms,omitempty"`
+	AvgInputTokens    int     `json:"avg_input_tokens,omitempty"`
+	AvgOutputTokens   int     `json:"avg_output_tokens,omitempty"`
+	AvgEstimatedCents int     `json:"avg_estimated_cents,omitempty"`
+}
+
 type errorResponse struct {
 	Error   string `json:"error"`
 	Message string `json:"message,omitempty"`
@@ -161,7 +182,7 @@ func NewServer(config Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	models, providers, err := loadLLMKitComposition(resolved.LLMKitHome)
+	models, providers, stats, err := loadLLMKitComposition(resolved.LLMKitHome)
 	if err != nil {
 		return nil, err
 	}
@@ -185,6 +206,7 @@ func NewServer(config Config) (*Server, error) {
 		health:    llmkit.NewMemoryHealthStore(llmkit.HealthPolicy{}),
 		llmHome:   resolved.LLMKitHome,
 		models:    models,
+		stats:     stats,
 		providers: providers,
 	}
 	server.executor = workflowkit.NewExecutor(workflows, []workflowkit.Step{
@@ -361,6 +383,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, modelsResponse{
 		Models: models,
 		Health: s.health.Snapshot(),
+		Stats:  modelStatsToResponse(s.stats),
 	})
 }
 
@@ -370,6 +393,7 @@ func (s *Server) agentStep() workflowkit.Step {
 		runs:       s.runs,
 		health:     s.health,
 		candidates: s.models,
+		stats:      s.stats,
 		providers:  s.providers,
 	}
 	return agentstep.New("agent_review", runner, func(run workflowkit.WorkflowRun) agentcore.RunRequest {
@@ -415,6 +439,7 @@ type routingAgentRunner struct {
 	runs       runkit.Store
 	health     llmkit.HealthStore
 	candidates []llmkit.Candidate
+	stats      *llmkit.ModelStats
 	providers  map[string]goagentadapter.ProviderClient
 }
 
@@ -443,6 +468,7 @@ func (r routingAgentRunner) RunDetailed(ctx context.Context, req agentcore.RunRe
 		},
 		Recorder:       recorder,
 		RecordOutcomes: true,
+		ModelStats:     r.stats,
 		HealthStore:    r.health,
 	})
 	agent, err := agentcore.NewAgent(
@@ -526,35 +552,40 @@ func (p staticProvider) Chat(context.Context, ports.ChatRequest) (*ports.ChatRes
 	}, nil
 }
 
-func loadLLMKitComposition(home string) ([]llmkit.Candidate, map[string]goagentadapter.ProviderClient, error) {
+func loadLLMKitComposition(home string) ([]llmkit.Candidate, map[string]goagentadapter.ProviderClient, *llmkit.ModelStats, error) {
+	stats, err := llmkit.RefreshModelStats(home)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
 	configPath := filepath.Join(home, "config.yaml")
 	if _, err := os.Stat(configPath); err != nil {
 		if os.IsNotExist(err) {
-			return defaultCandidates(), defaultProviders(), nil
+			return defaultCandidates(), defaultProviders(), stats, nil
 		}
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	config, err := llmkit.LoadConfig(home)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if err := validateConfiguredAPIKeyEnvs(*config, os.Getenv); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	candidates := config.Candidates()
 	if len(candidates) == 0 {
-		return nil, nil, fmt.Errorf("llmkit config has no models")
+		return nil, nil, nil, fmt.Errorf("llmkit config has no models")
 	}
 	providers, err := goagentadapter.OpenAICompatibleProvidersFromConfig(*config, os.Getenv, nil)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if err := validateProvidersForCandidates(candidates, providers); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return candidates, providers, nil
+	return candidates, providers, stats, nil
 }
 
 func validateConfiguredAPIKeyEnvs(config llmkit.Config, getenv func(string) string) error {
@@ -659,6 +690,40 @@ func llmRouteToResponse(record llmkit.RouteAuditRecord) llmRouteResponse {
 			OutputTokens:   outcome.OutputTokens,
 			EstimatedCents: outcome.EstimatedCents,
 		}
+	}
+	return response
+}
+
+func modelStatsToResponse(stats *llmkit.ModelStats) []modelStatsResponse {
+	if stats == nil || len(stats.Models) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(stats.Models))
+	for key := range stats.Models {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	response := make([]modelStatsResponse, 0, len(keys))
+	for _, key := range keys {
+		entry := stats.Models[key]
+		response = append(response, modelStatsResponse{
+			TaskType:          entry.TaskType,
+			AccountAlias:      entry.AccountAlias,
+			ModelAlias:        entry.ModelAlias,
+			Provider:          entry.Provider,
+			RouteAttempts:     entry.RouteAttempts,
+			OutcomeCount:      entry.OutcomeCount,
+			PendingOutcomes:   entry.PendingOutcomes,
+			Successes:         entry.Successes,
+			Failures:          entry.Failures,
+			SuccessRate:       entry.SuccessRate,
+			FailureRate:       entry.FailureRate,
+			AvgLatencyMillis:  entry.AvgLatencyMillis,
+			AvgInputTokens:    entry.AvgInputTokens,
+			AvgOutputTokens:   entry.AvgOutputTokens,
+			AvgEstimatedCents: entry.AvgEstimatedCents,
+		})
 	}
 	return response
 }

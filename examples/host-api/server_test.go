@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,7 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/eruca/llmkit/llmkit"
 	"github.com/eruca/workflowkit"
 )
 
@@ -234,6 +237,63 @@ func TestHostAPIRoutesLLMByTaskProfilePreset(t *testing.T) {
 		highRoute.TaskProfile.Privacy != "cloud_allowed" ||
 		!highRoute.TaskProfile.NeedsReasoning {
 		t.Fatalf("high_success route profile = %+v, want effective high_success profile", highRoute.TaskProfile)
+	}
+}
+
+func TestHostAPIRoutesLLMUsingHistoricalOutcomes(t *testing.T) {
+	llmHome := t.TempDir()
+	recorder, err := llmkit.NewJSONLRecorder(llmHome)
+	if err != nil {
+		t.Fatalf("NewJSONLRecorder returned error: %v", err)
+	}
+	for i := 0; i < 10; i++ {
+		if err := recorder.RecordOutcome(context.Background(), llmkit.TaskOutcome{
+			RouteID:       fmt.Sprintf("route-history-%d", i),
+			TaskID:        fmt.Sprintf("history-%d", i),
+			Attempt:       1,
+			RecordedAt:    time.Date(2026, 5, 6, 8, i, 0, 0, time.UTC),
+			TaskType:      "simple_local",
+			AccountAlias:  "local-dev",
+			ModelAlias:    "local-free",
+			Provider:      "local",
+			Success:       false,
+			ErrorCode:     "timeout",
+			LatencyMillis: 3000,
+		}); err != nil {
+			t.Fatalf("RecordOutcome returned error: %v", err)
+		}
+	}
+
+	server, err := NewServer(Config{RuntimeHome: t.TempDir(), LLMKitHome: llmHome})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+
+	doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]any{
+		"id":                  "wf-history-routing",
+		"input":               "Format a short note, but avoid recently failing models.",
+		"task_profile_preset": "simple_local",
+	})
+	routes := doJSON[llmRoutesResponse](t, server.Handler(), http.MethodGet, "/workflows/wf-history-routing/llm-routes", nil)
+	if got := selectedModelAlias(t, routes); got != "cloud-advanced" {
+		t.Fatalf("history-aware route selected %q, want cloud-advanced; routes=%+v", got, routes.Routes)
+	}
+	selected := selectedRoute(t, routes)
+	if !containsString(selected.CandidateModelAliases, "local-free") {
+		t.Fatalf("candidate aliases = %+v, want local-free included", selected.CandidateModelAliases)
+	}
+	stats, err := llmkit.LoadModelStats(llmHome)
+	if err != nil {
+		t.Fatalf("LoadModelStats returned error: %v", err)
+	}
+	local := stats.Models["simple_local|local-dev|local-free|local"]
+	if local.Failures != 10 || local.FailureRate != 1 {
+		t.Fatalf("local-free stats = %+v, want 10 historical failures", local)
+	}
+	models := doJSON[modelsResponse](t, server.Handler(), http.MethodGet, "/llmkit/models", nil)
+	localModelStats := modelStatsFor(t, models.Stats, "simple_local", "local-free")
+	if localModelStats.Failures != 10 || localModelStats.FailureRate != 1 {
+		t.Fatalf("models stats = %+v, want local-free historical failures", localModelStats)
 	}
 }
 
@@ -471,6 +531,17 @@ func hasModel(models []modelResponse, alias string) bool {
 	return false
 }
 
+func modelStatsFor(t *testing.T, stats []modelStatsResponse, taskType, modelAlias string) modelStatsResponse {
+	t.Helper()
+	for _, stat := range stats {
+		if stat.TaskType == taskType && stat.ModelAlias == modelAlias {
+			return stat
+		}
+	}
+	t.Fatalf("model stats for task=%q model=%q not found: %+v", taskType, modelAlias, stats)
+	return modelStatsResponse{}
+}
+
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
@@ -502,4 +573,13 @@ func selectedRoute(t *testing.T, routes llmRoutesResponse) llmRouteResponse {
 	}
 	t.Fatalf("no selected route found: %+v", routes.Routes)
 	return llmRouteResponse{}
+}
+
+func containsString(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
 }
