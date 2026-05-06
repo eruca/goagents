@@ -41,14 +41,27 @@ type Server struct {
 }
 
 type createWorkflowRequest struct {
-	ID      string `json:"id"`
-	Input   string `json:"input"`
-	RunMode string `json:"run_mode,omitempty"`
+	ID          string              `json:"id"`
+	Input       string              `json:"input"`
+	RunMode     string              `json:"run_mode,omitempty"`
+	TaskProfile *taskProfileRequest `json:"task_profile,omitempty"`
 }
 
 type approveWorkflowRequest struct {
 	ApprovedBy string `json:"approved_by"`
 	Note       string `json:"note"`
+}
+
+type taskProfileRequest struct {
+	TaskType         string `json:"task_type,omitempty"`
+	Complexity       string `json:"complexity,omitempty"`
+	Latency          string `json:"latency,omitempty"`
+	FailureCost      string `json:"failure_cost,omitempty"`
+	Privacy          string `json:"privacy,omitempty"`
+	NeedsReasoning   bool   `json:"needs_reasoning,omitempty"`
+	NeedsTools       bool   `json:"needs_tools,omitempty"`
+	NeedsJSON        bool   `json:"needs_json,omitempty"`
+	NeedsLongContext bool   `json:"needs_long_context,omitempty"`
 }
 
 type workflowResponse struct {
@@ -214,6 +227,11 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "unsupported_run_mode", "only sync run_mode is supported")
 		return
 	}
+	profile, err := parseTaskProfile(req.TaskProfile)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_task_profile", err.Error())
+		return
+	}
 	inputRef := "artifact:" + req.ID + ":input"
 	if err := putTextArtifact(r.Context(), s.artifacts, inputRef, req.Input); err != nil {
 		writeError(w, http.StatusInternalServerError, "artifact_error", err.Error())
@@ -223,7 +241,8 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		ID:       req.ID,
 		InputRef: inputRef,
 		Metadata: map[string]any{
-			"input_ref": inputRef,
+			"input_ref":    inputRef,
+			"task_profile": profile,
 		},
 	})
 	if err != nil {
@@ -333,10 +352,12 @@ func (s *Server) agentStep() workflowkit.Step {
 		candidates: s.models,
 	}
 	return agentstep.New("agent_review", runner, func(run workflowkit.WorkflowRun) agentcore.RunRequest {
+		profile := taskProfileFromMetadata(run.Metadata["task_profile"])
 		return agentcore.RunRequest{
 			Input: "Review input artifact " + run.InputRef,
 			Metadata: map[string]any{
-				"workflow_id": run.ID,
+				"workflow_id":  run.ID,
+				"task_profile": profile,
 			},
 		}
 	}, agentstep.WithResultMapper(func(run workflowkit.WorkflowRun, result *agentcore.RunResult) workflowkit.StepResult {
@@ -380,6 +401,7 @@ func (r routingAgentRunner) RunDetailed(ctx context.Context, req agentcore.RunRe
 	if workflowID == "" {
 		return nil, fmt.Errorf("workflow_id metadata is required")
 	}
+	profile := taskProfileFromMetadata(req.Metadata["task_profile"])
 	recorder, err := llmkit.NewJSONLRecorder(r.llmkitHome)
 	if err != nil {
 		return nil, err
@@ -391,12 +413,6 @@ func (r routingAgentRunner) RunDetailed(ctx context.Context, req agentcore.RunRe
 			"cloud-advanced": staticProvider{content: "host API draft from cloud-advanced"},
 		},
 		ProfileProvider: func(context.Context, ports.ChatRequest) llmkit.TaskProfile {
-			profile := llmkit.DefaultTaskProfile()
-			profile.Source = llmkit.ProfileSourceHost
-			profile.TaskType = "host_api_review"
-			profile.Complexity = llmkit.ComplexitySimple
-			profile.FailureCost = llmkit.FailureCostLow
-			profile.Privacy = llmkit.PrivacyLocalPreferred
 			return profile
 		},
 		RouteMetadataProvider: func(context.Context, ports.ChatRequest) goagentadapter.RouteMetadata {
@@ -576,6 +592,97 @@ func copyScoreBreakdown(values map[string]int) map[string]int {
 		copied[key] = value
 	}
 	return copied
+}
+
+func parseTaskProfile(req *taskProfileRequest) (llmkit.TaskProfile, error) {
+	profile := defaultHostTaskProfile()
+	if req == nil {
+		return profile, nil
+	}
+	if strings.TrimSpace(req.TaskType) != "" {
+		profile.TaskType = strings.TrimSpace(req.TaskType)
+	}
+	if strings.TrimSpace(req.Complexity) != "" {
+		value := llmkit.Complexity(strings.TrimSpace(req.Complexity))
+		if value != llmkit.ComplexitySimple && value != llmkit.ComplexityMedium && value != llmkit.ComplexityHard {
+			return llmkit.TaskProfile{}, fmt.Errorf("unsupported complexity %q", req.Complexity)
+		}
+		profile.Complexity = value
+	}
+	if strings.TrimSpace(req.Latency) != "" {
+		value := llmkit.LatencyRequirement(strings.TrimSpace(req.Latency))
+		if value != llmkit.LatencyNone && value != llmkit.LatencyNormal && value != llmkit.LatencyUrgent {
+			return llmkit.TaskProfile{}, fmt.Errorf("unsupported latency %q", req.Latency)
+		}
+		profile.Latency = value
+	}
+	if strings.TrimSpace(req.FailureCost) != "" {
+		value := llmkit.FailureCost(strings.TrimSpace(req.FailureCost))
+		if value != llmkit.FailureCostLow && value != llmkit.FailureCostMedium && value != llmkit.FailureCostHigh {
+			return llmkit.TaskProfile{}, fmt.Errorf("unsupported failure_cost %q", req.FailureCost)
+		}
+		profile.FailureCost = value
+	}
+	if strings.TrimSpace(req.Privacy) != "" {
+		value := llmkit.PrivacyLevel(strings.TrimSpace(req.Privacy))
+		if value != llmkit.PrivacyLocalPreferred && value != llmkit.PrivacyCloudAllowed && value != llmkit.PrivacyLocalOnly {
+			return llmkit.TaskProfile{}, fmt.Errorf("unsupported privacy %q", req.Privacy)
+		}
+		profile.Privacy = value
+	}
+	profile.NeedsReasoning = req.NeedsReasoning
+	profile.NeedsTools = req.NeedsTools
+	profile.NeedsJSON = req.NeedsJSON
+	profile.NeedsLongContext = req.NeedsLongContext
+	return profile, nil
+}
+
+func defaultHostTaskProfile() llmkit.TaskProfile {
+	profile := llmkit.DefaultTaskProfile()
+	profile.Source = llmkit.ProfileSourceHost
+	profile.TaskType = "host_api_review"
+	profile.Complexity = llmkit.ComplexitySimple
+	profile.FailureCost = llmkit.FailureCostLow
+	profile.Privacy = llmkit.PrivacyLocalPreferred
+	return profile
+}
+
+func taskProfileFromMetadata(value any) llmkit.TaskProfile {
+	switch profile := value.(type) {
+	case llmkit.TaskProfile:
+		return profile
+	case map[string]any:
+		return taskProfileFromMap(profile)
+	default:
+		return defaultHostTaskProfile()
+	}
+}
+
+func taskProfileFromMap(values map[string]any) llmkit.TaskProfile {
+	profile := defaultHostTaskProfile()
+	if value, ok := values["task_type"].(string); ok && strings.TrimSpace(value) != "" {
+		profile.TaskType = strings.TrimSpace(value)
+	}
+	if value, ok := values["source"].(string); ok && strings.TrimSpace(value) != "" {
+		profile.Source = llmkit.ProfileSource(strings.TrimSpace(value))
+	}
+	if value, ok := values["complexity"].(string); ok && strings.TrimSpace(value) != "" {
+		profile.Complexity = llmkit.Complexity(strings.TrimSpace(value))
+	}
+	if value, ok := values["latency_requirement"].(string); ok && strings.TrimSpace(value) != "" {
+		profile.Latency = llmkit.LatencyRequirement(strings.TrimSpace(value))
+	}
+	if value, ok := values["failure_cost"].(string); ok && strings.TrimSpace(value) != "" {
+		profile.FailureCost = llmkit.FailureCost(strings.TrimSpace(value))
+	}
+	if value, ok := values["privacy_level"].(string); ok && strings.TrimSpace(value) != "" {
+		profile.Privacy = llmkit.PrivacyLevel(strings.TrimSpace(value))
+	}
+	profile.NeedsReasoning, _ = values["needs_reasoning"].(bool)
+	profile.NeedsTools, _ = values["needs_tools"].(bool)
+	profile.NeedsJSON, _ = values["needs_json"].(bool)
+	profile.NeedsLongContext, _ = values["needs_long_context"].(bool)
+	return profile
 }
 
 func parseRunMode(value string) (RunMode, bool) {

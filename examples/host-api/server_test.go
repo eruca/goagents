@@ -154,6 +154,44 @@ func TestHostAPIReturnsWorkflowLLMRouteAudit(t *testing.T) {
 	}
 }
 
+func TestHostAPIRoutesLLMByRequestTaskProfile(t *testing.T) {
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+
+	doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]any{
+		"id":    "wf-profile-simple",
+		"input": "Format a short note.",
+		"task_profile": map[string]any{
+			"task_type":    "format_note",
+			"complexity":   "simple",
+			"failure_cost": "low",
+			"privacy":      "local_preferred",
+		},
+	})
+	simpleRoutes := doJSON[llmRoutesResponse](t, server.Handler(), http.MethodGet, "/workflows/wf-profile-simple/llm-routes", nil)
+	if got := selectedModelAlias(t, simpleRoutes); got != "local-free" {
+		t.Fatalf("simple profile selected %q, want local-free; routes=%+v", got, simpleRoutes.Routes)
+	}
+
+	doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]any{
+		"id":    "wf-profile-hard",
+		"input": "Review a long, high-risk clinical policy decision.",
+		"task_profile": map[string]any{
+			"task_type":       "clinical_policy_review",
+			"complexity":      "hard",
+			"failure_cost":    "high",
+			"privacy":         "cloud_allowed",
+			"needs_reasoning": true,
+		},
+	})
+	hardRoutes := doJSON[llmRoutesResponse](t, server.Handler(), http.MethodGet, "/workflows/wf-profile-hard/llm-routes", nil)
+	if got := selectedModelAlias(t, hardRoutes); got != "cloud-advanced" {
+		t.Fatalf("hard profile selected %q, want cloud-advanced; routes=%+v", got, hardRoutes.Routes)
+	}
+}
+
 func TestHostAPIReturnsJSONErrors(t *testing.T) {
 	server, err := NewServer(Config{LLMKitHome: t.TempDir()})
 	if err != nil {
@@ -249,4 +287,15 @@ func hasModel(models []modelResponse, alias string) bool {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func selectedModelAlias(t *testing.T, routes llmRoutesResponse) string {
+	t.Helper()
+	for _, route := range routes.Routes {
+		if route.Selected {
+			return route.ModelAlias
+		}
+	}
+	t.Fatalf("no selected route found: %+v", routes.Routes)
+	return ""
 }
