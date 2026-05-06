@@ -124,6 +124,36 @@ func TestHostAPIDurableRuntimeResumesWorkflowAfterReopen(t *testing.T) {
 	}
 }
 
+func TestHostAPIReturnsWorkflowLLMRouteAudit(t *testing.T) {
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+
+	create := doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]string{
+		"id":    "wf-routes-1",
+		"input": "Review routing visibility through the host API.",
+	})
+
+	routes := doJSON[llmRoutesResponse](t, server.Handler(), http.MethodGet, "/workflows/wf-routes-1/llm-routes", nil)
+	if routes.WorkflowID != create.ID {
+		t.Fatalf("workflow id = %q, want %q", routes.WorkflowID, create.ID)
+	}
+	if len(routes.Routes) != 1 {
+		t.Fatalf("routes len = %d, want 1: %+v", len(routes.Routes), routes.Routes)
+	}
+	got := routes.Routes[0]
+	if got.RouteID != "route:wf-routes-1:1" || got.ModelAlias != "local-free" || got.Provider != "local" || got.AccountAlias != "local-dev" {
+		t.Fatalf("route audit = %+v, want selected local-free route", got)
+	}
+	if got.Score == 0 || got.ScoreBreakdown["price"] == 0 || len(got.CandidateModelAliases) != 2 {
+		t.Fatalf("route explainability fields missing: %+v", got)
+	}
+	if got.Outcome == nil || !got.Outcome.Success || got.Outcome.InputTokens != 5 || got.Outcome.OutputTokens != 7 {
+		t.Fatalf("route outcome = %+v, want successful token outcome", got.Outcome)
+	}
+}
+
 func TestHostAPIReturnsJSONErrors(t *testing.T) {
 	server, err := NewServer(Config{LLMKitHome: t.TempDir()})
 	if err != nil {

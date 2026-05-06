@@ -63,6 +63,21 @@ _ = stats
 
 `model-stats.json` groups records by `task_type`, `account_alias`, `model_alias`, and `provider`. Each bucket includes route attempts, completed outcomes, pending outcomes, success/failure rates, average latency, average token counts, average estimated cents, and last seen time. The file is derived data: keep `route-events.jsonl` and `outcomes.jsonl` as the append-only source of truth.
 
+Hosts can also expose route-level observability by reading the same audit files:
+
+```go
+records, err := llmkit.ReadRouteAudits(llmkitHome, llmkit.AuditFilter{
+    TaskID: workflowID,
+})
+if err != nil {
+    return err
+}
+```
+
+`ReadRouteAudits` joins route traces with matching outcomes by `route_id`.
+It returns only the allowlisted audit fields recorded in JSONL; it does not read
+or reconstruct prompts, responses, headers, or API keys.
+
 To make routing use this history, load the generated stats and pass them to the adapter:
 
 ```go

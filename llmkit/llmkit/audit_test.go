@@ -196,6 +196,62 @@ func TestJSONLRecorderDoesNotWriteAPIKeyFields(t *testing.T) {
 	}
 }
 
+func TestReadRouteAuditsJoinsRoutesAndOutcomes(t *testing.T) {
+	home := t.TempDir()
+	recorder, err := NewJSONLRecorder(home)
+	if err != nil {
+		t.Fatalf("NewJSONLRecorder returned error: %v", err)
+	}
+
+	if err := recorder.RecordRoute(context.Background(), RouteTrace{
+		RouteID:               "route-wf-1",
+		TaskID:                "wf-1",
+		Attempt:               1,
+		TaskType:              "host_api_review",
+		AccountAlias:          "local-dev",
+		ModelAlias:            "local-free",
+		Provider:              "local",
+		Selected:              true,
+		Reason:                "selected local-free",
+		Score:                 70,
+		ScoreBreakdown:        map[string]int{"price": 30, "local": 15},
+		CandidateModelAliases: []string{"local-free", "cloud-advanced"},
+	}); err != nil {
+		t.Fatalf("RecordRoute returned error: %v", err)
+	}
+	if err := recorder.RecordOutcome(context.Background(), TaskOutcome{
+		RouteID:        "route-wf-1",
+		TaskID:         "wf-1",
+		Attempt:        1,
+		TaskType:       "host_api_review",
+		AccountAlias:   "local-dev",
+		ModelAlias:     "local-free",
+		Provider:       "local",
+		Success:        true,
+		LatencyMillis:  12,
+		InputTokens:    5,
+		OutputTokens:   7,
+		EstimatedCents: 0,
+	}); err != nil {
+		t.Fatalf("RecordOutcome returned error: %v", err)
+	}
+
+	records, err := ReadRouteAudits(home, AuditFilter{TaskID: "wf-1"})
+	if err != nil {
+		t.Fatalf("ReadRouteAudits returned error: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records len = %d, want 1: %+v", len(records), records)
+	}
+	got := records[0]
+	if got.Route.RouteID != "route-wf-1" || got.Route.ModelAlias != "local-free" {
+		t.Fatalf("route record = %+v, want local-free route", got.Route)
+	}
+	if got.Outcome == nil || !got.Outcome.Success || got.Outcome.LatencyMillis != 12 {
+		t.Fatalf("outcome = %+v, want joined successful outcome", got.Outcome)
+	}
+}
+
 func readJSONLLines(t *testing.T, path string) []string {
 	t.Helper()
 

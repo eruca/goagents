@@ -85,6 +85,36 @@ type modelsResponse struct {
 	Health llmkit.ProviderHealthSnapshot `json:"health"`
 }
 
+type llmRoutesResponse struct {
+	WorkflowID string             `json:"workflow_id"`
+	Routes     []llmRouteResponse `json:"routes"`
+}
+
+type llmRouteResponse struct {
+	RouteID               string                   `json:"route_id,omitempty"`
+	TaskID                string                   `json:"task_id,omitempty"`
+	Attempt               int                      `json:"attempt,omitempty"`
+	TaskType              string                   `json:"task_type,omitempty"`
+	AccountAlias          string                   `json:"account_alias,omitempty"`
+	ModelAlias            string                   `json:"model_alias,omitempty"`
+	Provider              string                   `json:"provider,omitempty"`
+	Selected              bool                     `json:"selected"`
+	Reason                string                   `json:"reason,omitempty"`
+	Score                 int                      `json:"score,omitempty"`
+	ScoreBreakdown        map[string]int           `json:"score_breakdown,omitempty"`
+	CandidateModelAliases []string                 `json:"candidate_model_aliases,omitempty"`
+	Outcome               *llmRouteOutcomeResponse `json:"outcome,omitempty"`
+}
+
+type llmRouteOutcomeResponse struct {
+	Success        bool   `json:"success"`
+	ErrorCode      string `json:"error_code,omitempty"`
+	LatencyMillis  int    `json:"latency_ms,omitempty"`
+	InputTokens    int    `json:"input_tokens,omitempty"`
+	OutputTokens   int    `json:"output_tokens,omitempty"`
+	EstimatedCents int    `json:"estimated_cents,omitempty"`
+}
+
 type modelResponse struct {
 	Alias        string `json:"alias"`
 	Provider     string `json:"provider"`
@@ -164,6 +194,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /workflows", s.handleCreateWorkflow)
 	mux.HandleFunc("GET /workflows/{id}", s.handleGetWorkflow)
 	mux.HandleFunc("POST /workflows/{id}/approve", s.handleApproveWorkflow)
+	mux.HandleFunc("GET /workflows/{id}/llm-routes", s.handleGetWorkflowLLMRoutes)
 	mux.HandleFunc("GET /agent-runs/{id}", s.handleGetAgentRun)
 	mux.HandleFunc("GET /llmkit/models", s.handleModels)
 	return mux
@@ -229,6 +260,27 @@ func (s *Server) handleApproveWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, workflowToResponse(run, RunModeSync))
+}
+
+func (s *Server) handleGetWorkflowLLMRoutes(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := s.workflows.Get(r.Context(), id); err != nil {
+		writeWorkflowStoreError(w, err)
+		return
+	}
+	records, err := llmkit.ReadRouteAudits(s.llmHome, llmkit.AuditFilter{TaskID: id})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "llm_audit_error", err.Error())
+		return
+	}
+	routes := make([]llmRouteResponse, 0, len(records))
+	for _, record := range records {
+		routes = append(routes, llmRouteToResponse(record))
+	}
+	writeJSON(w, http.StatusOK, llmRoutesResponse{
+		WorkflowID: id,
+		Routes:     routes,
+	})
 }
 
 func (s *Server) handleGetAgentRun(w http.ResponseWriter, r *http.Request) {
@@ -483,6 +535,47 @@ func workflowToResponse(run workflowkit.WorkflowRun, runMode RunMode) workflowRe
 		WaitingReason: run.WaitingReason,
 		Completed:     append([]string(nil), run.CompletedSteps...),
 	}
+}
+
+func llmRouteToResponse(record llmkit.RouteAuditRecord) llmRouteResponse {
+	route := record.Route
+	response := llmRouteResponse{
+		RouteID:               route.RouteID,
+		TaskID:                route.TaskID,
+		Attempt:               route.Attempt,
+		TaskType:              route.TaskType,
+		AccountAlias:          route.AccountAlias,
+		ModelAlias:            route.ModelAlias,
+		Provider:              route.Provider,
+		Selected:              route.Selected,
+		Reason:                route.Reason,
+		Score:                 route.Score,
+		ScoreBreakdown:        copyScoreBreakdown(route.ScoreBreakdown),
+		CandidateModelAliases: append([]string(nil), route.CandidateModelAliases...),
+	}
+	if record.Outcome != nil {
+		outcome := record.Outcome
+		response.Outcome = &llmRouteOutcomeResponse{
+			Success:        outcome.Success,
+			ErrorCode:      outcome.ErrorCode,
+			LatencyMillis:  outcome.LatencyMillis,
+			InputTokens:    outcome.InputTokens,
+			OutputTokens:   outcome.OutputTokens,
+			EstimatedCents: outcome.EstimatedCents,
+		}
+	}
+	return response
+}
+
+func copyScoreBreakdown(values map[string]int) map[string]int {
+	if values == nil {
+		return nil
+	}
+	copied := make(map[string]int, len(values))
+	for key, value := range values {
+		copied[key] = value
+	}
+	return copied
 }
 
 func parseRunMode(value string) (RunMode, bool) {
