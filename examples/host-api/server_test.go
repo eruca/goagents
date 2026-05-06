@@ -167,6 +167,19 @@ func TestHostAPIReturnsWorkflowLLMRouteAudit(t *testing.T) {
 	if got.Outcome == nil || !got.Outcome.Success || got.Outcome.InputTokens != 5 || got.Outcome.OutputTokens != 7 {
 		t.Fatalf("route outcome = %+v, want successful token outcome", got.Outcome)
 	}
+
+	approved := doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows/wf-routes-1/approve", map[string]string{
+		"approved_by": "operator-routes",
+		"note":        "accepted",
+	})
+	if approved.Status != string(workflowkit.StatusSucceeded) {
+		t.Fatalf("approved response = %+v, want succeeded", approved)
+	}
+	approvedRoutes := doJSON[llmRoutesResponse](t, server.Handler(), http.MethodGet, "/workflows/wf-routes-1/llm-routes", nil)
+	approvedOutcome := selectedRoute(t, approvedRoutes).Outcome
+	if approvedOutcome == nil || approvedOutcome.BusinessOutcome != string(llmkit.BusinessOutcomeSuccess) || approvedOutcome.SuccessSignal != string(llmkit.SuccessSignalHumanAccepted) {
+		t.Fatalf("approved route outcome = %+v, want human accepted business outcome", approvedOutcome)
+	}
 }
 
 func TestHostAPIRoutesLLMByRequestTaskProfile(t *testing.T) {

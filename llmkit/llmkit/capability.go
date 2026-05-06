@@ -49,6 +49,7 @@ type ModelCapability struct {
 	ContextWindowClass  ContextWindowClass `json:"context_window_class"`
 	PriceClass          PriceClass         `json:"price_class"`
 	LatencyClass        LatencyClass       `json:"latency_class"`
+	EstimatedCents      int                `json:"estimated_cents,omitempty"`
 	MaxConcurrency      int                `json:"max_concurrency,omitempty"`
 	CurrentConcurrency  int                `json:"current_concurrency,omitempty"`
 	RecentFailureCount  int                `json:"recent_failure_count,omitempty"`

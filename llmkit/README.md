@@ -52,6 +52,7 @@ models:
     context_window_class: medium
     price_class: free
     latency_class: fast
+    estimated_cents: 0
   - alias: cloud-advanced
     model: advanced-model
     provider: openai_compatible
@@ -60,6 +61,7 @@ models:
     context_window_class: long
     price_class: high
     latency_class: normal
+    estimated_cents: 8
 ```
 
 The host is responsible for failing closed when a configured `api_key_env` is
@@ -75,6 +77,12 @@ Simple tasks should be local-first when the profile allows it. For example, low 
 
 Hard or high failure-cost tasks should route to an advanced model. For example, tasks that need stronger reasoning, long context, tool use, strict JSON, or reviewer-visible correctness should be profiled with `complexity: hard`, `failure_cost: high`, or the relevant `needs_*` flags so local simple models are filtered out or outscored.
 
+Hosts can set `TaskProfile.MaxEstimatedCents` to make cost a hard routing
+constraint. Candidates with a known `ModelCapability.EstimatedCents` above that
+limit are filtered out before scoring. `ApplyModelStats` also feeds
+`AvgEstimatedCents` back into candidates, so observed cost can enforce future
+budget constraints.
+
 Hosts provide `TaskProfile`; llmkit does not infer business risk from prompt text by itself. If the host does not provide a profile, `DefaultTaskProfile` uses a conservative medium/cloud-allowed baseline.
 
 ## Audit Files
@@ -82,7 +90,7 @@ Hosts provide `TaskProfile`; llmkit does not infer business risk from prompt tex
 `JSONLRecorder` writes two append-only audit files under `LLMKIT_HOME`:
 
 - `route-events.jsonl`: sanitized routing decisions, effective task profile, selected aliases, provider name, score, score breakdown, compact candidate aliases, and full candidate-level score/filter explanations.
-- `outcomes.jsonl`: sanitized outcome metadata such as success, error code, latency, token counts, and estimated cents.
+- `outcomes.jsonl`: sanitized outcome metadata such as provider success, business outcome signal, error code, latency, token counts, and estimated cents.
 
 Audit records intentionally avoid prompts, responses, headers, and API keys. The recorder also sanitizes key-like strings before writing JSONL.
 
@@ -130,6 +138,20 @@ client := goagentadapter.NewClient(goagentadapter.Config{
 
 The adapter applies stats after it receives the current `TaskProfile`, so history is task-type aware. Without `ModelStats`, routing behavior is unchanged.
 
+Long-running hosts can provide fresh stats for every route decision:
+
+```go
+client := goagentadapter.NewClient(goagentadapter.Config{
+    Candidates: config.Candidates(),
+    Providers:  providers,
+    ModelStatsProvider: func(ctx context.Context) (*llmkit.ModelStats, error) {
+        return llmkit.RefreshModelStats(llmkitHome)
+    },
+})
+```
+
+This keeps newly written outcomes useful without waiting for a process restart.
+
 ## Provider Health
 
 `MemoryHealthStore` tracks current provider/account/model runtime state:
@@ -168,6 +190,28 @@ calls `Begin` before invoking the selected provider, and calls `RecordOutcome`
 after success or failure. This keeps simple tasks local-first when local is
 healthy, while allowing fallback to cloud when the local provider is busy,
 quota-exhausted, or cooling down after failures.
+
+## Fallback Policy
+
+When a selected provider fails, the adapter removes that candidate and asks the
+policy to select the next best provider-backed candidate. Each attempt records a
+route trace with an incremented attempt number and, when enabled, a provider
+outcome.
+
+Hosts can cap fallback attempts:
+
+```go
+client := goagentadapter.NewClient(goagentadapter.Config{
+    Candidates: config.Candidates(),
+    Providers:  providers,
+    FallbackPolicy: goagentadapter.FallbackPolicy{
+        MaxAttempts: 2,
+    },
+})
+```
+
+`MaxAttempts <= 0` preserves the default behavior: try all remaining eligible
+provider-backed candidates.
 
 ## API Keys
 

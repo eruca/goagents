@@ -66,15 +66,23 @@ func BuildModelStats(home string) (*ModelStats, error) {
 	}); err != nil {
 		return nil, err
 	}
+	latestOutcomes := map[string]TaskOutcome{}
 	if err := readJSONL(filepath.Join(home, outcomesFile), func(line []byte) error {
 		var outcome TaskOutcome
 		if err := json.Unmarshal(line, &outcome); err != nil {
 			return err
 		}
-		builder.addOutcome(outcome)
+		if strings.TrimSpace(outcome.RouteID) == "" {
+			builder.addOutcome(outcome)
+			return nil
+		}
+		latestOutcomes[outcome.RouteID] = outcome
 		return nil
 	}); err != nil {
 		return nil, err
+	}
+	for _, outcome := range latestOutcomes {
+		builder.addOutcome(outcome)
 	}
 
 	return builder.stats(), nil
@@ -117,6 +125,7 @@ func ApplyModelStats(stats ModelStats, profile TaskProfile, candidates []Candida
 		enriched[i].Model.RecentFailureCount = entry.Failures
 		enriched[i].Model.RecentFailureRate = entry.FailureRate
 		enriched[i].Model.RecentLatencyMillis = entry.AvgLatencyMillis
+		enriched[i].Model.EstimatedCents = entry.AvgEstimatedCents
 	}
 	return enriched
 }

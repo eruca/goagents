@@ -58,6 +58,7 @@ models:
     context_window_class: medium
     price_class: free
     latency_class: fast
+    estimated_cents: 0
   - alias: cloud-advanced
     model: advanced-model
     provider: openai_compatible
@@ -66,12 +67,12 @@ models:
     context_window_class: long
     price_class: high
     latency_class: normal
+    estimated_cents: 8
 ```
 
-On startup, host-api refreshes `model-stats.json` from llmkit audit files and
-passes those stats to the goagent adapter. That makes historical failures,
-latency, token usage, and estimated cost visible in `/llmkit/models` and able
-to influence future routing decisions.
+Host-api refreshes `model-stats.json` from llmkit audit files before route
+decisions and when serving `/llmkit/models`. That makes new outcomes from a
+long-running process visible without waiting for restart.
 
 ## Endpoints
 
@@ -104,7 +105,8 @@ model and currently returns `unsupported_run_mode`.
   "task_profile_preset": "high_success",
   "task_profile": {
     "task_type": "policy_review",
-    "needs_reasoning": true
+    "needs_reasoning": true,
+    "max_estimated_cents": 10
   }
 }
 ```
@@ -131,6 +133,11 @@ decision is visible through `GET /workflows/{id}/llm-routes`.
 - `health`: in-memory provider health snapshot.
 - `stats`: generated model statistics grouped by task type, account, model,
   and provider.
+
+`POST /workflows/{id}/approve` records a business outcome signal on the
+selected LLM route: `business_outcome=success` and
+`success_signal=human_accepted`. Provider-level success remains available in the
+same route outcome.
 
 See `../../docs/host-api-contract.md` for request and response fields.
 

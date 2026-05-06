@@ -39,7 +39,6 @@ type Server struct {
 	health    *llmkit.MemoryHealthStore
 	llmHome   string
 	models    []llmkit.Candidate
-	stats     *llmkit.ModelStats
 	providers map[string]goagentadapter.ProviderClient
 }
 
@@ -57,15 +56,16 @@ type approveWorkflowRequest struct {
 }
 
 type taskProfileRequest struct {
-	TaskType         string `json:"task_type,omitempty"`
-	Complexity       string `json:"complexity,omitempty"`
-	Latency          string `json:"latency,omitempty"`
-	FailureCost      string `json:"failure_cost,omitempty"`
-	Privacy          string `json:"privacy,omitempty"`
-	NeedsReasoning   bool   `json:"needs_reasoning,omitempty"`
-	NeedsTools       bool   `json:"needs_tools,omitempty"`
-	NeedsJSON        bool   `json:"needs_json,omitempty"`
-	NeedsLongContext bool   `json:"needs_long_context,omitempty"`
+	TaskType          string `json:"task_type,omitempty"`
+	Complexity        string `json:"complexity,omitempty"`
+	Latency           string `json:"latency,omitempty"`
+	FailureCost       string `json:"failure_cost,omitempty"`
+	Privacy           string `json:"privacy,omitempty"`
+	MaxEstimatedCents int    `json:"max_estimated_cents,omitempty"`
+	NeedsReasoning    bool   `json:"needs_reasoning,omitempty"`
+	NeedsTools        bool   `json:"needs_tools,omitempty"`
+	NeedsJSON         bool   `json:"needs_json,omitempty"`
+	NeedsLongContext  bool   `json:"needs_long_context,omitempty"`
 }
 
 type workflowResponse struct {
@@ -136,24 +136,28 @@ type llmRouteCandidateResponse struct {
 }
 
 type llmRouteOutcomeResponse struct {
-	Success        bool   `json:"success"`
-	ErrorCode      string `json:"error_code,omitempty"`
-	LatencyMillis  int    `json:"latency_ms,omitempty"`
-	InputTokens    int    `json:"input_tokens,omitempty"`
-	OutputTokens   int    `json:"output_tokens,omitempty"`
-	EstimatedCents int    `json:"estimated_cents,omitempty"`
+	Success         bool   `json:"success"`
+	ErrorCode       string `json:"error_code,omitempty"`
+	LatencyMillis   int    `json:"latency_ms,omitempty"`
+	InputTokens     int    `json:"input_tokens,omitempty"`
+	OutputTokens    int    `json:"output_tokens,omitempty"`
+	EstimatedCents  int    `json:"estimated_cents,omitempty"`
+	BusinessOutcome string `json:"business_outcome,omitempty"`
+	SuccessSignal   string `json:"success_signal,omitempty"`
+	FailureReason   string `json:"failure_reason,omitempty"`
 }
 
 type taskProfileResponse struct {
-	TaskType         string `json:"task_type,omitempty"`
-	Complexity       string `json:"complexity,omitempty"`
-	Latency          string `json:"latency,omitempty"`
-	FailureCost      string `json:"failure_cost,omitempty"`
-	Privacy          string `json:"privacy,omitempty"`
-	NeedsReasoning   bool   `json:"needs_reasoning,omitempty"`
-	NeedsTools       bool   `json:"needs_tools,omitempty"`
-	NeedsJSON        bool   `json:"needs_json,omitempty"`
-	NeedsLongContext bool   `json:"needs_long_context,omitempty"`
+	TaskType          string `json:"task_type,omitempty"`
+	Complexity        string `json:"complexity,omitempty"`
+	Latency           string `json:"latency,omitempty"`
+	FailureCost       string `json:"failure_cost,omitempty"`
+	Privacy           string `json:"privacy,omitempty"`
+	MaxEstimatedCents int    `json:"max_estimated_cents,omitempty"`
+	NeedsReasoning    bool   `json:"needs_reasoning,omitempty"`
+	NeedsTools        bool   `json:"needs_tools,omitempty"`
+	NeedsJSON         bool   `json:"needs_json,omitempty"`
+	NeedsLongContext  bool   `json:"needs_long_context,omitempty"`
 }
 
 type modelResponse struct {
@@ -192,7 +196,7 @@ func NewServer(config Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	models, providers, stats, err := loadLLMKitComposition(resolved.LLMKitHome)
+	models, providers, _, err := loadLLMKitComposition(resolved.LLMKitHome)
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +220,6 @@ func NewServer(config Config) (*Server, error) {
 		health:    llmkit.NewMemoryHealthStore(llmkit.HealthPolicy{}),
 		llmHome:   resolved.LLMKitHome,
 		models:    models,
-		stats:     stats,
 		providers: providers,
 	}
 	server.executor = workflowkit.NewExecutor(workflows, []workflowkit.Step{
@@ -330,6 +333,10 @@ func (s *Server) handleApproveWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeWorkflowStoreError(w, err)
 		return
 	}
+	if err := s.recordBusinessOutcome(r.Context(), id); err != nil {
+		writeError(w, http.StatusInternalServerError, "llm_audit_error", err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, workflowToResponse(run, RunModeSync))
 }
 
@@ -380,6 +387,11 @@ func (s *Server) handleGetAgentRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
+	stats, err := llmkit.RefreshModelStats(s.llmHome)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "llm_audit_error", err.Error())
+		return
+	}
 	models := make([]modelResponse, 0, len(s.models))
 	for _, candidate := range s.models {
 		models = append(models, modelResponse{
@@ -393,8 +405,42 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, modelsResponse{
 		Models: models,
 		Health: s.health.Snapshot(),
-		Stats:  modelStatsToResponse(s.stats),
+		Stats:  modelStatsToResponse(stats),
 	})
+}
+
+func (s *Server) recordBusinessOutcome(ctx context.Context, workflowID string) error {
+	records, err := llmkit.ReadRouteAudits(s.llmHome, llmkit.AuditFilter{TaskID: workflowID})
+	if err != nil {
+		return err
+	}
+	if len(records) == 0 {
+		return nil
+	}
+	record := records[len(records)-1]
+	outcome := llmkit.TaskOutcome{
+		RouteID:         record.Route.RouteID,
+		TaskID:          record.Route.TaskID,
+		Attempt:         record.Route.Attempt,
+		TaskType:        record.Route.TaskType,
+		AccountAlias:    record.Route.AccountAlias,
+		ModelAlias:      record.Route.ModelAlias,
+		Provider:        record.Route.Provider,
+		Success:         true,
+		BusinessOutcome: llmkit.BusinessOutcomeSuccess,
+		SuccessSignal:   llmkit.SuccessSignalHumanAccepted,
+	}
+	if record.Outcome != nil {
+		outcome = *record.Outcome
+		outcome.BusinessOutcome = llmkit.BusinessOutcomeSuccess
+		outcome.SuccessSignal = llmkit.SuccessSignalHumanAccepted
+		outcome.FailureReason = ""
+	}
+	recorder, err := llmkit.NewJSONLRecorder(s.llmHome)
+	if err != nil {
+		return err
+	}
+	return recorder.RecordOutcome(ctx, outcome)
 }
 
 func (s *Server) agentStep() workflowkit.Step {
@@ -403,8 +449,10 @@ func (s *Server) agentStep() workflowkit.Step {
 		runs:       s.runs,
 		health:     s.health,
 		candidates: s.models,
-		stats:      s.stats,
-		providers:  s.providers,
+		statsProvider: func(ctx context.Context) (*llmkit.ModelStats, error) {
+			return llmkit.RefreshModelStats(s.llmHome)
+		},
+		providers: s.providers,
 	}
 	return agentstep.New("agent_review", runner, func(run workflowkit.WorkflowRun) agentcore.RunRequest {
 		profile := taskProfileFromMetadata(run.Metadata["task_profile"])
@@ -445,12 +493,12 @@ func (s *Server) agentStep() workflowkit.Step {
 }
 
 type routingAgentRunner struct {
-	llmkitHome string
-	runs       runkit.Store
-	health     llmkit.HealthStore
-	candidates []llmkit.Candidate
-	stats      *llmkit.ModelStats
-	providers  map[string]goagentadapter.ProviderClient
+	llmkitHome    string
+	runs          runkit.Store
+	health        llmkit.HealthStore
+	candidates    []llmkit.Candidate
+	statsProvider goagentadapter.ModelStatsProvider
+	providers     map[string]goagentadapter.ProviderClient
 }
 
 func (r routingAgentRunner) RunDetailed(ctx context.Context, req agentcore.RunRequest) (*agentcore.RunResult, error) {
@@ -476,10 +524,10 @@ func (r routingAgentRunner) RunDetailed(ctx context.Context, req agentcore.RunRe
 				Attempt: 1,
 			}
 		},
-		Recorder:       recorder,
-		RecordOutcomes: true,
-		ModelStats:     r.stats,
-		HealthStore:    r.health,
+		Recorder:           recorder,
+		RecordOutcomes:     true,
+		ModelStatsProvider: r.statsProvider,
+		HealthStore:        r.health,
 	})
 	agent, err := agentcore.NewAgent(
 		agentcore.WithLLM(client),
@@ -694,12 +742,15 @@ func llmRouteToResponse(record llmkit.RouteAuditRecord) llmRouteResponse {
 	if record.Outcome != nil {
 		outcome := record.Outcome
 		response.Outcome = &llmRouteOutcomeResponse{
-			Success:        outcome.Success,
-			ErrorCode:      outcome.ErrorCode,
-			LatencyMillis:  outcome.LatencyMillis,
-			InputTokens:    outcome.InputTokens,
-			OutputTokens:   outcome.OutputTokens,
-			EstimatedCents: outcome.EstimatedCents,
+			Success:         outcome.Success,
+			ErrorCode:       outcome.ErrorCode,
+			LatencyMillis:   outcome.LatencyMillis,
+			InputTokens:     outcome.InputTokens,
+			OutputTokens:    outcome.OutputTokens,
+			EstimatedCents:  outcome.EstimatedCents,
+			BusinessOutcome: string(outcome.BusinessOutcome),
+			SuccessSignal:   string(outcome.SuccessSignal),
+			FailureReason:   outcome.FailureReason,
 		}
 	}
 	return response
@@ -762,15 +813,16 @@ func taskProfileToResponse(profile *llmkit.TaskProfile) *taskProfileResponse {
 		return nil
 	}
 	return &taskProfileResponse{
-		TaskType:         profile.TaskType,
-		Complexity:       string(profile.Complexity),
-		Latency:          string(profile.Latency),
-		FailureCost:      string(profile.FailureCost),
-		Privacy:          string(profile.Privacy),
-		NeedsReasoning:   profile.NeedsReasoning,
-		NeedsTools:       profile.NeedsTools,
-		NeedsJSON:        profile.NeedsJSON,
-		NeedsLongContext: profile.NeedsLongContext,
+		TaskType:          profile.TaskType,
+		Complexity:        string(profile.Complexity),
+		Latency:           string(profile.Latency),
+		FailureCost:       string(profile.FailureCost),
+		Privacy:           string(profile.Privacy),
+		MaxEstimatedCents: profile.MaxEstimatedCents,
+		NeedsReasoning:    profile.NeedsReasoning,
+		NeedsTools:        profile.NeedsTools,
+		NeedsJSON:         profile.NeedsJSON,
+		NeedsLongContext:  profile.NeedsLongContext,
 	}
 }
 
@@ -833,6 +885,9 @@ func applyTaskProfileOverride(profile *llmkit.TaskProfile, req *taskProfileReque
 			return fmt.Errorf("unsupported privacy %q", req.Privacy)
 		}
 		profile.Privacy = value
+	}
+	if req.MaxEstimatedCents > 0 {
+		profile.MaxEstimatedCents = req.MaxEstimatedCents
 	}
 	profile.NeedsReasoning = req.NeedsReasoning
 	profile.NeedsTools = req.NeedsTools
@@ -921,6 +976,9 @@ func taskProfileFromMap(values map[string]any) llmkit.TaskProfile {
 	}
 	if value, ok := values["privacy_level"].(string); ok && strings.TrimSpace(value) != "" {
 		profile.Privacy = llmkit.PrivacyLevel(strings.TrimSpace(value))
+	}
+	if value, ok := values["max_estimated_cents"].(float64); ok && value > 0 {
+		profile.MaxEstimatedCents = int(value)
 	}
 	profile.NeedsReasoning, _ = values["needs_reasoning"].(bool)
 	profile.NeedsTools, _ = values["needs_tools"].(bool)

@@ -96,20 +96,23 @@ func TestJSONLRecorderRecordsTaskOutcome(t *testing.T) {
 	}
 
 	outcome := TaskOutcome{
-		RouteID:        "route-123",
-		TaskID:         "task-456",
-		Attempt:        2,
-		RecordedAt:     time.Date(2026, 5, 4, 10, 31, 0, 0, time.UTC),
-		TaskType:       "extract",
-		AccountAlias:   "backup-account",
-		ModelAlias:     "reliable-json",
-		Provider:       "anthropic",
-		Success:        false,
-		ErrorCode:      "rate_limited",
-		LatencyMillis:  1234,
-		InputTokens:    300,
-		OutputTokens:   120,
-		EstimatedCents: 7,
+		RouteID:         "route-123",
+		TaskID:          "task-456",
+		Attempt:         2,
+		RecordedAt:      time.Date(2026, 5, 4, 10, 31, 0, 0, time.UTC),
+		TaskType:        "extract",
+		AccountAlias:    "backup-account",
+		ModelAlias:      "reliable-json",
+		Provider:        "anthropic",
+		Success:         false,
+		BusinessOutcome: BusinessOutcomeFailure,
+		SuccessSignal:   SuccessSignalHumanAccepted,
+		FailureReason:   "operator rejected",
+		ErrorCode:       "rate_limited",
+		LatencyMillis:   1234,
+		InputTokens:     300,
+		OutputTokens:    120,
+		EstimatedCents:  7,
 	}
 	if err := recorder.RecordOutcome(context.Background(), outcome); err != nil {
 		t.Fatalf("RecordOutcome returned error: %v", err)
@@ -132,6 +135,9 @@ func TestJSONLRecorderRecordsTaskOutcome(t *testing.T) {
 	}
 	if got.Success || got.ErrorCode != "rate_limited" || got.LatencyMillis != 1234 {
 		t.Fatalf("task outcome did not preserve outcome fields: %+v", got)
+	}
+	if got.BusinessOutcome != BusinessOutcomeFailure || got.SuccessSignal != SuccessSignalHumanAccepted || got.FailureReason != "operator rejected" {
+		t.Fatalf("task outcome did not preserve business outcome fields: %+v", got)
 	}
 }
 

@@ -153,6 +153,97 @@ func TestClientAppliesModelStatsAfterProfileSelection(t *testing.T) {
 	}
 }
 
+func TestClientRefreshesModelStatsForEachChat(t *testing.T) {
+	local := &fakeProviderClient{response: &ports.ChatResponse{Content: "local"}}
+	cloud := &fakeProviderClient{response: &ports.ChatResponse{Content: "cloud"}}
+	calls := 0
+	statsProvider := func(context.Context) (*llmkit.ModelStats, error) {
+		calls++
+		if calls == 1 {
+			return &llmkit.ModelStats{}, nil
+		}
+		return &llmkit.ModelStats{Models: map[string]llmkit.ModelStatsEntry{
+			"simple|local-account|local-small|local": {
+				TaskType:     "simple",
+				AccountAlias: "local-account",
+				ModelAlias:   "local-small",
+				Provider:     "local",
+				OutcomeCount: 10,
+				Failures:     10,
+				FailureRate:  1,
+			},
+		}}, nil
+	}
+
+	client := NewClient(Config{
+		Candidates: testCandidates(),
+		Providers: map[string]ProviderClient{
+			"local-small":    local,
+			"cloud-advanced": cloud,
+		},
+		ProfileProvider:    fixedProfile(simpleProfile()),
+		ModelStatsProvider: statsProvider,
+	})
+
+	first, err := client.Chat(context.Background(), ports.ChatRequest{})
+	if err != nil {
+		t.Fatalf("first Chat() error = %v", err)
+	}
+	if first.Content != "local" {
+		t.Fatalf("first response = %q, want local", first.Content)
+	}
+	second, err := client.Chat(context.Background(), ports.ChatRequest{})
+	if err != nil {
+		t.Fatalf("second Chat() error = %v", err)
+	}
+	if second.Content != "cloud" {
+		t.Fatalf("second response = %q, want cloud after refreshed stats", second.Content)
+	}
+	if calls != 2 {
+		t.Fatalf("stats provider calls = %d, want 2", calls)
+	}
+	if len(local.requests) != 1 {
+		t.Fatalf("local provider calls = %d, want 1", len(local.requests))
+	}
+}
+
+func TestClientRespectsFallbackMaxAttempts(t *testing.T) {
+	local := &fakeProviderClient{err: errors.New("local failed")}
+	cloud := &fakeProviderClient{response: &ports.ChatResponse{Content: "cloud"}}
+	recorder := &fakeRecorder{}
+
+	client := NewClient(Config{
+		Candidates: testCandidates(),
+		Providers: map[string]ProviderClient{
+			"local-small":    local,
+			"cloud-advanced": cloud,
+		},
+		ProfileProvider: fixedProfile(simpleProfile()),
+		RouteMetadataProvider: fixedRouteMetadata(RouteMetadata{
+			RouteID: "route-fallback",
+			TaskID:  "task-fallback",
+			Attempt: 1,
+		}),
+		Recorder:       recorder,
+		RecordOutcomes: true,
+		FallbackPolicy: FallbackPolicy{MaxAttempts: 1},
+	})
+
+	_, err := client.Chat(context.Background(), ports.ChatRequest{})
+	if err == nil {
+		t.Fatal("Chat() error = nil, want provider failure without fallback")
+	}
+	if len(local.requests) != 1 || len(cloud.requests) != 0 {
+		t.Fatalf("provider calls local=%d cloud=%d, want local only", len(local.requests), len(cloud.requests))
+	}
+	if len(recorder.routes) != 1 || recorder.routes[0].FallbackMaxAttempts != 1 {
+		t.Fatalf("recorded routes = %+v, want one route with fallback max attempts", recorder.routes)
+	}
+	if len(recorder.outcomes) != 1 || recorder.outcomes[0].ErrorCode != "provider_error" {
+		t.Fatalf("recorded outcomes = %+v, want provider error outcome", recorder.outcomes)
+	}
+}
+
 func TestClientAppliesProviderHealthAndRecordsOutcomes(t *testing.T) {
 	local := &fakeProviderClient{response: &ports.ChatResponse{Content: "local"}}
 	cloud := &fakeProviderClient{response: &ports.ChatResponse{Content: "cloud"}}

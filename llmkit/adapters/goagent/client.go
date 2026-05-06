@@ -25,11 +25,19 @@ type ProfileProvider func(context.Context, ports.ChatRequest) llmkit.TaskProfile
 // RouteMetadataProvider supplies allowlisted trace identifiers.
 type RouteMetadataProvider func(context.Context, ports.ChatRequest) RouteMetadata
 
+// ModelStatsProvider supplies fresh model statistics before each route decision.
+type ModelStatsProvider func(context.Context) (*llmkit.ModelStats, error)
+
 // RouteMetadata contains host-provided trace identifiers.
 type RouteMetadata struct {
 	RouteID string
 	TaskID  string
 	Attempt int
+}
+
+// FallbackPolicy controls provider fallback after route-level failures.
+type FallbackPolicy struct {
+	MaxAttempts int
 }
 
 // Config configures the goagent adapter.
@@ -42,7 +50,9 @@ type Config struct {
 	Recorder              llmkit.Recorder
 	RecordOutcomes        bool
 	ModelStats            *llmkit.ModelStats
+	ModelStatsProvider    ModelStatsProvider
 	HealthStore           llmkit.HealthStore
+	FallbackPolicy        FallbackPolicy
 }
 
 // Client implements goagent's LLMClient by routing to a provider client.
@@ -55,7 +65,9 @@ type Client struct {
 	recorder              llmkit.Recorder
 	recordOutcomes        bool
 	modelStats            *llmkit.ModelStats
+	modelStatsProvider    ModelStatsProvider
 	healthStore           llmkit.HealthStore
+	fallbackPolicy        FallbackPolicy
 }
 
 // NewClient creates a goagent LLMClient adapter.
@@ -77,7 +89,9 @@ func NewClient(config Config) *Client {
 		recorder:              config.Recorder,
 		recordOutcomes:        config.RecordOutcomes,
 		modelStats:            config.ModelStats,
+		modelStatsProvider:    config.ModelStatsProvider,
 		healthStore:           config.HealthStore,
+		fallbackPolicy:        config.FallbackPolicy,
 	}
 }
 
@@ -89,9 +103,15 @@ func (c *Client) Chat(ctx context.Context, req ports.ChatRequest) (*ports.ChatRe
 		profile = c.profileProvider(ctx, req)
 	}
 
-	candidates := c.availableCandidates(profile)
+	candidates, err := c.availableCandidates(ctx, profile)
+	if err != nil {
+		return nil, err
+	}
 	var failures []error
 	for attemptOffset := 0; len(candidates) > 0; attemptOffset++ {
+		if c.maxAttempts(candidates) > 0 && attemptOffset >= c.maxAttempts(candidates) {
+			break
+		}
 		decision, err := c.policy.Select(profile, candidates)
 		if err != nil {
 			return nil, joinRouteErrors(err, failures)
@@ -165,9 +185,9 @@ func (c *Client) recordOutcome(ctx context.Context, profile llmkit.TaskProfile, 
 	return c.recorder.RecordOutcome(ctx, outcome)
 }
 
-func (c *Client) availableCandidates(profile llmkit.TaskProfile) []llmkit.Candidate {
+func (c *Client) availableCandidates(ctx context.Context, profile llmkit.TaskProfile) ([]llmkit.Candidate, error) {
 	if len(c.candidates) == 0 {
-		return nil
+		return nil, nil
 	}
 	available := make([]llmkit.Candidate, 0, len(c.candidates))
 	for _, candidate := range c.candidates {
@@ -177,13 +197,21 @@ func (c *Client) availableCandidates(profile llmkit.TaskProfile) []llmkit.Candid
 		}
 		available = append(available, candidate)
 	}
-	if c.modelStats != nil {
-		available = llmkit.ApplyModelStats(*c.modelStats, profile, available)
+	stats := c.modelStats
+	if c.modelStatsProvider != nil {
+		loaded, err := c.modelStatsProvider(ctx)
+		if err != nil {
+			return nil, err
+		}
+		stats = loaded
+	}
+	if stats != nil {
+		available = llmkit.ApplyModelStats(*stats, profile, available)
 	}
 	if c.healthStore != nil {
 		available = llmkit.ApplyProviderHealth(c.healthStore.Snapshot(), available)
 	}
-	return available
+	return available, nil
 }
 
 func (c *Client) routeTrace(ctx context.Context, req ports.ChatRequest, profile llmkit.TaskProfile, decision llmkit.RouteDecision, attemptOffset int) (llmkit.RouteTrace, error) {
@@ -209,7 +237,18 @@ func (c *Client) routeTrace(ctx context.Context, req ports.ChatRequest, profile 
 		ScoreBreakdown:        copyScoreBreakdown(decision.ScoreBreakdown),
 		CandidateModelAliases: candidateModelAliases(decision.Candidates),
 		Candidates:            copyCandidateScores(decision.Candidates),
+		FallbackMaxAttempts:   c.fallbackPolicy.MaxAttempts,
 	}, nil
+}
+
+func (c *Client) maxAttempts(candidates []llmkit.Candidate) int {
+	if c.fallbackPolicy.MaxAttempts <= 0 {
+		return 0
+	}
+	if c.fallbackPolicy.MaxAttempts > len(candidates) {
+		return len(candidates)
+	}
+	return c.fallbackPolicy.MaxAttempts
 }
 
 func copyTaskProfile(profile llmkit.TaskProfile) *llmkit.TaskProfile {

@@ -39,25 +39,47 @@ type RouteTrace struct {
 	ScoreBreakdown        map[string]int   `json:"score_breakdown,omitempty"`
 	CandidateModelAliases []string         `json:"candidate_model_aliases,omitempty"`
 	Candidates            []CandidateScore `json:"candidates,omitempty"`
+	FallbackMaxAttempts   int              `json:"fallback_max_attempts,omitempty"`
 }
+
+type BusinessOutcome string
+
+const (
+	BusinessOutcomeSuccess BusinessOutcome = "success"
+	BusinessOutcomeFailure BusinessOutcome = "failure"
+	BusinessOutcomePartial BusinessOutcome = "partial"
+	BusinessOutcomeUnknown BusinessOutcome = "unknown"
+)
+
+type SuccessSignal string
+
+const (
+	SuccessSignalSchemaPassed  SuccessSignal = "schema_passed"
+	SuccessSignalTestsPassed   SuccessSignal = "tests_passed"
+	SuccessSignalHumanAccepted SuccessSignal = "human_accepted"
+	SuccessSignalToolCompleted SuccessSignal = "tool_completed"
+)
 
 // TaskOutcome is the allowlisted audit record for the result of an LLM task.
 // It records outcome metadata, not prompts, responses, API keys, or headers.
 type TaskOutcome struct {
-	RouteID        string    `json:"route_id,omitempty"`
-	TaskID         string    `json:"task_id,omitempty"`
-	Attempt        int       `json:"attempt,omitempty"`
-	RecordedAt     time.Time `json:"recorded_at,omitempty"`
-	TaskType       string    `json:"task_type,omitempty"`
-	AccountAlias   string    `json:"account_alias,omitempty"`
-	ModelAlias     string    `json:"model_alias,omitempty"`
-	Provider       string    `json:"provider,omitempty"`
-	Success        bool      `json:"success"`
-	ErrorCode      string    `json:"error_code,omitempty"`
-	LatencyMillis  int       `json:"latency_ms,omitempty"`
-	InputTokens    int       `json:"input_tokens,omitempty"`
-	OutputTokens   int       `json:"output_tokens,omitempty"`
-	EstimatedCents int       `json:"estimated_cents,omitempty"`
+	RouteID         string          `json:"route_id,omitempty"`
+	TaskID          string          `json:"task_id,omitempty"`
+	Attempt         int             `json:"attempt,omitempty"`
+	RecordedAt      time.Time       `json:"recorded_at,omitempty"`
+	TaskType        string          `json:"task_type,omitempty"`
+	AccountAlias    string          `json:"account_alias,omitempty"`
+	ModelAlias      string          `json:"model_alias,omitempty"`
+	Provider        string          `json:"provider,omitempty"`
+	Success         bool            `json:"success"`
+	BusinessOutcome BusinessOutcome `json:"business_outcome,omitempty"`
+	SuccessSignal   SuccessSignal   `json:"success_signal,omitempty"`
+	FailureReason   string          `json:"failure_reason,omitempty"`
+	ErrorCode       string          `json:"error_code,omitempty"`
+	LatencyMillis   int             `json:"latency_ms,omitempty"`
+	InputTokens     int             `json:"input_tokens,omitempty"`
+	OutputTokens    int             `json:"output_tokens,omitempty"`
+	EstimatedCents  int             `json:"estimated_cents,omitempty"`
 }
 
 // Recorder persists routing and outcome audit records.
@@ -243,6 +265,9 @@ func sanitizeTaskOutcome(outcome TaskOutcome) TaskOutcome {
 	outcome.AccountAlias = sanitizeAuditString(outcome.AccountAlias)
 	outcome.ModelAlias = sanitizeAuditString(outcome.ModelAlias)
 	outcome.Provider = sanitizeAuditString(outcome.Provider)
+	outcome.BusinessOutcome = BusinessOutcome(sanitizeAuditString(string(outcome.BusinessOutcome)))
+	outcome.SuccessSignal = SuccessSignal(sanitizeAuditString(string(outcome.SuccessSignal)))
+	outcome.FailureReason = sanitizeAuditString(outcome.FailureReason)
 	outcome.ErrorCode = sanitizeAuditString(outcome.ErrorCode)
 	return outcome
 }

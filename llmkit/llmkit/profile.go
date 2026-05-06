@@ -49,16 +49,17 @@ const (
 // TaskProfile is the host-provided or default task description used by later
 // routing steps.
 type TaskProfile struct {
-	TaskType         string             `json:"task_type,omitempty"`
-	Source           ProfileSource      `json:"source,omitempty"`
-	Complexity       Complexity         `json:"complexity"`
-	Latency          LatencyRequirement `json:"latency_requirement"`
-	FailureCost      FailureCost        `json:"failure_cost"`
-	Privacy          PrivacyLevel       `json:"privacy_level"`
-	NeedsReasoning   bool               `json:"needs_reasoning,omitempty"`
-	NeedsTools       bool               `json:"needs_tools,omitempty"`
-	NeedsJSON        bool               `json:"needs_json,omitempty"`
-	NeedsLongContext bool               `json:"needs_long_context,omitempty"`
+	TaskType          string             `json:"task_type,omitempty"`
+	Source            ProfileSource      `json:"source,omitempty"`
+	Complexity        Complexity         `json:"complexity"`
+	Latency           LatencyRequirement `json:"latency_requirement"`
+	FailureCost       FailureCost        `json:"failure_cost"`
+	Privacy           PrivacyLevel       `json:"privacy_level"`
+	MaxEstimatedCents int                `json:"max_estimated_cents,omitempty"`
+	NeedsReasoning    bool               `json:"needs_reasoning,omitempty"`
+	NeedsTools        bool               `json:"needs_tools,omitempty"`
+	NeedsJSON         bool               `json:"needs_json,omitempty"`
+	NeedsLongContext  bool               `json:"needs_long_context,omitempty"`
 }
 
 // DefaultTaskProfile returns the conservative baseline profile used when the

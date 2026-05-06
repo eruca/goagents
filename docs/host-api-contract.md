@@ -72,6 +72,7 @@ Request:
     "latency": "normal",
     "failure_cost": "high",
     "privacy": "cloud_allowed",
+    "max_estimated_cents": 10,
     "needs_reasoning": true,
     "needs_tools": false,
     "needs_json": false,
@@ -91,7 +92,8 @@ Fields:
 - `task_profile`: optional host override. Preset values are applied first.
   Non-empty string fields override the preset. Boolean fields are decoded with
   Go zero values, so an omitted boolean in a present `task_profile` object is
-  currently treated as `false`.
+  currently treated as `false`. `max_estimated_cents` is a hard per-task budget
+  filter when known candidate cost is available.
 
 Response status: `202 Accepted`.
 
@@ -217,7 +219,9 @@ Response:
         "latency_ms": 1200,
         "input_tokens": 11,
         "output_tokens": 13,
-        "estimated_cents": 0
+        "estimated_cents": 0,
+        "business_outcome": "success",
+        "success_signal": "human_accepted"
       }
     }
   ]
@@ -310,10 +314,9 @@ Response:
 }
 ```
 
-`stats` is generated from llmkit audit files at server startup. During a long
-running process, new outcomes are still written to `outcomes.jsonl`, but the
-in-memory `stats` response and history-aware routing are refreshed only when
-the host refreshes/restarts the server in the current example.
+`stats` is generated from llmkit audit files when the endpoint is served.
+Host-api also refreshes stats before route decisions, so long-running processes
+can use newly written outcomes.
 
 ## Current Non-Goals
 
@@ -321,5 +324,4 @@ the host refreshes/restarts the server in the current example.
 - Queued worker execution.
 - Server-sent events or live workflow updates.
 - Distributed provider health.
-- Hard cost budgets.
-- Business outcome ingestion beyond provider-level outcome records.
+- Project-wide or account-wide cost budgets.

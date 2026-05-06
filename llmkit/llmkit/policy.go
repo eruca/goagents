@@ -140,6 +140,9 @@ func (p RoutePolicy) unavailableReason(profile TaskProfile, candidate Candidate)
 	if candidate.ProviderMaxConcurrency > 0 && candidate.ProviderInFlight >= candidate.ProviderMaxConcurrency {
 		return "provider concurrency is full"
 	}
+	if profile.MaxEstimatedCents > 0 && candidate.Model.EstimatedCents > profile.MaxEstimatedCents {
+		return "estimated cost exceeds task budget"
+	}
 	if !candidate.Model.Matches(profile) {
 		return "model does not match task requirements"
 	}

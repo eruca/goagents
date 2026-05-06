@@ -118,6 +118,27 @@ func TestRoutePolicySkipsRateLimitedOrConcurrencyFullAccounts(t *testing.T) {
 	}
 }
 
+func TestRoutePolicyAppliesTaskMaxEstimatedCentsAsHardConstraint(t *testing.T) {
+	profile := DefaultTaskProfile()
+	profile.MaxEstimatedCents = 5
+
+	expensive := candidate("expensive", CapabilityBalanced, PriceHigh, LatencyNormalClass, false)
+	expensive.Model.EstimatedCents = 10
+	affordable := candidate("affordable", CapabilityBalanced, PriceLow, LatencyNormalClass, false)
+	affordable.Model.EstimatedCents = 4
+
+	decision, err := RoutePolicy{}.Select(profile, []Candidate{expensive, affordable})
+	if err != nil {
+		t.Fatalf("Select returned error: %v", err)
+	}
+	if decision.SelectedAlias != "affordable" {
+		t.Fatalf("SelectedAlias = %q, want affordable; decision=%+v", decision.SelectedAlias, decision)
+	}
+	if !candidateExcludedFor(decision.Candidates, "expensive", "estimated cost exceeds task budget") {
+		t.Fatalf("expensive candidate should be excluded by budget: %+v", decision.Candidates)
+	}
+}
+
 func TestRoutePolicyUsesStableAccountTieBreakForSameModelAlias(t *testing.T) {
 	profile := DefaultTaskProfile()
 

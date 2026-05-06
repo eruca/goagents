@@ -177,6 +177,61 @@ func TestRefreshModelStatsAggregatesOutcomesAndPendingRoutes(t *testing.T) {
 	}
 }
 
+func TestRefreshModelStatsUsesLatestOutcomePerRoute(t *testing.T) {
+	home := t.TempDir()
+	recorder, err := NewJSONLRecorder(home)
+	if err != nil {
+		t.Fatalf("NewJSONLRecorder returned error: %v", err)
+	}
+	trace := RouteTrace{
+		RouteID:      "route-1",
+		TaskID:       "task-1",
+		TaskType:     "review",
+		AccountAlias: "local",
+		ModelAlias:   "local-small",
+		Provider:     "local",
+		Selected:     true,
+	}
+	if err := recorder.RecordRoute(context.Background(), trace); err != nil {
+		t.Fatalf("RecordRoute returned error: %v", err)
+	}
+	if err := recorder.RecordOutcome(context.Background(), TaskOutcome{
+		RouteID:      "route-1",
+		TaskID:       "task-1",
+		TaskType:     "review",
+		AccountAlias: "local",
+		ModelAlias:   "local-small",
+		Provider:     "local",
+		Success:      true,
+		InputTokens:  10,
+	}); err != nil {
+		t.Fatalf("RecordOutcome provider returned error: %v", err)
+	}
+	if err := recorder.RecordOutcome(context.Background(), TaskOutcome{
+		RouteID:         "route-1",
+		TaskID:          "task-1",
+		TaskType:        "review",
+		AccountAlias:    "local",
+		ModelAlias:      "local-small",
+		Provider:        "local",
+		Success:         true,
+		BusinessOutcome: BusinessOutcomeSuccess,
+		SuccessSignal:   SuccessSignalHumanAccepted,
+		InputTokens:     10,
+	}); err != nil {
+		t.Fatalf("RecordOutcome business returned error: %v", err)
+	}
+
+	stats, err := RefreshModelStats(home)
+	if err != nil {
+		t.Fatalf("RefreshModelStats returned error: %v", err)
+	}
+	got := stats.Models["review|local|local-small|local"]
+	if got.OutcomeCount != 1 || got.Successes != 1 || got.PendingOutcomes != 0 {
+		t.Fatalf("stats = %+v, want latest outcome counted once", got)
+	}
+}
+
 func TestApplyModelStatsMakesPolicyPreferReliableModelForHighFailureCostTask(t *testing.T) {
 	profile := DefaultTaskProfile()
 	profile.TaskType = "rewrite"
@@ -228,6 +283,43 @@ func TestApplyModelStatsMakesPolicyPreferReliableModelForHighFailureCostTask(t *
 	localScore := findCandidateScore(t, decision.Candidates, "local-balanced")
 	if localScore.ScoreBreakdown["reliability"] >= 0 {
 		t.Fatalf("local reliability score should be negative after stats enrichment: %+v", localScore.ScoreBreakdown)
+	}
+}
+
+func TestApplyModelStatsFeedsEstimatedCostToBudgetConstraint(t *testing.T) {
+	profile := DefaultTaskProfile()
+	profile.TaskType = "review"
+	profile.MaxEstimatedCents = 5
+
+	stats := ModelStats{
+		Models: map[string]ModelStatsEntry{
+			"review|cloud-account|cloud-balanced|openai": {
+				TaskType:          "review",
+				AccountAlias:      "cloud-account",
+				ModelAlias:        "cloud-balanced",
+				Provider:          "openai",
+				OutcomeCount:      3,
+				AvgEstimatedCents: 9,
+			},
+		},
+	}
+	cloud := candidate("cloud-balanced", CapabilityBalanced, PriceMedium, LatencyNormalClass, false)
+	cloud.AccountAlias = "cloud-account"
+	cloud.Model.Provider = "openai"
+	local := candidate("local-balanced", CapabilityBalanced, PriceFree, LatencyFastClass, true)
+	local.AccountAlias = "local-account"
+	local.Model.Provider = "local"
+
+	candidates := ApplyModelStats(stats, profile, []Candidate{cloud, local})
+	decision, err := RoutePolicy{}.Select(profile, candidates)
+	if err != nil {
+		t.Fatalf("Select returned error: %v", err)
+	}
+	if decision.SelectedAlias != "local-balanced" {
+		t.Fatalf("SelectedAlias = %q, want local-balanced; decision=%+v", decision.SelectedAlias, decision)
+	}
+	if !candidateExcludedFor(decision.Candidates, "cloud-balanced", "estimated cost exceeds task budget") {
+		t.Fatalf("cloud should be excluded by stats-derived estimated cost: %+v", decision.Candidates)
 	}
 }
 

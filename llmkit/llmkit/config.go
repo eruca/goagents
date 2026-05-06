@@ -51,6 +51,7 @@ type ModelConfig struct {
 	ContextWindowClass ContextWindowClass `yaml:"context_window_class,omitempty" json:"context_window_class,omitempty"`
 	PriceClass         PriceClass         `yaml:"price_class,omitempty" json:"price_class,omitempty"`
 	LatencyClass       LatencyClass       `yaml:"latency_class,omitempty" json:"latency_class,omitempty"`
+	EstimatedCents     int                `yaml:"estimated_cents,omitempty" json:"estimated_cents,omitempty"`
 	MaxConcurrency     int                `yaml:"max_concurrency,omitempty" json:"max_concurrency,omitempty"`
 	Tags               []string           `yaml:"tags,omitempty" json:"tags,omitempty"`
 }
@@ -145,6 +146,7 @@ func (c Config) Candidates() []Candidate {
 				ContextWindowClass: model.ContextWindowClass,
 				PriceClass:         model.PriceClass,
 				LatencyClass:       model.LatencyClass,
+				EstimatedCents:     model.EstimatedCents,
 				MaxConcurrency:     model.MaxConcurrency,
 			},
 			AccountAlias:          model.AccountAlias,
