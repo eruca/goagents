@@ -16,8 +16,6 @@ Example:
 export LLMKIT_HOME=/srv/my-agent/.llmkit
 ```
 
-See `examples/config/.llmkit/config.yaml` for a configuration shape that uses only aliases and environment variable names.
-
 Load the host configuration explicitly:
 
 ```go
@@ -31,6 +29,43 @@ defaultProfile := config.DefaultTaskProfile()
 ```
 
 `LoadConfigFromEnv` resolves `LLMKIT_HOME` in production mode and reads `config.yaml`. `LoadConfig(home)` is available when a host has already resolved the directory. The loader validates account/model references and rejects plaintext `api_key`; it does not construct provider clients or read secret values from `api_key_env`.
+
+Example `config.yaml`:
+
+```yaml
+accounts:
+  - alias: local-dev
+    provider: openai_compatible
+    base_url: http://127.0.0.1:11434/v1
+  - alias: cloud-prod
+    provider: openai_compatible
+    base_url: https://api.example.com/v1
+    api_key_env: CLOUD_PROD_API_KEY
+
+models:
+  - alias: local-free
+    model: qwen2.5:7b
+    provider: openai_compatible
+    account_alias: local-dev
+    is_local: true
+    capability_level: simple
+    context_window_class: medium
+    price_class: free
+    latency_class: fast
+  - alias: cloud-advanced
+    model: advanced-model
+    provider: openai_compatible
+    account_alias: cloud-prod
+    capability_level: advanced
+    context_window_class: long
+    price_class: high
+    latency_class: normal
+```
+
+The host is responsible for failing closed when a configured `api_key_env` is
+missing. `examples/host-api` demonstrates that behavior: if `config.yaml`
+exists and references an unset secret environment variable, server startup
+fails instead of silently routing unauthenticated requests.
 
 ## Routing Intent
 
@@ -201,6 +236,27 @@ The provider map keys must match `Candidate.Model.Alias`. Missing provider-backe
 When a selected provider fails, the adapter removes that candidate and asks the policy to select the next best provider-backed candidate. Each attempted route is recorded with an incremented `attempt` value when a recorder is configured.
 
 See `examples/goagent-routing` for a minimal host-style example that loads `LLMKIT_HOME/config.yaml`, builds OpenAI-compatible providers, wires the goagent adapter, runs one request, and writes `route-events.jsonl` plus `outcomes.jsonl`.
+
+## Host API Composition Example
+
+`examples/host-api` shows a fuller host composition. It is not a new core
+module; it combines `workflowkit`, `artifactkit`, `runkit`, `goagent`, and
+`llmkit` behind HTTP endpoints.
+
+Important behavior:
+
+- If `LLMKIT_HOME/config.yaml` is absent, the example uses deterministic static
+  demo providers so tests and walkthroughs run without network access.
+- If `config.yaml` exists, host-api builds candidates and OpenAI-compatible
+  providers from that file.
+- Startup refreshes `model-stats.json` from `route-events.jsonl` and
+  `outcomes.jsonl`, then injects those stats into the adapter so history can
+  affect routing.
+- `GET /workflows/{id}/llm-routes` exposes route audit for a workflow.
+- `GET /llmkit/models` exposes configured models, current health snapshot, and
+  model stats used for history-aware routing.
+
+See `../docs/host-api-contract.md` for the endpoint contract.
 
 ## Independent Testing
 
