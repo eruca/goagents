@@ -136,6 +136,49 @@ func TestClientAppliesModelStatsAfterProfileSelection(t *testing.T) {
 	}
 }
 
+func TestClientAppliesProviderHealthAndRecordsOutcomes(t *testing.T) {
+	local := &fakeProviderClient{response: &ports.ChatResponse{Content: "local"}}
+	cloud := &fakeProviderClient{response: &ports.ChatResponse{Content: "cloud"}}
+	health := llmkit.NewMemoryHealthStore(llmkit.HealthPolicy{
+		FailureCooldownThreshold: 1,
+	})
+	health.Set(llmkit.ProviderHealthEntry{
+		AccountAlias:   "local-account",
+		ModelAlias:     "local-small",
+		Provider:       "local",
+		QuotaExhausted: true,
+	})
+
+	client := NewClient(Config{
+		Candidates: testCandidates(),
+		Providers: map[string]ProviderClient{
+			"local-small":    local,
+			"cloud-advanced": cloud,
+		},
+		ProfileProvider: fixedProfile(simpleProfile()),
+		HealthStore:     health,
+	})
+
+	resp, err := client.Chat(context.Background(), ports.ChatRequest{})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if resp.Content != "cloud" {
+		t.Fatalf("Chat() response content = %q, want cloud", resp.Content)
+	}
+	if len(local.requests) != 0 {
+		t.Fatalf("local provider calls = %d, want 0", len(local.requests))
+	}
+	if len(cloud.requests) != 1 {
+		t.Fatalf("cloud provider calls = %d, want 1", len(cloud.requests))
+	}
+
+	entry := health.Snapshot().Entries[llmkit.ProviderHealthKey("cloud-account", "cloud-advanced", "openai")]
+	if entry.InFlight != 0 || entry.FailureStreak != 0 || entry.Availability != llmkit.ProviderAvailable {
+		t.Fatalf("cloud health entry = %+v, want successful available outcome with no in-flight calls", entry)
+	}
+}
+
 func TestClientRoutesHardProfileToSelectedProviderAndRecordsTrace(t *testing.T) {
 	local := &fakeProviderClient{response: &ports.ChatResponse{Content: "local"}}
 	cloud := &fakeProviderClient{response: &ports.ChatResponse{Content: "cloud"}}

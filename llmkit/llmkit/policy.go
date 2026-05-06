@@ -5,15 +5,23 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Candidate is one routable model/account option.
 type Candidate struct {
-	Model                     ModelCapability `json:"model"`
-	AccountAlias              string          `json:"account_alias,omitempty"`
-	AccountRateLimited        bool            `json:"account_rate_limited,omitempty"`
-	AccountMaxConcurrency     int             `json:"account_max_concurrency,omitempty"`
-	AccountCurrentConcurrency int             `json:"account_current_concurrency,omitempty"`
+	Model                     ModelCapability      `json:"model"`
+	AccountAlias              string               `json:"account_alias,omitempty"`
+	AccountRateLimited        bool                 `json:"account_rate_limited,omitempty"`
+	AccountMaxConcurrency     int                  `json:"account_max_concurrency,omitempty"`
+	AccountCurrentConcurrency int                  `json:"account_current_concurrency,omitempty"`
+	ProviderAvailability      ProviderAvailability `json:"provider_availability,omitempty"`
+	ProviderInFlight          int                  `json:"provider_in_flight,omitempty"`
+	ProviderMaxConcurrency    int                  `json:"provider_max_concurrency,omitempty"`
+	ProviderQuotaRemaining    int                  `json:"provider_quota_remaining,omitempty"`
+	ProviderQuotaExhausted    bool                 `json:"provider_quota_exhausted,omitempty"`
+	ProviderFailureStreak     int                  `json:"provider_failure_streak,omitempty"`
+	ProviderCooldownUntil     time.Time            `json:"provider_cooldown_until,omitempty"`
 }
 
 // CandidateScore records why a candidate was accepted, rejected, or ranked.
@@ -39,7 +47,9 @@ type RouteDecision struct {
 
 // RoutePolicy selects a candidate using hard filters followed by stable
 // deterministic scoring.
-type RoutePolicy struct{}
+type RoutePolicy struct {
+	Now func() time.Time
+}
 
 // Select returns the best candidate for profile, or a clear error when no
 // candidate can legally handle the task.
@@ -57,7 +67,7 @@ func (p RoutePolicy) Select(profile TaskProfile, candidates []Candidate) (RouteD
 			AccountAlias: candidate.AccountAlias,
 		}
 
-		if reason := unavailableReason(profile, candidate); reason != "" {
+		if reason := p.unavailableReason(profile, candidate); reason != "" {
 			score.Reason = reason
 			scored = append(scored, score)
 			continue
@@ -111,12 +121,24 @@ func stableCandidateKey(candidate Candidate) string {
 	}, "\x00")
 }
 
-func unavailableReason(profile TaskProfile, candidate Candidate) string {
+func (p RoutePolicy) unavailableReason(profile TaskProfile, candidate Candidate) string {
 	if candidate.AccountRateLimited {
 		return "account is rate limited"
 	}
 	if candidate.AccountMaxConcurrency > 0 && candidate.AccountCurrentConcurrency >= candidate.AccountMaxConcurrency {
 		return "account concurrency is full"
+	}
+	if !candidate.ProviderCooldownUntil.IsZero() && p.now().Before(candidate.ProviderCooldownUntil) {
+		return "provider is in cooldown"
+	}
+	if candidate.ProviderAvailability == ProviderUnavailable && candidate.ProviderCooldownUntil.IsZero() {
+		return "provider is unavailable"
+	}
+	if candidate.ProviderQuotaExhausted || candidate.ProviderQuotaRemaining < 0 {
+		return "provider quota is exhausted"
+	}
+	if candidate.ProviderMaxConcurrency > 0 && candidate.ProviderInFlight >= candidate.ProviderMaxConcurrency {
+		return "provider concurrency is full"
 	}
 	if !candidate.Model.Matches(profile) {
 		return "model does not match task requirements"
@@ -132,6 +154,7 @@ func scoreCandidate(profile TaskProfile, candidate Candidate) map[string]int {
 		"local":       localScore(profile, model),
 		"latency":     latencyScore(profile, model),
 		"reliability": reliabilityScore(model),
+		"health":      healthScore(candidate),
 	}
 	return breakdown
 }
@@ -212,6 +235,22 @@ func reliabilityScore(model ModelCapability) int {
 	return score
 }
 
+func healthScore(candidate Candidate) int {
+	score := 0
+	switch normalizedAvailability(candidate.ProviderAvailability) {
+	case ProviderAvailable:
+		score += 2
+	case ProviderDegraded:
+		score -= 20
+	case ProviderUnavailable:
+		score -= 100
+	}
+	if candidate.ProviderFailureStreak > 0 {
+		score -= candidate.ProviderFailureStreak * 10
+	}
+	return score
+}
+
 func totalScore(breakdown map[string]int) int {
 	total := 0
 	for _, value := range breakdown {
@@ -239,4 +278,11 @@ func copyBreakdown(in map[string]int) map[string]int {
 		out[key] = value
 	}
 	return out
+}
+
+func (p RoutePolicy) now() time.Time {
+	if p.Now != nil {
+		return p.Now().UTC()
+	}
+	return time.Now().UTC()
 }

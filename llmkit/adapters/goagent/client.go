@@ -42,6 +42,7 @@ type Config struct {
 	Recorder              llmkit.Recorder
 	RecordOutcomes        bool
 	ModelStats            *llmkit.ModelStats
+	HealthStore           llmkit.HealthStore
 }
 
 // Client implements goagent's LLMClient by routing to a provider client.
@@ -54,6 +55,7 @@ type Client struct {
 	recorder              llmkit.Recorder
 	recordOutcomes        bool
 	modelStats            *llmkit.ModelStats
+	healthStore           llmkit.HealthStore
 }
 
 // NewClient creates a goagent LLMClient adapter.
@@ -75,6 +77,7 @@ func NewClient(config Config) *Client {
 		recorder:              config.Recorder,
 		recordOutcomes:        config.RecordOutcomes,
 		modelStats:            config.ModelStats,
+		healthStore:           config.HealthStore,
 	}
 }
 
@@ -109,14 +112,19 @@ func (c *Client) Chat(ctx context.Context, req ports.ChatRequest) (*ports.ChatRe
 		if !ok || provider == nil {
 			failures = append(failures, fmt.Errorf("missing provider client for selected model alias %q", decision.SelectedAlias))
 		} else {
+			if c.healthStore != nil {
+				if err := c.healthStore.Begin(ctx, decision.Selected); err != nil {
+					return nil, err
+				}
+			}
 			resp, err := provider.Chat(ctx, req)
 			if err == nil {
-				if err := c.recordOutcome(ctx, trace, resp, nil); err != nil {
+				if err := c.recordOutcome(ctx, profile, decision, trace, resp, nil); err != nil {
 					return nil, err
 				}
 				return resp, nil
 			}
-			if err := c.recordOutcome(ctx, trace, nil, err); err != nil {
+			if err := c.recordOutcome(ctx, profile, decision, trace, nil, err); err != nil {
 				return nil, err
 			}
 			failures = append(failures, fmt.Errorf("provider %q failed: %w", decision.SelectedAlias, err))
@@ -128,18 +136,15 @@ func (c *Client) Chat(ctx context.Context, req ports.ChatRequest) (*ports.ChatRe
 	return nil, joinRouteErrors(fmt.Errorf("all provider candidates failed"), failures)
 }
 
-func (c *Client) recordOutcome(ctx context.Context, trace llmkit.RouteTrace, resp *ports.ChatResponse, providerErr error) error {
-	if c.recorder == nil || !c.recordOutcomes {
-		return nil
-	}
+func (c *Client) recordOutcome(ctx context.Context, profile llmkit.TaskProfile, decision llmkit.RouteDecision, trace llmkit.RouteTrace, resp *ports.ChatResponse, providerErr error) error {
 	outcome := llmkit.TaskOutcome{
 		RouteID:      trace.RouteID,
 		TaskID:       trace.TaskID,
 		Attempt:      trace.Attempt,
-		TaskType:     trace.TaskType,
-		AccountAlias: trace.AccountAlias,
-		ModelAlias:   trace.ModelAlias,
-		Provider:     trace.Provider,
+		TaskType:     profile.TaskType,
+		AccountAlias: decision.Selected.AccountAlias,
+		ModelAlias:   decision.SelectedAlias,
+		Provider:     decision.Selected.Model.Provider,
 		Success:      providerErr == nil,
 	}
 	if resp != nil {
@@ -148,6 +153,14 @@ func (c *Client) recordOutcome(ctx context.Context, trace llmkit.RouteTrace, res
 	}
 	if providerErr != nil {
 		outcome.ErrorCode = "provider_error"
+	}
+	if c.healthStore != nil {
+		if err := c.healthStore.RecordOutcome(ctx, outcome); err != nil {
+			return err
+		}
+	}
+	if c.recorder == nil || !c.recordOutcomes {
+		return nil
 	}
 	return c.recorder.RecordOutcome(ctx, outcome)
 }
@@ -166,6 +179,9 @@ func (c *Client) availableCandidates(profile llmkit.TaskProfile) []llmkit.Candid
 	}
 	if c.modelStats != nil {
 		available = llmkit.ApplyModelStats(*c.modelStats, profile, available)
+	}
+	if c.healthStore != nil {
+		available = llmkit.ApplyProviderHealth(c.healthStore.Snapshot(), available)
 	}
 	return available
 }

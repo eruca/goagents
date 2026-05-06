@@ -34,7 +34,7 @@ defaultProfile := config.DefaultTaskProfile()
 
 ## Routing Intent
 
-The default policy applies hard filters first, then ranks eligible candidates by capability, price, locality, latency, and recent reliability.
+The default policy applies hard filters first, then ranks eligible candidates by capability, price, locality, latency, recent reliability, and current provider health.
 
 Simple tasks should be local-first when the profile allows it. For example, low failure-cost classification, short rewriting, formatting, or simple JSON extraction can prefer a free local model with fast latency and low operational cost.
 
@@ -79,6 +79,45 @@ client := goagentadapter.NewClient(goagentadapter.Config{
 ```
 
 The adapter applies stats after it receives the current `TaskProfile`, so history is task-type aware. Without `ModelStats`, routing behavior is unchanged.
+
+## Provider Health
+
+`MemoryHealthStore` tracks current provider/account/model runtime state:
+
+- in-flight calls and concurrency ceilings
+- quota exhaustion
+- failure streaks
+- degraded or unavailable providers
+- cooldown windows after repeated failures
+
+Hosts can keep this in memory for a single process, or replace the interface
+with a durable/shared implementation later. The route policy treats quota
+exhaustion, active cooldown, unavailable providers, and full provider
+concurrency as hard filters. Degraded providers remain eligible but receive a
+lower score, so they are used only when better options are unavailable.
+
+Typical adapter wiring:
+
+```go
+health := llmkit.NewMemoryHealthStore(llmkit.HealthPolicy{
+    FailureCooldownThreshold: 3,
+    CooldownDuration:         30 * time.Second,
+})
+
+client := goagentadapter.NewClient(goagentadapter.Config{
+    Candidates:   config.Candidates(),
+    Providers:    providers,
+    HealthStore:  health,
+    ModelStats:   modelStats,
+    Recorder:     recorder,
+})
+```
+
+The adapter applies `HealthStore.Snapshot()` before each routing decision,
+calls `Begin` before invoking the selected provider, and calls `RecordOutcome`
+after success or failure. This keeps simple tasks local-first when local is
+healthy, while allowing fallback to cloud when the local provider is busy,
+quota-exhausted, or cooling down after failures.
 
 ## API Keys
 
