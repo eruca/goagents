@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -338,6 +339,101 @@ func TestHostAPIRunModeSyncAndQueuedSemantics(t *testing.T) {
 	}
 }
 
+func TestHostAPILoadsLLMKitConfigModelsAndProviders(t *testing.T) {
+	var gotAuthorization string
+	var gotModel string
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuthorization = r.Header.Get("Authorization")
+		var body struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode provider request: %v", err)
+		}
+		gotModel = body.Model
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"configured provider response"}}],"usage":{"prompt_tokens":11,"completion_tokens":13}}`))
+	}))
+	defer provider.Close()
+
+	llmHome := t.TempDir()
+	t.Setenv("HOST_API_CONFIG_KEY", "secret-from-env")
+	writeLLMKitConfig(t, llmHome, fmt.Sprintf(`
+accounts:
+  - alias: configured-account
+    provider: openai_compatible
+    base_url: %s/v1
+    api_key_env: HOST_API_CONFIG_KEY
+models:
+  - alias: configured-advanced
+    model: configured-model-name
+    provider: openai_compatible
+    account_alias: configured-account
+    capability_level: advanced
+    context_window_class: long
+    price_class: high
+    latency_class: normal
+`, provider.URL))
+
+	server, err := NewServer(Config{RuntimeHome: t.TempDir(), LLMKitHome: llmHome})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+
+	models := doJSON[modelsResponse](t, server.Handler(), http.MethodGet, "/llmkit/models", nil)
+	if len(models.Models) != 1 || !hasModel(models.Models, "configured-advanced") {
+		t.Fatalf("models = %+v, want configured-advanced from config", models.Models)
+	}
+
+	create := doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]any{
+		"id":                  "wf-configured-provider",
+		"input":               "Use configured provider.",
+		"task_profile_preset": "high_success",
+	})
+	run := doJSON[agentRunResponse](t, server.Handler(), http.MethodGet, "/agent-runs/"+create.AgentRunID, nil)
+	if run.Summary.InputTokens != 11 || run.Summary.OutputTokens != 13 {
+		t.Fatalf("run summary usage = %+v, want configured provider usage", run.Summary)
+	}
+	routes := doJSON[llmRoutesResponse](t, server.Handler(), http.MethodGet, "/workflows/wf-configured-provider/llm-routes", nil)
+	if got := selectedModelAlias(t, routes); got != "configured-advanced" {
+		t.Fatalf("configured route selected %q, want configured-advanced; routes=%+v", got, routes.Routes)
+	}
+	if gotModel != "configured-model-name" {
+		t.Fatalf("provider model = %q, want configured-model-name", gotModel)
+	}
+	if gotAuthorization != "Bearer secret-from-env" {
+		t.Fatalf("provider authorization = %q, want bearer secret", gotAuthorization)
+	}
+}
+
+func TestHostAPIRejectsConfiguredMissingAPIKeyEnv(t *testing.T) {
+	llmHome := t.TempDir()
+	writeLLMKitConfig(t, llmHome, `
+accounts:
+  - alias: configured-account
+    provider: openai_compatible
+    base_url: http://127.0.0.1:65535/v1
+    api_key_env: HOST_API_MISSING_KEY
+models:
+  - alias: configured-advanced
+    model: configured-model-name
+    provider: openai_compatible
+    account_alias: configured-account
+    capability_level: advanced
+    context_window_class: long
+    price_class: high
+    latency_class: normal
+`)
+
+	_, err := NewServer(Config{RuntimeHome: t.TempDir(), LLMKitHome: llmHome})
+	if err == nil {
+		t.Fatal("NewServer error = nil, want missing API key env error")
+	}
+	if !strings.Contains(err.Error(), "HOST_API_MISSING_KEY") {
+		t.Fatalf("NewServer error = %v, want missing env name", err)
+	}
+}
+
 func doJSON[T any](t *testing.T, handler http.Handler, method, path string, body any) T {
 	t.Helper()
 	var payload *bytes.Reader
@@ -378,6 +474,13 @@ func hasModel(models []modelResponse, alias string) bool {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func writeLLMKitConfig(t *testing.T, home string, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte(strings.TrimSpace(content)+"\n"), 0o600); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
 }
 
 func selectedModelAlias(t *testing.T, routes llmRoutesResponse) string {

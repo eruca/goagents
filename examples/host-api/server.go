@@ -38,6 +38,7 @@ type Server struct {
 	health    *llmkit.MemoryHealthStore
 	llmHome   string
 	models    []llmkit.Candidate
+	providers map[string]goagentadapter.ProviderClient
 }
 
 type createWorkflowRequest struct {
@@ -160,6 +161,10 @@ func NewServer(config Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	models, providers, err := loadLLMKitComposition(resolved.LLMKitHome)
+	if err != nil {
+		return nil, err
+	}
 	artifacts, err := artifactkit.NewFileStore(resolved.ArtifactRoot)
 	if err != nil {
 		return nil, err
@@ -179,7 +184,8 @@ func NewServer(config Config) (*Server, error) {
 		workflows: workflows,
 		health:    llmkit.NewMemoryHealthStore(llmkit.HealthPolicy{}),
 		llmHome:   resolved.LLMKitHome,
-		models:    defaultCandidates(),
+		models:    models,
+		providers: providers,
 	}
 	server.executor = workflowkit.NewExecutor(workflows, []workflowkit.Step{
 		ingestStep{artifacts: artifacts},
@@ -364,6 +370,7 @@ func (s *Server) agentStep() workflowkit.Step {
 		runs:       s.runs,
 		health:     s.health,
 		candidates: s.models,
+		providers:  s.providers,
 	}
 	return agentstep.New("agent_review", runner, func(run workflowkit.WorkflowRun) agentcore.RunRequest {
 		profile := taskProfileFromMetadata(run.Metadata["task_profile"])
@@ -408,6 +415,7 @@ type routingAgentRunner struct {
 	runs       runkit.Store
 	health     llmkit.HealthStore
 	candidates []llmkit.Candidate
+	providers  map[string]goagentadapter.ProviderClient
 }
 
 func (r routingAgentRunner) RunDetailed(ctx context.Context, req agentcore.RunRequest) (*agentcore.RunResult, error) {
@@ -422,10 +430,7 @@ func (r routingAgentRunner) RunDetailed(ctx context.Context, req agentcore.RunRe
 	}
 	client := goagentadapter.NewClient(goagentadapter.Config{
 		Candidates: r.candidates,
-		Providers: map[string]goagentadapter.ProviderClient{
-			"local-free":     staticProvider{content: "host API draft from local-free"},
-			"cloud-advanced": staticProvider{content: "host API draft from cloud-advanced"},
-		},
+		Providers:  r.providers,
 		ProfileProvider: func(context.Context, ports.ChatRequest) llmkit.TaskProfile {
 			return profile
 		},
@@ -519,6 +524,66 @@ func (p staticProvider) Chat(context.Context, ports.ChatRequest) (*ports.ChatRes
 			OutputTokens: 7,
 		},
 	}, nil
+}
+
+func loadLLMKitComposition(home string) ([]llmkit.Candidate, map[string]goagentadapter.ProviderClient, error) {
+	configPath := filepath.Join(home, "config.yaml")
+	if _, err := os.Stat(configPath); err != nil {
+		if os.IsNotExist(err) {
+			return defaultCandidates(), defaultProviders(), nil
+		}
+		return nil, nil, err
+	}
+
+	config, err := llmkit.LoadConfig(home)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := validateConfiguredAPIKeyEnvs(*config, os.Getenv); err != nil {
+		return nil, nil, err
+	}
+
+	candidates := config.Candidates()
+	if len(candidates) == 0 {
+		return nil, nil, fmt.Errorf("llmkit config has no models")
+	}
+	providers, err := goagentadapter.OpenAICompatibleProvidersFromConfig(*config, os.Getenv, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := validateProvidersForCandidates(candidates, providers); err != nil {
+		return nil, nil, err
+	}
+	return candidates, providers, nil
+}
+
+func validateConfiguredAPIKeyEnvs(config llmkit.Config, getenv func(string) string) error {
+	for _, account := range config.Accounts {
+		envName := strings.TrimSpace(account.APIKeyEnv)
+		if envName == "" {
+			continue
+		}
+		if getenv == nil || strings.TrimSpace(getenv(envName)) == "" {
+			return fmt.Errorf("account %q api_key_env %q is not set", account.Alias, envName)
+		}
+	}
+	return nil
+}
+
+func validateProvidersForCandidates(candidates []llmkit.Candidate, providers map[string]goagentadapter.ProviderClient) error {
+	for _, candidate := range candidates {
+		if providers[candidate.Model.Alias] == nil {
+			return fmt.Errorf("model %q has no configured provider client", candidate.Model.Alias)
+		}
+	}
+	return nil
+}
+
+func defaultProviders() map[string]goagentadapter.ProviderClient {
+	return map[string]goagentadapter.ProviderClient{
+		"local-free":     staticProvider{content: "host API draft from local-free"},
+		"cloud-advanced": staticProvider{content: "host API draft from cloud-advanced"},
+	}
 }
 
 func defaultCandidates() []llmkit.Candidate {
