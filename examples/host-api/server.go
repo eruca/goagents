@@ -109,6 +109,7 @@ type llmRouteResponse struct {
 	TaskID                string                   `json:"task_id,omitempty"`
 	Attempt               int                      `json:"attempt,omitempty"`
 	TaskType              string                   `json:"task_type,omitempty"`
+	TaskProfile           *taskProfileResponse     `json:"task_profile,omitempty"`
 	AccountAlias          string                   `json:"account_alias,omitempty"`
 	ModelAlias            string                   `json:"model_alias,omitempty"`
 	Provider              string                   `json:"provider,omitempty"`
@@ -127,6 +128,18 @@ type llmRouteOutcomeResponse struct {
 	InputTokens    int    `json:"input_tokens,omitempty"`
 	OutputTokens   int    `json:"output_tokens,omitempty"`
 	EstimatedCents int    `json:"estimated_cents,omitempty"`
+}
+
+type taskProfileResponse struct {
+	TaskType         string `json:"task_type,omitempty"`
+	Complexity       string `json:"complexity,omitempty"`
+	Latency          string `json:"latency,omitempty"`
+	FailureCost      string `json:"failure_cost,omitempty"`
+	Privacy          string `json:"privacy,omitempty"`
+	NeedsReasoning   bool   `json:"needs_reasoning,omitempty"`
+	NeedsTools       bool   `json:"needs_tools,omitempty"`
+	NeedsJSON        bool   `json:"needs_json,omitempty"`
+	NeedsLongContext bool   `json:"needs_long_context,omitempty"`
 }
 
 type modelResponse struct {
@@ -561,6 +574,7 @@ func llmRouteToResponse(record llmkit.RouteAuditRecord) llmRouteResponse {
 		TaskID:                route.TaskID,
 		Attempt:               route.Attempt,
 		TaskType:              route.TaskType,
+		TaskProfile:           taskProfileToResponse(route.TaskProfile),
 		AccountAlias:          route.AccountAlias,
 		ModelAlias:            route.ModelAlias,
 		Provider:              route.Provider,
@@ -582,6 +596,23 @@ func llmRouteToResponse(record llmkit.RouteAuditRecord) llmRouteResponse {
 		}
 	}
 	return response
+}
+
+func taskProfileToResponse(profile *llmkit.TaskProfile) *taskProfileResponse {
+	if profile == nil {
+		return nil
+	}
+	return &taskProfileResponse{
+		TaskType:         profile.TaskType,
+		Complexity:       string(profile.Complexity),
+		Latency:          string(profile.Latency),
+		FailureCost:      string(profile.FailureCost),
+		Privacy:          string(profile.Privacy),
+		NeedsReasoning:   profile.NeedsReasoning,
+		NeedsTools:       profile.NeedsTools,
+		NeedsJSON:        profile.NeedsJSON,
+		NeedsLongContext: profile.NeedsLongContext,
+	}
 }
 
 func copyScoreBreakdown(values map[string]int) map[string]int {

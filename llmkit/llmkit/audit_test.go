@@ -23,6 +23,7 @@ func TestJSONLRecorderRecordsRouteEvent(t *testing.T) {
 		Attempt:               2,
 		RecordedAt:            time.Date(2026, 5, 4, 10, 30, 0, 0, time.UTC),
 		TaskType:              "summarize",
+		TaskProfile:           &TaskProfile{TaskType: "summarize", Complexity: ComplexityHard, FailureCost: FailureCostHigh, Privacy: PrivacyCloudAllowed, NeedsReasoning: true},
 		AccountAlias:          "primary-account",
 		ModelAlias:            "fast-json",
 		Provider:              "openai",
@@ -53,6 +54,9 @@ func TestJSONLRecorderRecordsRouteEvent(t *testing.T) {
 	}
 	if got.RouteID != trace.RouteID || got.TaskID != trace.TaskID || got.Attempt != trace.Attempt || !got.RecordedAt.Equal(trace.RecordedAt) {
 		t.Fatalf("route event changed correlation fields: got=%+v want=%+v", got, trace)
+	}
+	if got.TaskProfile == nil || got.TaskProfile.Complexity != ComplexityHard || !got.TaskProfile.NeedsReasoning {
+		t.Fatalf("route event did not preserve task profile: %+v", got.TaskProfile)
 	}
 	if got.ScoreBreakdown["latency"] != 20 || len(got.CandidateModelAliases) != 2 {
 		t.Fatalf("route event did not preserve explainability fields: %+v", got)
@@ -208,6 +212,7 @@ func TestReadRouteAuditsJoinsRoutesAndOutcomes(t *testing.T) {
 		TaskID:                "wf-1",
 		Attempt:               1,
 		TaskType:              "host_api_review",
+		TaskProfile:           &TaskProfile{TaskType: "host_api_review", Complexity: ComplexitySimple, FailureCost: FailureCostLow, Privacy: PrivacyLocalPreferred},
 		AccountAlias:          "local-dev",
 		ModelAlias:            "local-free",
 		Provider:              "local",
@@ -246,6 +251,9 @@ func TestReadRouteAuditsJoinsRoutesAndOutcomes(t *testing.T) {
 	got := records[0]
 	if got.Route.RouteID != "route-wf-1" || got.Route.ModelAlias != "local-free" {
 		t.Fatalf("route record = %+v, want local-free route", got.Route)
+	}
+	if got.Route.TaskProfile == nil || got.Route.TaskProfile.Privacy != PrivacyLocalPreferred {
+		t.Fatalf("route profile = %+v, want local preferred profile", got.Route.TaskProfile)
 	}
 	if got.Outcome == nil || !got.Outcome.Success || got.Outcome.LatencyMillis != 12 {
 		t.Fatalf("outcome = %+v, want joined successful outcome", got.Outcome)

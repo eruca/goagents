@@ -77,6 +77,12 @@ func TestClientRoutesSimpleProfileToSelectedProviderAndRecordsTrace(t *testing.T
 	if trace.Reason == "" {
 		t.Fatal("trace Reason is empty")
 	}
+	if trace.TaskProfile == nil {
+		t.Fatal("trace TaskProfile is nil")
+	}
+	if trace.TaskProfile.TaskType != "simple" || trace.TaskProfile.Complexity != llmkit.ComplexitySimple || trace.TaskProfile.Privacy != llmkit.PrivacyCloudAllowed {
+		t.Fatalf("trace TaskProfile = %+v, want effective simple profile", trace.TaskProfile)
+	}
 	if len(trace.CandidateModelAliases) != 2 {
 		t.Fatalf("trace candidate aliases len = %d, want 2", len(trace.CandidateModelAliases))
 	}

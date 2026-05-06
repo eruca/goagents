@@ -223,6 +223,17 @@ func TestHostAPIRoutesLLMByTaskProfilePreset(t *testing.T) {
 	if got := selectedTaskType(t, highRoutes); got != "high_success" {
 		t.Fatalf("high_success task type = %q, want high_success", got)
 	}
+	highRoute := selectedRoute(t, highRoutes)
+	if highRoute.TaskProfile == nil {
+		t.Fatalf("high_success route profile is nil: %+v", highRoute)
+	}
+	if highRoute.TaskProfile.TaskType != "high_success" ||
+		highRoute.TaskProfile.Complexity != "hard" ||
+		highRoute.TaskProfile.FailureCost != "high" ||
+		highRoute.TaskProfile.Privacy != "cloud_allowed" ||
+		!highRoute.TaskProfile.NeedsReasoning {
+		t.Fatalf("high_success route profile = %+v, want effective high_success profile", highRoute.TaskProfile)
+	}
 }
 
 func TestHostAPITaskProfilePresetAllowsOverrides(t *testing.T) {
@@ -371,22 +382,21 @@ func fileExists(path string) bool {
 
 func selectedModelAlias(t *testing.T, routes llmRoutesResponse) string {
 	t.Helper()
-	for _, route := range routes.Routes {
-		if route.Selected {
-			return route.ModelAlias
-		}
-	}
-	t.Fatalf("no selected route found: %+v", routes.Routes)
-	return ""
+	return selectedRoute(t, routes).ModelAlias
 }
 
 func selectedTaskType(t *testing.T, routes llmRoutesResponse) string {
 	t.Helper()
+	return selectedRoute(t, routes).TaskType
+}
+
+func selectedRoute(t *testing.T, routes llmRoutesResponse) llmRouteResponse {
+	t.Helper()
 	for _, route := range routes.Routes {
 		if route.Selected {
-			return route.TaskType
+			return route
 		}
 	}
 	t.Fatalf("no selected route found: %+v", routes.Routes)
-	return ""
+	return llmRouteResponse{}
 }

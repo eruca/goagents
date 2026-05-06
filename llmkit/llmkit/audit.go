@@ -29,6 +29,7 @@ type RouteTrace struct {
 	Attempt               int            `json:"attempt,omitempty"`
 	RecordedAt            time.Time      `json:"recorded_at,omitempty"`
 	TaskType              string         `json:"task_type,omitempty"`
+	TaskProfile           *TaskProfile   `json:"task_profile,omitempty"`
 	AccountAlias          string         `json:"account_alias,omitempty"`
 	ModelAlias            string         `json:"model_alias,omitempty"`
 	Provider              string         `json:"provider,omitempty"`
@@ -193,6 +194,7 @@ func sanitizeRouteTrace(trace RouteTrace) RouteTrace {
 	trace.RouteID = sanitizeAuditString(trace.RouteID)
 	trace.TaskID = sanitizeAuditString(trace.TaskID)
 	trace.TaskType = sanitizeAuditString(trace.TaskType)
+	trace.TaskProfile = sanitizeTaskProfile(trace.TaskProfile)
 	trace.AccountAlias = sanitizeAuditString(trace.AccountAlias)
 	trace.ModelAlias = sanitizeAuditString(trace.ModelAlias)
 	trace.Provider = sanitizeAuditString(trace.Provider)
@@ -200,6 +202,15 @@ func sanitizeRouteTrace(trace RouteTrace) RouteTrace {
 	trace.CandidateModelAliases = sanitizeAuditStrings(trace.CandidateModelAliases)
 	trace.ScoreBreakdown = copyBreakdown(trace.ScoreBreakdown)
 	return trace
+}
+
+func sanitizeTaskProfile(profile *TaskProfile) *TaskProfile {
+	if profile == nil {
+		return nil
+	}
+	copied := *profile
+	copied.TaskType = sanitizeAuditString(copied.TaskType)
+	return &copied
 }
 
 func sanitizeTaskOutcome(outcome TaskOutcome) TaskOutcome {

@@ -199,6 +199,7 @@ func (c *Client) routeTrace(ctx context.Context, req ports.ChatRequest, profile 
 		TaskID:                metadata.TaskID,
 		Attempt:               metadata.Attempt + attemptOffset,
 		TaskType:              profile.TaskType,
+		TaskProfile:           copyTaskProfile(profile),
 		AccountAlias:          decision.Selected.AccountAlias,
 		ModelAlias:            decision.SelectedAlias,
 		Provider:              decision.Selected.Model.Provider,
@@ -208,6 +209,11 @@ func (c *Client) routeTrace(ctx context.Context, req ports.ChatRequest, profile 
 		ScoreBreakdown:        copyScoreBreakdown(decision.ScoreBreakdown),
 		CandidateModelAliases: candidateModelAliases(decision.Candidates),
 	}, nil
+}
+
+func copyTaskProfile(profile llmkit.TaskProfile) *llmkit.TaskProfile {
+	copied := profile
+	return &copied
 }
 
 func removeSelectedCandidate(candidates []llmkit.Candidate, selected llmkit.Candidate) []llmkit.Candidate {
