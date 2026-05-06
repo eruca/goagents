@@ -40,27 +40,34 @@ API keys.
 only `sync`, which is also the default. `queued` is reserved for a future worker
 model and currently returns `unsupported_run_mode`.
 
-`POST /workflows` also accepts optional `task_profile` so a host can describe
-the task before routing:
+`POST /workflows` also accepts optional `task_profile_preset` and
+`task_profile` so a host can describe the task before routing:
 
 ```json
 {
   "id": "wf-review-1",
   "input": "Review this high-risk policy.",
+  "task_profile_preset": "high_success",
   "task_profile": {
     "task_type": "policy_review",
-    "complexity": "hard",
-    "failure_cost": "high",
-    "privacy": "cloud_allowed",
     "needs_reasoning": true
   }
 }
 ```
 
-The default profile remains simple, low failure cost, and local-preferred. That
-keeps simple tasks on the local/free candidate while allowing complex,
-high-risk tasks to route to the advanced cloud candidate. The routing decision
-is visible through `GET /workflows/{id}/llm-routes`.
+Available presets:
+
+- `simple_local`: simple, low failure cost, local-preferred.
+- `balanced`: medium complexity, medium failure cost, cloud allowed.
+- `high_success`: hard, high failure cost, cloud allowed, reasoning required.
+- `local_only`: simple, low failure cost, local-only.
+
+If both fields are present, `task_profile_preset` provides the base profile and
+`task_profile` overrides specific fields. The default profile remains
+simple, low failure cost, and local-preferred. Invalid or unroutable profiles
+return `invalid_task_profile`; for example, `local_only` plus `complexity:
+hard` fails when no local advanced model exists. The routing decision is visible
+through `GET /workflows/{id}/llm-routes`.
 
 Run it:
 

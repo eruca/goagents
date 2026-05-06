@@ -41,10 +41,11 @@ type Server struct {
 }
 
 type createWorkflowRequest struct {
-	ID          string              `json:"id"`
-	Input       string              `json:"input"`
-	RunMode     string              `json:"run_mode,omitempty"`
-	TaskProfile *taskProfileRequest `json:"task_profile,omitempty"`
+	ID                string              `json:"id"`
+	Input             string              `json:"input"`
+	RunMode           string              `json:"run_mode,omitempty"`
+	TaskProfilePreset string              `json:"task_profile_preset,omitempty"`
+	TaskProfile       *taskProfileRequest `json:"task_profile,omitempty"`
 }
 
 type approveWorkflowRequest struct {
@@ -227,7 +228,7 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "unsupported_run_mode", "only sync run_mode is supported")
 		return
 	}
-	profile, err := parseTaskProfile(req.TaskProfile)
+	profile, err := parseTaskProfile(req.TaskProfilePreset, req.TaskProfile, s.models)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_task_profile", err.Error())
 		return
@@ -594,10 +595,23 @@ func copyScoreBreakdown(values map[string]int) map[string]int {
 	return copied
 }
 
-func parseTaskProfile(req *taskProfileRequest) (llmkit.TaskProfile, error) {
-	profile := defaultHostTaskProfile()
+func parseTaskProfile(preset string, req *taskProfileRequest, candidates []llmkit.Candidate) (llmkit.TaskProfile, error) {
+	profile, err := taskProfilePreset(preset)
+	if err != nil {
+		return llmkit.TaskProfile{}, err
+	}
+	if err := applyTaskProfileOverride(&profile, req); err != nil {
+		return llmkit.TaskProfile{}, err
+	}
+	if err := validateTaskProfile(profile, candidates); err != nil {
+		return llmkit.TaskProfile{}, err
+	}
+	return profile, nil
+}
+
+func applyTaskProfileOverride(profile *llmkit.TaskProfile, req *taskProfileRequest) error {
 	if req == nil {
-		return profile, nil
+		return nil
 	}
 	if strings.TrimSpace(req.TaskType) != "" {
 		profile.TaskType = strings.TrimSpace(req.TaskType)
@@ -605,28 +619,28 @@ func parseTaskProfile(req *taskProfileRequest) (llmkit.TaskProfile, error) {
 	if strings.TrimSpace(req.Complexity) != "" {
 		value := llmkit.Complexity(strings.TrimSpace(req.Complexity))
 		if value != llmkit.ComplexitySimple && value != llmkit.ComplexityMedium && value != llmkit.ComplexityHard {
-			return llmkit.TaskProfile{}, fmt.Errorf("unsupported complexity %q", req.Complexity)
+			return fmt.Errorf("unsupported complexity %q", req.Complexity)
 		}
 		profile.Complexity = value
 	}
 	if strings.TrimSpace(req.Latency) != "" {
 		value := llmkit.LatencyRequirement(strings.TrimSpace(req.Latency))
 		if value != llmkit.LatencyNone && value != llmkit.LatencyNormal && value != llmkit.LatencyUrgent {
-			return llmkit.TaskProfile{}, fmt.Errorf("unsupported latency %q", req.Latency)
+			return fmt.Errorf("unsupported latency %q", req.Latency)
 		}
 		profile.Latency = value
 	}
 	if strings.TrimSpace(req.FailureCost) != "" {
 		value := llmkit.FailureCost(strings.TrimSpace(req.FailureCost))
 		if value != llmkit.FailureCostLow && value != llmkit.FailureCostMedium && value != llmkit.FailureCostHigh {
-			return llmkit.TaskProfile{}, fmt.Errorf("unsupported failure_cost %q", req.FailureCost)
+			return fmt.Errorf("unsupported failure_cost %q", req.FailureCost)
 		}
 		profile.FailureCost = value
 	}
 	if strings.TrimSpace(req.Privacy) != "" {
 		value := llmkit.PrivacyLevel(strings.TrimSpace(req.Privacy))
 		if value != llmkit.PrivacyLocalPreferred && value != llmkit.PrivacyCloudAllowed && value != llmkit.PrivacyLocalOnly {
-			return llmkit.TaskProfile{}, fmt.Errorf("unsupported privacy %q", req.Privacy)
+			return fmt.Errorf("unsupported privacy %q", req.Privacy)
 		}
 		profile.Privacy = value
 	}
@@ -634,7 +648,47 @@ func parseTaskProfile(req *taskProfileRequest) (llmkit.TaskProfile, error) {
 	profile.NeedsTools = req.NeedsTools
 	profile.NeedsJSON = req.NeedsJSON
 	profile.NeedsLongContext = req.NeedsLongContext
-	return profile, nil
+	return nil
+}
+
+func taskProfilePreset(name string) (llmkit.TaskProfile, error) {
+	switch strings.TrimSpace(name) {
+	case "":
+		return defaultHostTaskProfile(), nil
+	case "simple_local":
+		profile := defaultHostTaskProfile()
+		profile.TaskType = "simple_local"
+		return profile, nil
+	case "balanced":
+		profile := defaultHostTaskProfile()
+		profile.TaskType = "balanced"
+		profile.Complexity = llmkit.ComplexityMedium
+		profile.FailureCost = llmkit.FailureCostMedium
+		profile.Privacy = llmkit.PrivacyCloudAllowed
+		return profile, nil
+	case "high_success":
+		profile := defaultHostTaskProfile()
+		profile.TaskType = "high_success"
+		profile.Complexity = llmkit.ComplexityHard
+		profile.FailureCost = llmkit.FailureCostHigh
+		profile.Privacy = llmkit.PrivacyCloudAllowed
+		profile.NeedsReasoning = true
+		return profile, nil
+	case "local_only":
+		profile := defaultHostTaskProfile()
+		profile.TaskType = "local_only"
+		profile.Privacy = llmkit.PrivacyLocalOnly
+		return profile, nil
+	default:
+		return llmkit.TaskProfile{}, fmt.Errorf("unsupported task_profile_preset %q", name)
+	}
+}
+
+func validateTaskProfile(profile llmkit.TaskProfile, candidates []llmkit.Candidate) error {
+	if _, err := (llmkit.RoutePolicy{}).Select(profile, candidates); err != nil {
+		return fmt.Errorf("task profile %q cannot route to an available model: %w", profile.TaskType, err)
+	}
+	return nil
 }
 
 func defaultHostTaskProfile() llmkit.TaskProfile {

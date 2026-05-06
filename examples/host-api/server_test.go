@@ -192,6 +192,86 @@ func TestHostAPIRoutesLLMByRequestTaskProfile(t *testing.T) {
 	}
 }
 
+func TestHostAPIRoutesLLMByTaskProfilePreset(t *testing.T) {
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+
+	doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]any{
+		"id":                  "wf-preset-simple",
+		"input":               "Format a short note.",
+		"task_profile_preset": "simple_local",
+	})
+	simpleRoutes := doJSON[llmRoutesResponse](t, server.Handler(), http.MethodGet, "/workflows/wf-preset-simple/llm-routes", nil)
+	if got := selectedModelAlias(t, simpleRoutes); got != "local-free" {
+		t.Fatalf("simple_local preset selected %q, want local-free; routes=%+v", got, simpleRoutes.Routes)
+	}
+	if got := selectedTaskType(t, simpleRoutes); got != "simple_local" {
+		t.Fatalf("simple_local task type = %q, want simple_local", got)
+	}
+
+	doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]any{
+		"id":                  "wf-preset-high-success",
+		"input":               "Review a high-risk policy.",
+		"task_profile_preset": "high_success",
+	})
+	highRoutes := doJSON[llmRoutesResponse](t, server.Handler(), http.MethodGet, "/workflows/wf-preset-high-success/llm-routes", nil)
+	if got := selectedModelAlias(t, highRoutes); got != "cloud-advanced" {
+		t.Fatalf("high_success preset selected %q, want cloud-advanced; routes=%+v", got, highRoutes.Routes)
+	}
+	if got := selectedTaskType(t, highRoutes); got != "high_success" {
+		t.Fatalf("high_success task type = %q, want high_success", got)
+	}
+}
+
+func TestHostAPITaskProfilePresetAllowsOverrides(t *testing.T) {
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+
+	doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]any{
+		"id":                  "wf-preset-override",
+		"input":               "Review a high-risk policy locally.",
+		"task_profile_preset": "high_success",
+		"task_profile": map[string]any{
+			"complexity": "simple",
+			"privacy":    "local_only",
+		},
+	})
+	routes := doJSON[llmRoutesResponse](t, server.Handler(), http.MethodGet, "/workflows/wf-preset-override/llm-routes", nil)
+	if got := selectedModelAlias(t, routes); got != "local-free" {
+		t.Fatalf("override selected %q, want local-free; routes=%+v", got, routes.Routes)
+	}
+}
+
+func TestHostAPIRejectsInvalidTaskProfilePresetCombination(t *testing.T) {
+	server, err := NewServer(Config{LLMKitHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/workflows", bytes.NewBufferString(`{
+		"id": "wf-invalid-profile",
+		"input": "Review this locally with advanced reasoning.",
+		"task_profile_preset": "local_only",
+		"task_profile": {
+			"complexity": "hard",
+			"needs_reasoning": true
+		}
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	server.Handler().ServeHTTP(resp, req)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), "invalid_task_profile") || !strings.Contains(resp.Body.String(), "local_only") {
+		t.Fatalf("body = %s, want invalid_task_profile local_only error", resp.Body.String())
+	}
+}
+
 func TestHostAPIReturnsJSONErrors(t *testing.T) {
 	server, err := NewServer(Config{LLMKitHome: t.TempDir()})
 	if err != nil {
@@ -294,6 +374,17 @@ func selectedModelAlias(t *testing.T, routes llmRoutesResponse) string {
 	for _, route := range routes.Routes {
 		if route.Selected {
 			return route.ModelAlias
+		}
+	}
+	t.Fatalf("no selected route found: %+v", routes.Routes)
+	return ""
+}
+
+func selectedTaskType(t *testing.T, routes llmRoutesResponse) string {
+	t.Helper()
+	for _, route := range routes.Routes {
+		if route.Selected {
+			return route.TaskType
 		}
 	}
 	t.Fatalf("no selected route found: %+v", routes.Routes)
