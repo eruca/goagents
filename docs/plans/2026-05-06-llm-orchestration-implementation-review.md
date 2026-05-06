@@ -1,5 +1,8 @@
 # LLM orchestration implementation review
 
+> 这份文档是早期 checkpoint。host-api 配置接入和历史表现反哺路由落地后，
+> 当前设计回归以 `docs/llmkit-orchestration-design-review.md` 为准。
+
 ## 结论
 
 当前实现已经支撑最初的核心目标：host 可以按任务画像选择更合适的 LLM，
