@@ -3,6 +3,10 @@
 This document captures the current HTTP contract of `examples/host-api`. The
 example is a host-side composition surface, not a new core module.
 
+The machine-readable contract lives at
+`examples/host-api/openapi.yaml`. Keep this document and that OpenAPI file in
+sync when the example HTTP surface changes.
+
 ## Runtime
 
 Environment:
@@ -46,6 +50,7 @@ All handler-level errors use:
 Common error codes:
 
 - `invalid_request`
+- `invalid_json`
 - `unsupported_run_mode`
 - `invalid_task_profile`
 - `workflow_error`

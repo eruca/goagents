@@ -102,7 +102,8 @@ host-api 当前支持：
 - `outcomes.jsonl`
 - `model-stats.json`
 
-host-api 启动时会刷新 `model-stats.json`，并把 `ModelStats` 注入 goagent adapter。
+host-api 启动时会验证并初始化 `model-stats.json`。运行中，host-api 通过
+`ModelStatsProvider` 在每次路由前刷新统计，`GET /llmkit/models` 也会刷新后返回。
 adapter 会在当前 `TaskProfile` 确定后应用历史统计，因此历史是 task-type aware 的。
 
 `GET /workflows/{id}/llm-routes` 可以查看一次 workflow 的 route trace、score breakdown、

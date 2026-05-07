@@ -293,14 +293,15 @@ Important behavior:
   demo providers so tests and walkthroughs run without network access.
 - If `config.yaml` exists, host-api builds candidates and OpenAI-compatible
   providers from that file.
-- Startup refreshes `model-stats.json` from `route-events.jsonl` and
-  `outcomes.jsonl`, then injects those stats into the adapter so history can
-  affect routing.
+- Startup validates and initializes `model-stats.json`. During runtime,
+  host-api refreshes stats before each route decision through
+  `ModelStatsProvider`, and refreshes again when serving `/llmkit/models`.
 - `GET /workflows/{id}/llm-routes` exposes route audit for a workflow.
 - `GET /llmkit/models` exposes configured models, current health snapshot, and
   model stats used for history-aware routing.
 
-See `../docs/host-api-contract.md` for the endpoint contract.
+See `../docs/host-api-contract.md` for the prose endpoint contract and
+`../examples/host-api/openapi.yaml` for the machine-readable contract.
 
 ## Independent Testing
 

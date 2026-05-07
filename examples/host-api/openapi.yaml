@@ -1,0 +1,551 @@
+openapi: 3.1.0
+info:
+  title: Goagents Host API Example
+  version: 0.1.0
+  description: |
+    HTTP contract for examples/host-api. This is a host-side composition
+    example, not a production gateway or a new core module.
+servers:
+  - url: http://127.0.0.1:8080
+    description: Default local server
+tags:
+  - name: workflows
+  - name: agent-runs
+  - name: llmkit
+paths:
+  /workflows:
+    post:
+      tags:
+        - workflows
+      summary: Create a synchronous workflow
+      description: Creates a workflow and runs it until it waits for approval.
+      operationId: createWorkflow
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWorkflowRequest'
+            examples:
+              highSuccess:
+                value:
+                  id: wf-review-1
+                  input: Review this policy.
+                  run_mode: sync
+                  task_profile_preset: high_success
+                  task_profile:
+                    task_type: policy_review
+                    complexity: hard
+                    latency: normal
+                    failure_cost: high
+                    privacy: cloud_allowed
+                    max_estimated_cents: 10
+                    needs_reasoning: true
+      responses:
+        '202':
+          description: Workflow created and waiting for approval.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+  /workflows/{id}:
+    get:
+      tags:
+        - workflows
+      summary: Get workflow state
+      operationId: getWorkflow
+      parameters:
+        - $ref: '#/components/parameters/WorkflowID'
+      responses:
+        '200':
+          description: Stored workflow state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+  /workflows/{id}/approve:
+    post:
+      tags:
+        - workflows
+      summary: Approve and finalize a workflow
+      operationId: approveWorkflow
+      parameters:
+        - $ref: '#/components/parameters/WorkflowID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApproveWorkflowRequest'
+            examples:
+              approve:
+                value:
+                  approved_by: operator
+                  note: accepted
+      responses:
+        '200':
+          description: Finalized workflow state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+  /workflows/{id}/llm-routes:
+    get:
+      tags:
+        - workflows
+        - llmkit
+      summary: Get sanitized LLM route audit records for a workflow
+      operationId: getWorkflowLLMRoutes
+      parameters:
+        - $ref: '#/components/parameters/WorkflowID'
+      responses:
+        '200':
+          description: Sanitized route audit records.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LLMRoutesResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+  /agent-runs/{id}:
+    get:
+      tags:
+        - agent-runs
+      summary: Get durable agent run audit state
+      operationId: getAgentRun
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Agent run id.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Durable agent run record.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentRunResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+  /llmkit/models:
+    get:
+      tags:
+        - llmkit
+      summary: Get current LLM candidates, provider health, and generated stats
+      operationId: getLLMKitModels
+      responses:
+        '200':
+          description: Current model routing view.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelsResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+components:
+  parameters:
+    WorkflowID:
+      name: id
+      in: path
+      required: true
+      description: Workflow id.
+      schema:
+        type: string
+  responses:
+    ErrorResponse:
+      description: Handler-level error.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+  schemas:
+    CreateWorkflowRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - input
+      properties:
+        id:
+          type: string
+        input:
+          type: string
+        run_mode:
+          $ref: '#/components/schemas/RunMode'
+        task_profile_preset:
+          $ref: '#/components/schemas/TaskProfilePreset'
+        task_profile:
+          $ref: '#/components/schemas/TaskProfile'
+    ApproveWorkflowRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        approved_by:
+          type: string
+        note:
+          type: string
+    WorkflowResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - status
+        - run_mode
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          enum:
+            - pending
+            - running
+            - waiting_approval
+            - succeeded
+            - failed
+            - cancelled
+        run_mode:
+          $ref: '#/components/schemas/RunMode'
+        input_ref:
+          type: string
+        output_ref:
+          type: string
+        agent_run_id:
+          type: string
+        audit_ref:
+          type: string
+        approval_ref:
+          type: string
+        waiting_reason:
+          type: string
+        completed_steps:
+          type: array
+          items:
+            type: string
+    AgentRunResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - run_id
+        - status
+        - summary
+      properties:
+        run_id:
+          type: string
+        workflow_id:
+          type: string
+        task_id:
+          type: string
+        status:
+          type: string
+        summary:
+          type: object
+          additionalProperties: true
+        events:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+    LLMRoutesResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - workflow_id
+        - routes
+      properties:
+        workflow_id:
+          type: string
+        routes:
+          type: array
+          items:
+            $ref: '#/components/schemas/LLMRoute'
+    LLMRoute:
+      type: object
+      additionalProperties: false
+      required:
+        - selected
+      properties:
+        route_id:
+          type: string
+        task_id:
+          type: string
+        attempt:
+          type: integer
+        task_type:
+          type: string
+        task_profile:
+          $ref: '#/components/schemas/TaskProfile'
+        account_alias:
+          type: string
+        model_alias:
+          type: string
+        provider:
+          type: string
+        selected:
+          type: boolean
+        reason:
+          type: string
+        score:
+          type: integer
+        score_breakdown:
+          $ref: '#/components/schemas/ScoreBreakdown'
+        candidate_model_aliases:
+          type: array
+          items:
+            type: string
+        candidates:
+          type: array
+          items:
+            $ref: '#/components/schemas/LLMRouteCandidate'
+        outcome:
+          $ref: '#/components/schemas/LLMRouteOutcome'
+    LLMRouteCandidate:
+      type: object
+      additionalProperties: false
+      required:
+        - available
+      properties:
+        alias:
+          type: string
+        account_alias:
+          type: string
+        available:
+          type: boolean
+        score:
+          type: integer
+        score_breakdown:
+          $ref: '#/components/schemas/ScoreBreakdown'
+        reason:
+          type: string
+    LLMRouteOutcome:
+      type: object
+      additionalProperties: false
+      required:
+        - success
+      properties:
+        success:
+          type: boolean
+        error_code:
+          type: string
+        latency_ms:
+          type: integer
+        input_tokens:
+          type: integer
+        output_tokens:
+          type: integer
+        estimated_cents:
+          type: integer
+        business_outcome:
+          $ref: '#/components/schemas/BusinessOutcome'
+        success_signal:
+          $ref: '#/components/schemas/SuccessSignal'
+        failure_reason:
+          type: string
+    ModelsResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - models
+        - health
+      properties:
+        models:
+          type: array
+          items:
+            $ref: '#/components/schemas/Model'
+        health:
+          type: object
+          additionalProperties: true
+        stats:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModelStats'
+    Model:
+      type: object
+      additionalProperties: false
+      required:
+        - alias
+        - provider
+        - account_alias
+        - is_local
+        - price_class
+      properties:
+        alias:
+          type: string
+        provider:
+          type: string
+        account_alias:
+          type: string
+        is_local:
+          type: boolean
+        price_class:
+          $ref: '#/components/schemas/PriceClass'
+    ModelStats:
+      type: object
+      additionalProperties: false
+      required:
+        - route_attempts
+        - outcome_count
+        - pending_outcomes
+        - successes
+        - failures
+        - success_rate
+        - failure_rate
+      properties:
+        task_type:
+          type: string
+        account_alias:
+          type: string
+        model_alias:
+          type: string
+        provider:
+          type: string
+        route_attempts:
+          type: integer
+        outcome_count:
+          type: integer
+        pending_outcomes:
+          type: integer
+        successes:
+          type: integer
+        failures:
+          type: integer
+        success_rate:
+          type: number
+        failure_rate:
+          type: number
+        avg_latency_ms:
+          type: integer
+        avg_input_tokens:
+          type: integer
+        avg_output_tokens:
+          type: integer
+        avg_estimated_cents:
+          type: integer
+    TaskProfile:
+      type: object
+      additionalProperties: false
+      properties:
+        task_type:
+          type: string
+        complexity:
+          $ref: '#/components/schemas/Complexity'
+        latency:
+          $ref: '#/components/schemas/LatencyRequirement'
+        failure_cost:
+          $ref: '#/components/schemas/FailureCost'
+        privacy:
+          $ref: '#/components/schemas/PrivacyLevel'
+        max_estimated_cents:
+          type: integer
+          minimum: 1
+          description: Hard per-task routing budget when known candidate cost is available.
+        needs_reasoning:
+          type: boolean
+        needs_tools:
+          type: boolean
+        needs_json:
+          type: boolean
+        needs_long_context:
+          type: boolean
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          enum:
+            - invalid_request
+            - invalid_json
+            - unsupported_run_mode
+            - invalid_task_profile
+            - workflow_error
+            - artifact_error
+            - llm_audit_error
+            - run_error
+            - not_found
+        message:
+          type: string
+    ScoreBreakdown:
+      type: object
+      additionalProperties:
+        type: integer
+    RunMode:
+      type: string
+      enum:
+        - sync
+        - queued
+      default: sync
+      description: Only sync is implemented. queued currently returns unsupported_run_mode.
+    TaskProfilePreset:
+      type: string
+      enum:
+        - simple_local
+        - balanced
+        - high_success
+        - local_only
+    Complexity:
+      type: string
+      enum:
+        - simple
+        - medium
+        - hard
+    LatencyRequirement:
+      type: string
+      enum:
+        - none
+        - normal
+        - urgent
+    FailureCost:
+      type: string
+      enum:
+        - low
+        - medium
+        - high
+    PrivacyLevel:
+      type: string
+      enum:
+        - local_preferred
+        - cloud_allowed
+        - local_only
+    PriceClass:
+      type: string
+      enum:
+        - free
+        - low
+        - medium
+        - high
+    BusinessOutcome:
+      type: string
+      enum:
+        - success
+        - failure
+        - partial
+        - unknown
+    SuccessSignal:
+      type: string
+      enum:
+        - schema_passed
+        - tests_passed
+        - human_accepted
+        - tool_completed
