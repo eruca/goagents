@@ -289,9 +289,12 @@ budget_commit_failed
 
 ## 4. task_profile bool override 语义
 
-### 当前状态
+实现状态：已在 `examples/host-api` 落地。请求侧使用 pointer patch 语义；响应侧继续返回最终
+生效的普通 `TaskProfile`。
 
-host-api 的 `task_profile` override 使用 Go bool 字段：
+### 原问题
+
+host-api 之前的 `task_profile` override 使用 Go bool 字段：
 
 ```go
 NeedsReasoning bool `json:"needs_reasoning,omitempty"`
@@ -312,19 +315,19 @@ NeedsLongContext bool `json:"needs_long_context,omitempty"`
 {"needs_reasoning": false}
 ```
 
-在当前 Go struct 中都会变成 `false`。因此当 preset 默认 `needs_reasoning=true` 时，传一个只想改
+在旧 Go struct 中都会变成 `false`。因此当 preset 默认 `needs_reasoning=true` 时，传一个只想改
 `task_type` 的 `task_profile` 会把 `needs_reasoning` 意外改成 `false`。
 
-当前文档已经明确了这个限制，但长期合同不够严谨。
+这个限制已经通过 request-only pointer patch 修正。
 
 ### 边界判断
 
 这个问题属于 host-api HTTP patch contract，不属于 `llmkit.TaskProfile` core。
 `llmkit.TaskProfile` 作为最终生效画像，继续使用普通 bool 是合理的。
 
-### 推荐方案
+### 已采用方案
 
-新增 host-api request-only patch 类型：
+host-api 使用 request-only patch 类型：
 
 ```go
 type taskProfilePatchRequest struct {
@@ -346,23 +349,23 @@ type taskProfilePatchRequest struct {
 - 字段缺失：继承 preset 或默认 profile。
 - 字段存在且为 `false`：显式覆盖为 false。
 - 字段存在且为 `true`：显式覆盖为 true。
-- string 字段存在但为空：建议视为 invalid request，而不是静默忽略。
+- string 字段存在但为空：视为 invalid request，而不是静默忽略。
 - `max_estimated_cents` 存在且小于 0：invalid request。
-- `max_estimated_cents` 存在且为 0：清除任务预算，或明确禁止。推荐第一版禁止 0，避免歧义。
+- `max_estimated_cents` 存在且为 0：invalid request，避免“清除预算”和“未传”语义混淆。
 
 ### 兼容路径
 
-为了不破坏当前 host-api 示例：
+当前实现保留了这些兼容边界：
 
 1. 保留响应里的 `task_profile` shape 不变。
-2. 请求解析先改为 pointer patch。
+2. 请求解析改为 pointer patch。
 3. 对旧客户端来说，传 true/false 的 JSON 仍然兼容。
 4. 行为变化只影响“字段缺失”的情况：缺失将继承 preset，而不是变成 false。
 5. 更新 OpenAPI，说明 `task_profile` 是 patch semantics。
 
-### 测试要求
+### 测试覆盖
 
-需要补 3 个 host-api 测试：
+已补 3 个 host-api 测试：
 
 - `high_success` preset + `task_profile: {"task_type":"x"}` 仍保留 `needs_reasoning=true`。
 - `high_success` preset + `task_profile: {"needs_reasoning":false}` 显式关掉 reasoning。
@@ -391,11 +394,9 @@ type taskProfilePatchRequest struct {
    - 继续保留当前 per-task budget
 
 4. `feat(host-api): 修正 task profile patch 语义`
-   - 改 host-api request struct
-   - 更新 OpenAPI 和 prose contract
-   - 补回归测试
+   - 已完成
 
-第 4 项是低风险行为修正，但会改变缺失 bool 字段的语义，因此应单独实现和提交。
+剩余实现重点是前 3 项是否需要继续从 contract 进入代码；第 4 项不再重复排期。
 
 ## 当前不做的事
 

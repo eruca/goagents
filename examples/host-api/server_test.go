@@ -342,6 +342,78 @@ func TestHostAPITaskProfilePresetAllowsOverrides(t *testing.T) {
 	}
 }
 
+func TestHostAPITaskProfilePatchKeepsPresetBooleansWhenOmitted(t *testing.T) {
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+
+	doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]any{
+		"id":                  "wf-preset-patch-keep-bool",
+		"input":               "Review a high-risk policy.",
+		"task_profile_preset": "high_success",
+		"task_profile": map[string]any{
+			"task_type": "policy_review_custom",
+		},
+	})
+	routes := doJSON[llmRoutesResponse](t, server.Handler(), http.MethodGet, "/workflows/wf-preset-patch-keep-bool/llm-routes", nil)
+	route := selectedRoute(t, routes)
+	if route.TaskProfile == nil {
+		t.Fatalf("route profile is nil: %+v", route)
+	}
+	if !route.TaskProfile.NeedsReasoning {
+		t.Fatalf("route profile = %+v, want omitted needs_reasoning to inherit high_success preset", route.TaskProfile)
+	}
+}
+
+func TestHostAPITaskProfilePatchCanExplicitlyDisablePresetBoolean(t *testing.T) {
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+
+	doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]any{
+		"id":                  "wf-preset-patch-disable-bool",
+		"input":               "Review a high-risk policy without reasoning.",
+		"task_profile_preset": "high_success",
+		"task_profile": map[string]any{
+			"needs_reasoning": false,
+		},
+	})
+	routes := doJSON[llmRoutesResponse](t, server.Handler(), http.MethodGet, "/workflows/wf-preset-patch-disable-bool/llm-routes", nil)
+	route := selectedRoute(t, routes)
+	if route.TaskProfile == nil {
+		t.Fatalf("route profile is nil: %+v", route)
+	}
+	if route.TaskProfile.NeedsReasoning {
+		t.Fatalf("route profile = %+v, want explicit needs_reasoning=false to override preset", route.TaskProfile)
+	}
+}
+
+func TestHostAPIRejectsEmptyTaskProfilePatchStrings(t *testing.T) {
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/workflows", bytes.NewBufferString(`{
+		"id": "wf-empty-profile-string",
+		"input": "Review this.",
+		"task_profile": {
+			"complexity": ""
+		}
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	server.Handler().ServeHTTP(resp, req)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), "invalid_task_profile") || !strings.Contains(resp.Body.String(), "complexity") {
+		t.Fatalf("body = %s, want invalid_task_profile complexity error", resp.Body.String())
+	}
+}
+
 func TestHostAPIRejectsInvalidTaskProfilePresetCombination(t *testing.T) {
 	server, err := NewServer(Config{LLMKitHome: t.TempDir()})
 	if err != nil {

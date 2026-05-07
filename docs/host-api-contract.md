@@ -94,13 +94,12 @@ Fields:
   and currently returns `unsupported_run_mode`.
 - `task_profile_preset`: optional. Supported values are `simple_local`,
   `balanced`, `high_success`, and `local_only`.
-- `task_profile`: optional host override. Preset values are applied first.
-  Non-empty string fields override the preset. Boolean fields are decoded with
-  Go zero values, so an omitted boolean in a present `task_profile` object is
-  currently treated as `false`. `max_estimated_cents` is a hard per-task budget
-  filter when known candidate cost is available. The planned request patch
-  semantics are documented in
-  `docs/plans/2026-05-07-llmkit-host-contract-followups-design.md`.
+- `task_profile`: optional host patch. Preset values are applied first. Missing
+  fields inherit the preset or default profile. Present string fields must be
+  non-empty and override the base profile. Present boolean fields explicitly
+  override the base profile, including `false`. `max_estimated_cents` must be
+  greater than zero when present and is a hard per-task budget filter when
+  known candidate cost is available.
 
 Response status: `202 Accepted`.
 

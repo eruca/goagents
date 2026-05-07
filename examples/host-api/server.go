@@ -56,16 +56,16 @@ type approveWorkflowRequest struct {
 }
 
 type taskProfileRequest struct {
-	TaskType          string `json:"task_type,omitempty"`
-	Complexity        string `json:"complexity,omitempty"`
-	Latency           string `json:"latency,omitempty"`
-	FailureCost       string `json:"failure_cost,omitempty"`
-	Privacy           string `json:"privacy,omitempty"`
-	MaxEstimatedCents int    `json:"max_estimated_cents,omitempty"`
-	NeedsReasoning    bool   `json:"needs_reasoning,omitempty"`
-	NeedsTools        bool   `json:"needs_tools,omitempty"`
-	NeedsJSON         bool   `json:"needs_json,omitempty"`
-	NeedsLongContext  bool   `json:"needs_long_context,omitempty"`
+	TaskType          *string `json:"task_type,omitempty"`
+	Complexity        *string `json:"complexity,omitempty"`
+	Latency           *string `json:"latency,omitempty"`
+	FailureCost       *string `json:"failure_cost,omitempty"`
+	Privacy           *string `json:"privacy,omitempty"`
+	MaxEstimatedCents *int    `json:"max_estimated_cents,omitempty"`
+	NeedsReasoning    *bool   `json:"needs_reasoning,omitempty"`
+	NeedsTools        *bool   `json:"needs_tools,omitempty"`
+	NeedsJSON         *bool   `json:"needs_json,omitempty"`
+	NeedsLongContext  *bool   `json:"needs_long_context,omitempty"`
 }
 
 type workflowResponse struct {
@@ -855,45 +855,84 @@ func applyTaskProfileOverride(profile *llmkit.TaskProfile, req *taskProfileReque
 	if req == nil {
 		return nil
 	}
-	if strings.TrimSpace(req.TaskType) != "" {
-		profile.TaskType = strings.TrimSpace(req.TaskType)
+	if req.TaskType != nil {
+		value, err := nonEmptyTaskProfileString("task_type", *req.TaskType)
+		if err != nil {
+			return err
+		}
+		profile.TaskType = value
 	}
-	if strings.TrimSpace(req.Complexity) != "" {
-		value := llmkit.Complexity(strings.TrimSpace(req.Complexity))
+	if req.Complexity != nil {
+		raw, err := nonEmptyTaskProfileString("complexity", *req.Complexity)
+		if err != nil {
+			return err
+		}
+		value := llmkit.Complexity(raw)
 		if value != llmkit.ComplexitySimple && value != llmkit.ComplexityMedium && value != llmkit.ComplexityHard {
-			return fmt.Errorf("unsupported complexity %q", req.Complexity)
+			return fmt.Errorf("unsupported complexity %q", *req.Complexity)
 		}
 		profile.Complexity = value
 	}
-	if strings.TrimSpace(req.Latency) != "" {
-		value := llmkit.LatencyRequirement(strings.TrimSpace(req.Latency))
+	if req.Latency != nil {
+		raw, err := nonEmptyTaskProfileString("latency", *req.Latency)
+		if err != nil {
+			return err
+		}
+		value := llmkit.LatencyRequirement(raw)
 		if value != llmkit.LatencyNone && value != llmkit.LatencyNormal && value != llmkit.LatencyUrgent {
-			return fmt.Errorf("unsupported latency %q", req.Latency)
+			return fmt.Errorf("unsupported latency %q", *req.Latency)
 		}
 		profile.Latency = value
 	}
-	if strings.TrimSpace(req.FailureCost) != "" {
-		value := llmkit.FailureCost(strings.TrimSpace(req.FailureCost))
+	if req.FailureCost != nil {
+		raw, err := nonEmptyTaskProfileString("failure_cost", *req.FailureCost)
+		if err != nil {
+			return err
+		}
+		value := llmkit.FailureCost(raw)
 		if value != llmkit.FailureCostLow && value != llmkit.FailureCostMedium && value != llmkit.FailureCostHigh {
-			return fmt.Errorf("unsupported failure_cost %q", req.FailureCost)
+			return fmt.Errorf("unsupported failure_cost %q", *req.FailureCost)
 		}
 		profile.FailureCost = value
 	}
-	if strings.TrimSpace(req.Privacy) != "" {
-		value := llmkit.PrivacyLevel(strings.TrimSpace(req.Privacy))
+	if req.Privacy != nil {
+		raw, err := nonEmptyTaskProfileString("privacy", *req.Privacy)
+		if err != nil {
+			return err
+		}
+		value := llmkit.PrivacyLevel(raw)
 		if value != llmkit.PrivacyLocalPreferred && value != llmkit.PrivacyCloudAllowed && value != llmkit.PrivacyLocalOnly {
-			return fmt.Errorf("unsupported privacy %q", req.Privacy)
+			return fmt.Errorf("unsupported privacy %q", *req.Privacy)
 		}
 		profile.Privacy = value
 	}
-	if req.MaxEstimatedCents > 0 {
-		profile.MaxEstimatedCents = req.MaxEstimatedCents
+	if req.MaxEstimatedCents != nil {
+		if *req.MaxEstimatedCents <= 0 {
+			return fmt.Errorf("max_estimated_cents must be greater than zero")
+		}
+		profile.MaxEstimatedCents = *req.MaxEstimatedCents
 	}
-	profile.NeedsReasoning = req.NeedsReasoning
-	profile.NeedsTools = req.NeedsTools
-	profile.NeedsJSON = req.NeedsJSON
-	profile.NeedsLongContext = req.NeedsLongContext
+	if req.NeedsReasoning != nil {
+		profile.NeedsReasoning = *req.NeedsReasoning
+	}
+	if req.NeedsTools != nil {
+		profile.NeedsTools = *req.NeedsTools
+	}
+	if req.NeedsJSON != nil {
+		profile.NeedsJSON = *req.NeedsJSON
+	}
+	if req.NeedsLongContext != nil {
+		profile.NeedsLongContext = *req.NeedsLongContext
+	}
 	return nil
+}
+
+func nonEmptyTaskProfileString(field string, value string) (string, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "", fmt.Errorf("%s must not be empty", field)
+	}
+	return trimmed, nil
 }
 
 func taskProfilePreset(name string) (llmkit.TaskProfile, error) {

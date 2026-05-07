@@ -119,15 +119,12 @@ Available presets:
 - `local_only`: simple, low failure cost, local-only.
 
 If both fields are present, `task_profile_preset` provides the base profile and
-`task_profile` overrides it. String fields override only when non-empty.
-Boolean fields currently use Go zero values, so an omitted boolean inside a
-present `task_profile` object is treated as `false`. The default profile
-remains simple, low failure cost, and local-preferred. Invalid or unroutable
-profiles return `invalid_task_profile`; for example, `local_only` plus
-`complexity: hard` fails when no local advanced model exists. The routing
-decision is visible through `GET /workflows/{id}/llm-routes`.
-The planned pointer-patch semantics for this request shape are documented in
-`../../docs/plans/2026-05-07-llmkit-host-contract-followups-design.md`.
+`task_profile` patches it. Missing fields inherit the preset/default profile.
+Present string fields must be non-empty. Present boolean fields explicitly
+override the base profile, including `false`. Invalid or unroutable profiles
+return `invalid_task_profile`; for example, `local_only` plus `complexity: hard`
+fails when no local advanced model exists. The routing decision is visible
+through `GET /workflows/{id}/llm-routes`.
 
 `GET /llmkit/models` returns:
 

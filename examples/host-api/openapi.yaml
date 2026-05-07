@@ -196,6 +196,10 @@ components:
           $ref: '#/components/schemas/TaskProfilePreset'
         task_profile:
           $ref: '#/components/schemas/TaskProfile'
+          description: >
+            Patch applied after task_profile_preset. Missing fields inherit the
+            base profile; present booleans explicitly override it, including
+            false.
     ApproveWorkflowRequest:
       type: object
       additionalProperties: false
@@ -443,9 +447,15 @@ components:
     TaskProfile:
       type: object
       additionalProperties: false
+      description: >
+        Task profile patch in requests and effective task profile in route
+        responses. For requests, omitted fields inherit the preset/default
+        profile. Present string fields must be non-empty. Present booleans
+        explicitly override the base profile, including false.
       properties:
         task_type:
           type: string
+          minLength: 1
         complexity:
           $ref: '#/components/schemas/Complexity'
         latency:
