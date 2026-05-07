@@ -182,6 +182,36 @@ func TestHostAPIReturnsWorkflowLLMRouteAudit(t *testing.T) {
 	}
 }
 
+func TestHostAPIRouteOutcomeResponseIncludesErrorClass(t *testing.T) {
+	response := llmRouteToResponse(llmkit.RouteAuditRecord{
+		Route: llmkit.RouteTrace{
+			RouteID:      "route-error-class",
+			TaskID:       "task-error-class",
+			Attempt:      1,
+			AccountAlias: "local-dev",
+			ModelAlias:   "local-free",
+			Provider:     "local",
+			Selected:     true,
+		},
+		Outcome: &llmkit.TaskOutcome{
+			RouteID:    "route-error-class",
+			TaskID:     "task-error-class",
+			Attempt:    1,
+			ModelAlias: "local-free",
+			Provider:   "local",
+			Success:    false,
+			ErrorCode:  "provider_error",
+			ErrorClass: llmkit.ErrorClassTimeout,
+		},
+	})
+	if response.Outcome == nil {
+		t.Fatalf("response outcome is nil: %+v", response)
+	}
+	if response.Outcome.ErrorClass != string(llmkit.ErrorClassTimeout) {
+		t.Fatalf("response outcome = %+v, want timeout error_class", response.Outcome)
+	}
+}
+
 func TestHostAPIRoutesLLMByRequestTaskProfile(t *testing.T) {
 	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
 	if err != nil {

@@ -138,6 +138,7 @@ type llmRouteCandidateResponse struct {
 type llmRouteOutcomeResponse struct {
 	Success         bool   `json:"success"`
 	ErrorCode       string `json:"error_code,omitempty"`
+	ErrorClass      string `json:"error_class,omitempty"`
 	LatencyMillis   int    `json:"latency_ms,omitempty"`
 	InputTokens     int    `json:"input_tokens,omitempty"`
 	OutputTokens    int    `json:"output_tokens,omitempty"`
@@ -744,6 +745,7 @@ func llmRouteToResponse(record llmkit.RouteAuditRecord) llmRouteResponse {
 		response.Outcome = &llmRouteOutcomeResponse{
 			Success:         outcome.Success,
 			ErrorCode:       outcome.ErrorCode,
+			ErrorClass:      string(outcome.ErrorClass),
 			LatencyMillis:   outcome.LatencyMillis,
 			InputTokens:     outcome.InputTokens,
 			OutputTokens:    outcome.OutputTokens,

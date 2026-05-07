@@ -217,7 +217,25 @@ client := goagentadapter.NewClient(goagentadapter.Config{
 `MaxAttempts <= 0` preserves the default behavior: try all remaining eligible
 provider-backed candidates.
 
-The planned typed fallback contract is documented in
+Hosts can also classify provider errors for audit and future typed fallback
+rules:
+
+```go
+client := goagentadapter.NewClient(goagentadapter.Config{
+    Candidates: config.Candidates(),
+    Providers:  providers,
+    ErrorClassifier: func(err error) llmkit.ErrorClass {
+        return llmkit.ErrorClassTimeout
+    },
+})
+```
+
+Without `ErrorClassifier`, provider failures keep the existing
+`error_code=provider_error` outcome and fallback behavior. With a classifier,
+failed outcomes also record `error_class`, such as `timeout` or
+`rate_limited`.
+
+The typed fallback contract is tracked in
 `../docs/plans/2026-05-07-llmkit-host-contract-followups-design.md`.
 
 ## API Keys

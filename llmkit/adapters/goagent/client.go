@@ -28,6 +28,9 @@ type RouteMetadataProvider func(context.Context, ports.ChatRequest) RouteMetadat
 // ModelStatsProvider supplies fresh model statistics before each route decision.
 type ModelStatsProvider func(context.Context) (*llmkit.ModelStats, error)
 
+// ErrorClassifier maps provider errors to llmkit's stable fallback/audit classes.
+type ErrorClassifier func(error) llmkit.ErrorClass
+
 // RouteMetadata contains host-provided trace identifiers.
 type RouteMetadata struct {
 	RouteID string
@@ -53,6 +56,7 @@ type Config struct {
 	ModelStatsProvider    ModelStatsProvider
 	HealthStore           llmkit.HealthStore
 	FallbackPolicy        FallbackPolicy
+	ErrorClassifier       ErrorClassifier
 }
 
 // Client implements goagent's LLMClient by routing to a provider client.
@@ -68,6 +72,7 @@ type Client struct {
 	modelStatsProvider    ModelStatsProvider
 	healthStore           llmkit.HealthStore
 	fallbackPolicy        FallbackPolicy
+	errorClassifier       ErrorClassifier
 }
 
 // NewClient creates a goagent LLMClient adapter.
@@ -92,6 +97,7 @@ func NewClient(config Config) *Client {
 		modelStatsProvider:    config.ModelStatsProvider,
 		healthStore:           config.HealthStore,
 		fallbackPolicy:        config.FallbackPolicy,
+		errorClassifier:       config.ErrorClassifier,
 	}
 }
 
@@ -173,6 +179,9 @@ func (c *Client) recordOutcome(ctx context.Context, profile llmkit.TaskProfile, 
 	}
 	if providerErr != nil {
 		outcome.ErrorCode = "provider_error"
+		if c.errorClassifier != nil {
+			outcome.ErrorClass = c.errorClassifier(providerErr)
+		}
 	}
 	if c.healthStore != nil {
 		if err := c.healthStore.RecordOutcome(ctx, outcome); err != nil {

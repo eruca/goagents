@@ -60,6 +60,20 @@ const (
 	SuccessSignalToolCompleted SuccessSignal = "tool_completed"
 )
 
+type ErrorClass string
+
+const (
+	ErrorClassTransient          ErrorClass = "transient_error"
+	ErrorClassRateLimited        ErrorClass = "rate_limited"
+	ErrorClassTimeout            ErrorClass = "timeout"
+	ErrorClassInvalidJSON        ErrorClass = "invalid_json"
+	ErrorClassToolCallInvalid    ErrorClass = "tool_call_invalid"
+	ErrorClassCapabilityMismatch ErrorClass = "capability_mismatch"
+	ErrorClassPolicyBlocked      ErrorClass = "policy_blocked"
+	ErrorClassAuth               ErrorClass = "auth_error"
+	ErrorClassUnknown            ErrorClass = "unknown"
+)
+
 // TaskOutcome is the allowlisted audit record for the result of an LLM task.
 // It records outcome metadata, not prompts, responses, API keys, or headers.
 type TaskOutcome struct {
@@ -76,6 +90,7 @@ type TaskOutcome struct {
 	SuccessSignal   SuccessSignal   `json:"success_signal,omitempty"`
 	FailureReason   string          `json:"failure_reason,omitempty"`
 	ErrorCode       string          `json:"error_code,omitempty"`
+	ErrorClass      ErrorClass      `json:"error_class,omitempty"`
 	LatencyMillis   int             `json:"latency_ms,omitempty"`
 	InputTokens     int             `json:"input_tokens,omitempty"`
 	OutputTokens    int             `json:"output_tokens,omitempty"`
@@ -269,6 +284,7 @@ func sanitizeTaskOutcome(outcome TaskOutcome) TaskOutcome {
 	outcome.SuccessSignal = SuccessSignal(sanitizeAuditString(string(outcome.SuccessSignal)))
 	outcome.FailureReason = sanitizeAuditString(outcome.FailureReason)
 	outcome.ErrorCode = sanitizeAuditString(outcome.ErrorCode)
+	outcome.ErrorClass = ErrorClass(sanitizeAuditString(string(outcome.ErrorClass)))
 	return outcome
 }
 

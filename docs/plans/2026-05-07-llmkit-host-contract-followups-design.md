@@ -80,9 +80,13 @@ type HealthStore interface {
 
 ## 2. 错误类型化 fallback
 
+实现状态：已完成第一步 contract 落地。`llmkit` 已有 `ErrorClass`，
+`TaskOutcome` 已记录 `error_class`，goagent adapter 已支持可选 `ErrorClassifier`。
+完整 fallback rule engine 尚未实现。
+
 ### 当前状态
 
-goagent adapter 现在只有显式 attempt 数量控制：
+goagent adapter 现在有显式 attempt 数量控制：
 
 ```go
 FallbackPolicy{MaxAttempts: 2}
@@ -95,16 +99,17 @@ provider 失败后会：
 3. 重新让 `RoutePolicy` 选择下一候选。
 4. 直到成功、无候选或达到 `MaxAttempts`。
 
-这已经比隐式 fallback 更清楚，但还不能表达“什么错误应该换账号、换模型、升级模型或停止”。
+这已经比隐式 fallback 更清楚。当前新增的 `error_class` 能表达错误类别，但还没有
+根据不同错误类别执行“换账号、换模型、升级模型或停止”的完整 rule engine。
 
 ### 边界判断
 
 错误分类应该进入 `llmkit` contract，但具体从 provider error 转换成错误类别的逻辑应由
 adapter 或 host 提供。原因是不同 provider 的错误形态不同，不能靠 core 猜测。
 
-### 建议 contract
+### 已落地 contract
 
-新增一层可选分类，不破坏现有 `ErrorCode`：
+已新增一层可选分类，不破坏现有 `ErrorCode`：
 
 ```go
 type ErrorClass string
@@ -122,20 +127,20 @@ const (
 )
 ```
 
-后续可以把 `TaskOutcome` 扩展为：
+`TaskOutcome` 已扩展为：
 
 ```go
 ErrorCode  string     `json:"error_code,omitempty"`
 ErrorClass ErrorClass `json:"error_class,omitempty"`
 ```
 
-adapter 增加可选 classifier：
+adapter 已增加可选 classifier：
 
 ```go
 type ErrorClassifier func(error) llmkit.ErrorClass
 ```
 
-`FallbackPolicy` 后续扩展为：
+`FallbackPolicy` 后续仍可扩展为：
 
 ```go
 type FallbackPolicy struct {
@@ -160,12 +165,15 @@ prefer_more_capable
 stop
 ```
 
-### 默认策略
+### 当前兼容策略
 
 保持兼容：
 
 - 没有 classifier 时，错误继续记为 `provider_error`，fallback 行为不变。
 - `MaxAttempts <= 0` 继续表示尝试所有剩余 eligible candidates。
+
+后续 rule engine 可采用：
+
 - `policy_blocked` 默认 stop。
 - `auth_error` 默认 stop，并建议 host 标记账号不可用。
 - `rate_limited` 默认 try_next_candidate，同时 health store 进入 cooldown。
@@ -174,18 +182,21 @@ stop
 
 ### 审计要求
 
-后续 route/outcome audit 应能回答：
+当前 outcome audit 已能回答：
 
 - 失败属于什么 `error_class`
+
+后续 rule engine 还应回答：
+
 - 哪条 fallback rule 命中
 - 为什么继续 fallback 或停止
 - fallback 后选择了哪个候选
 
 ### 验收标准
 
-- 没有配置 typed fallback 时，现有测试和行为不变。
+- 没有配置 classifier 时，现有测试和行为不变。
 - 配置 classifier 后，`outcomes.jsonl` 能记录 `error_class`。
-- route audit 能展示 fallback action 或停止原因。
+- route audit 展示 fallback action 或停止原因留给后续 rule engine。
 
 ## 3. 项目/账号级预算
 
@@ -387,8 +398,8 @@ type taskProfilePatchRequest struct {
    - 已完成：`docs/llmkit-healthstore-contract.md`
 
 2. `feat(llmkit): 增加错误类型化 fallback contract`
-   - 新增 `ErrorClass`、可选 classifier 和 audit 字段
-   - 保持无 classifier 时行为不变
+   - 已完成第一步：新增 `ErrorClass`、可选 classifier 和 audit 字段
+   - 后续可继续实现 fallback rule engine
 
 3. `docs(llmkit): 明确 host 预算治理边界`
    - 若没有真实 host 预算实现，先不抽 `BudgetGate`

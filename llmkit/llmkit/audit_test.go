@@ -109,6 +109,7 @@ func TestJSONLRecorderRecordsTaskOutcome(t *testing.T) {
 		SuccessSignal:   SuccessSignalHumanAccepted,
 		FailureReason:   "operator rejected",
 		ErrorCode:       "rate_limited",
+		ErrorClass:      ErrorClassRateLimited,
 		LatencyMillis:   1234,
 		InputTokens:     300,
 		OutputTokens:    120,
@@ -135,6 +136,9 @@ func TestJSONLRecorderRecordsTaskOutcome(t *testing.T) {
 	}
 	if got.Success || got.ErrorCode != "rate_limited" || got.LatencyMillis != 1234 {
 		t.Fatalf("task outcome did not preserve outcome fields: %+v", got)
+	}
+	if got.ErrorClass != ErrorClassRateLimited {
+		t.Fatalf("task outcome ErrorClass = %q, want %q", got.ErrorClass, ErrorClassRateLimited)
 	}
 	if got.BusinessOutcome != BusinessOutcomeFailure || got.SuccessSignal != SuccessSignalHumanAccepted || got.FailureReason != "operator rejected" {
 		t.Fatalf("task outcome did not preserve business outcome fields: %+v", got)

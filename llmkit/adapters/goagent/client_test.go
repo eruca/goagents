@@ -476,6 +476,50 @@ func TestClientRecordsOutcomesForFallbackAttemptsWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestClientRecordsClassifiedProviderErrors(t *testing.T) {
+	local := &fakeProviderClient{err: errors.New("deadline exceeded")}
+	cloud := &fakeProviderClient{response: &ports.ChatResponse{Content: "cloud fallback"}}
+	recorder := &fakeRecorder{}
+
+	client := NewClient(Config{
+		Candidates: testCandidates(),
+		Providers: map[string]ProviderClient{
+			"local-small":    local,
+			"cloud-advanced": cloud,
+		},
+		ProfileProvider: fixedProfile(simpleProfile()),
+		RouteMetadataProvider: fixedRouteMetadata(RouteMetadata{
+			RouteID: "route-classified-fallback",
+			TaskID:  "task-classified-fallback",
+			Attempt: 1,
+		}),
+		Recorder:       recorder,
+		RecordOutcomes: true,
+		ErrorClassifier: func(error) llmkit.ErrorClass {
+			return llmkit.ErrorClassTimeout
+		},
+	})
+
+	resp, err := client.Chat(context.Background(), ports.ChatRequest{})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if resp.Content != "cloud fallback" {
+		t.Fatalf("Chat() response content = %q, want cloud fallback", resp.Content)
+	}
+	if len(recorder.outcomes) != 2 {
+		t.Fatalf("recorded outcomes = %d, want 2", len(recorder.outcomes))
+	}
+	first := recorder.outcomes[0]
+	if first.Success || first.ErrorCode != "provider_error" || first.ErrorClass != llmkit.ErrorClassTimeout {
+		t.Fatalf("first outcome = %+v, want classified timeout provider failure", first)
+	}
+	second := recorder.outcomes[1]
+	if !second.Success || second.ErrorClass != "" {
+		t.Fatalf("second outcome = %+v, want successful unclassified outcome", second)
+	}
+}
+
 func TestClientReturnsErrorWhenNoProviderBackedCandidateCanHandleTask(t *testing.T) {
 	client := NewClient(Config{
 		Candidates:      testCandidates(),

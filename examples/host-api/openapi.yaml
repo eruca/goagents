@@ -350,6 +350,8 @@ components:
           type: boolean
         error_code:
           type: string
+        error_class:
+          $ref: '#/components/schemas/ErrorClass'
         latency_ms:
           type: integer
         input_tokens:
@@ -559,3 +561,15 @@ components:
         - tests_passed
         - human_accepted
         - tool_completed
+    ErrorClass:
+      type: string
+      enum:
+        - transient_error
+        - rate_limited
+        - timeout
+        - invalid_json
+        - tool_call_invalid
+        - capability_mismatch
+        - policy_blocked
+        - auth_error
+        - unknown

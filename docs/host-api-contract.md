@@ -238,6 +238,8 @@ The endpoint does not return prompts, responses, headers, or API keys.
 `candidate_model_aliases` is a compact compatibility field. `candidates`
 contains the full candidate-level explanation, including filtered candidates
 with `available: false` and their rejection reason.
+Failed provider outcomes may also include `error_class`, such as `timeout` or
+`rate_limited`, when the host/adapter provides an error classifier.
 
 ## GET /agent-runs/{id}
 
