@@ -98,7 +98,9 @@ Fields:
   Non-empty string fields override the preset. Boolean fields are decoded with
   Go zero values, so an omitted boolean in a present `task_profile` object is
   currently treated as `false`. `max_estimated_cents` is a hard per-task budget
-  filter when known candidate cost is available.
+  filter when known candidate cost is available. The planned request patch
+  semantics are documented in
+  `docs/plans/2026-05-07-llmkit-host-contract-followups-design.md`.
 
 Response status: `202 Accepted`.
 

@@ -126,6 +126,8 @@ remains simple, low failure cost, and local-preferred. Invalid or unroutable
 profiles return `invalid_task_profile`; for example, `local_only` plus
 `complexity: hard` fails when no local advanced model exists. The routing
 decision is visible through `GET /workflows/{id}/llm-routes`.
+The planned pointer-patch semantics for this request shape are documented in
+`../../docs/plans/2026-05-07-llmkit-host-contract-followups-design.md`.
 
 `GET /llmkit/models` returns:
 

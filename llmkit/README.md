@@ -191,6 +191,10 @@ after success or failure. This keeps simple tasks local-first when local is
 healthy, while allowing fallback to cloud when the local provider is busy,
 quota-exhausted, or cooling down after failures.
 
+`MemoryHealthStore` is intentionally a single-process implementation. The
+shared-store contract and future host replacement path are documented in
+`../docs/plans/2026-05-07-llmkit-host-contract-followups-design.md`.
+
 ## Fallback Policy
 
 When a selected provider fails, the adapter removes that candidate and asks the
@@ -212,6 +216,9 @@ client := goagentadapter.NewClient(goagentadapter.Config{
 
 `MaxAttempts <= 0` preserves the default behavior: try all remaining eligible
 provider-backed candidates.
+
+The planned typed fallback contract is documented in
+`../docs/plans/2026-05-07-llmkit-host-contract-followups-design.md`.
 
 ## API Keys
 

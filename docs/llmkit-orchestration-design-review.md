@@ -124,6 +124,11 @@ effective profile 和 outcome。
 
 ## 当前剩余边界
 
+这几项的后续设计已经收敛到
+`docs/plans/2026-05-07-llmkit-host-contract-followups-design.md`。总体原则是：
+先稳定 host-facing contract，不把生产 gateway 能力直接塞进 `goagent` core 或
+`llmkit` routing core。
+
 ### 1. 运行中 stats refresh 已补齐到 host/adapter 边界
 
 goagent adapter 支持 `ModelStatsProvider`，host-api 在每次路由前刷新
@@ -145,6 +150,7 @@ goagent adapter 支持 `ModelStatsProvider`，host-api 在每次路由前刷新
 
 - 不应现在把它直接做成数据库强依赖。
 - 更合适的下一步是把 `HealthStore` contract 文档化，并提供 host 可替换实现建议。
+  设计见 `docs/plans/2026-05-07-llmkit-host-contract-followups-design.md`。
 
 ### 3. 成本预算已有 per-task 硬约束
 
@@ -152,6 +158,7 @@ goagent adapter 支持 `ModelStatsProvider`，host-api 在每次路由前刷新
 `AvgEstimatedCents` 提供已知成本后，超过预算的候选会在评分前被过滤。
 
 仍然没有 project/account 级预算扣减，这属于 host 成本治理。
+设计见 `docs/plans/2026-05-07-llmkit-host-contract-followups-design.md`。
 
 ### 4. fallback 已有显式 adapter policy
 
@@ -161,6 +168,7 @@ adapter 支持 `FallbackPolicy.MaxAttempts`。provider 失败后会记录失败 
 
 仍然没有按错误类型分别配置 timeout/rate-limit/schema-failure 的策略；这应在下一阶段
 建立错误分类后再做。
+设计见 `docs/plans/2026-05-07-llmkit-host-contract-followups-design.md`。
 
 ### 5. business outcome contract 已建立
 
