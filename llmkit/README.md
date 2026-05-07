@@ -193,7 +193,7 @@ quota-exhausted, or cooling down after failures.
 
 `MemoryHealthStore` is intentionally a single-process implementation. The
 shared-store contract and future host replacement path are documented in
-`../docs/plans/2026-05-07-llmkit-host-contract-followups-design.md`.
+`../docs/llmkit-healthstore-contract.md`.
 
 ## Fallback Policy
 

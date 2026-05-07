@@ -150,7 +150,7 @@ goagent adapter 支持 `ModelStatsProvider`，host-api 在每次路由前刷新
 
 - 不应现在把它直接做成数据库强依赖。
 - 更合适的下一步是把 `HealthStore` contract 文档化，并提供 host 可替换实现建议。
-  设计见 `docs/plans/2026-05-07-llmkit-host-contract-followups-design.md`。
+  正式 contract 见 `docs/llmkit-healthstore-contract.md`。
 
 ### 3. 成本预算已有 per-task 硬约束
 

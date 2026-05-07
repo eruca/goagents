@@ -15,6 +15,8 @@
 
 ## 1. HealthStore contract 文档化
 
+实现状态：已拆出正式 contract 文档 `docs/llmkit-healthstore-contract.md`。
+
 ### 当前状态
 
 `llmkit.HealthStore` 当前接口很小：
@@ -59,8 +61,8 @@ type HealthStore interface {
 
 ### 可替换实现建议
 
-本节作为 `HealthStore` contract 的第一版说明，不新增 core 依赖。若后续 host
-实现 shared store，再把这部分拆成独立 contract 文档。
+本节作为设计背景保留；正式 contract 以 `docs/llmkit-healthstore-contract.md`
+为准，不新增 core 依赖。
 
 当前 contract 包含：
 
@@ -382,8 +384,7 @@ type taskProfilePatchRequest struct {
 本文件已经完成 4 项设计收口。后续进入实现时，建议按这个顺序做，且每项独立提交：
 
 1. `docs(llmkit): 固化 HealthStore 接入合同`
-   - 可选择把本文 HealthStore 小节拆成独立 `docs/llmkit-healthstore-contract.md`
-   - 不改代码
+   - 已完成：`docs/llmkit-healthstore-contract.md`
 
 2. `feat(llmkit): 增加错误类型化 fallback contract`
    - 新增 `ErrorClass`、可选 classifier 和 audit 字段
