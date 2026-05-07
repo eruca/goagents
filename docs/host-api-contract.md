@@ -333,3 +333,6 @@ can use newly written outcomes.
 - Server-sent events or live workflow updates.
 - Distributed provider health.
 - Project-wide or account-wide cost budgets.
+
+Project/account budget governance is a host concern. See
+`docs/llmkit-budget-governance.md` for the boundary.

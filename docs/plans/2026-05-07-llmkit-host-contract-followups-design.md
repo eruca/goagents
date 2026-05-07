@@ -200,6 +200,9 @@ stop
 
 ## 3. 项目/账号级预算
 
+实现状态：已拆出正式边界文档 `docs/llmkit-budget-governance.md`。当前不抽
+`BudgetGate`，继续保留 per-task budget 作为 `llmkit` 内的唯一预算能力。
+
 ### 当前状态
 
 当前已有单任务硬约束：
@@ -402,8 +405,7 @@ type taskProfilePatchRequest struct {
    - 后续可继续实现 fallback rule engine
 
 3. `docs(llmkit): 明确 host 预算治理边界`
-   - 若没有真实 host 预算实现，先不抽 `BudgetGate`
-   - 继续保留当前 per-task budget
+   - 已完成：`docs/llmkit-budget-governance.md`
 
 4. `feat(host-api): 修正 task profile patch 语义`
    - 已完成

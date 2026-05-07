@@ -81,7 +81,8 @@ Hosts can set `TaskProfile.MaxEstimatedCents` to make cost a hard routing
 constraint. Candidates with a known `ModelCapability.EstimatedCents` above that
 limit are filtered out before scoring. `ApplyModelStats` also feeds
 `AvgEstimatedCents` back into candidates, so observed cost can enforce future
-budget constraints.
+budget constraints. Project/account-level budget governance remains host-owned;
+see `../docs/llmkit-budget-governance.md`.
 
 Hosts provide `TaskProfile`; llmkit does not infer business risk from prompt text by itself. If the host does not provide a profile, `DefaultTaskProfile` uses a conservative medium/cloud-allowed baseline.
 

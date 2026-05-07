@@ -158,7 +158,7 @@ goagent adapter 支持 `ModelStatsProvider`，host-api 在每次路由前刷新
 `AvgEstimatedCents` 提供已知成本后，超过预算的候选会在评分前被过滤。
 
 仍然没有 project/account 级预算扣减，这属于 host 成本治理。
-设计见 `docs/plans/2026-05-07-llmkit-host-contract-followups-design.md`。
+正式边界见 `docs/llmkit-budget-governance.md`。
 
 ### 4. fallback 已有显式 adapter policy
 
