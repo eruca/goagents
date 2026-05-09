@@ -1,0 +1,159 @@
+# Host Runtime Queued Execution 设计文档
+
+## 结论
+
+`queued` 应分两步推进：
+
+1. 在 `examples/host-api` 中实现一个最小 in-process queued proof，证明 HTTP API、
+   workflow state、artifact refs 和 agent audit 可以从同步调用解耦。
+2. 真正的 durable queued worker 需要先扩展 workflow claim/lease contract，不能在
+   当前 `workflowkit.Store` 只有 `Save/Get/Update` 的情况下伪装成可恢复队列。
+
+因此本阶段只把 `queued` 从“明确不支持”推进为“同进程后台执行 proof”。进程重启后
+自动恢复 pending workflow、跨进程 worker、lease、heartbeat 和 stuck recovery 仍是后续设计。
+
+## 目标
+
+- `POST /workflows` 支持 `run_mode: "queued"`。
+- queued 请求先保存 input artifact 和 pending workflow，然后立即返回 `202`。
+- 同一进程内的后台 worker 继续执行 workflow，最终进入 `waiting_approval` 或 terminal。
+- `GET /workflows/{id}` 可观察 queued workflow 的状态变化。
+- `GET /workflows/{id}/llm-routes` 和 `GET /agent-runs/{id}` 在后台执行完成后可读取审计。
+- 不把该 proof 抽进 `workflowkit` core。
+
+## 非目标
+
+- 不实现 durable queue。
+- 不实现 worker claim/lease。
+- 不实现 worker heartbeat。
+- 不实现进程重启后自动恢复 pending workflow。
+- 不实现多 worker 并发调度。
+- 不新增 workflow list API。
+- 不把 background execution 放进 `goagent` core。
+
+## 当前 Store 边界
+
+`workflowkit.Store` 当前只有：
+
+```go
+Save(ctx, WorkflowRun) error
+Get(ctx, id) (WorkflowRun, error)
+Update(ctx, id, mutate func(WorkflowRun) (WorkflowRun, error)) (WorkflowRun, error)
+```
+
+这足够支持：
+
+- 保存 pending workflow。
+- 按 id 读取 workflow。
+- 对已知 id 做状态更新。
+
+但不支持 durable worker 必需能力：
+
+- 查询 runnable workflows。
+- 原子 claim。
+- lease owner/deadline。
+- heartbeat。
+- 按 lease timeout 回收 stuck workflow。
+
+因此 durable queued worker 应等 `workflowkit` 有正式 queue contract 后再实现。
+
+## In-Process Proof 语义
+
+`POST /workflows` 行为：
+
+```text
+run_mode omitted/sync:
+  write input artifact
+  executor.Run synchronously until waiting_approval or terminal
+  return resulting workflow
+
+run_mode queued:
+  write input artifact
+  save WorkflowRun{Status: pending, InputRef, Metadata}
+  start goroutine executor.Run(ctx, pendingRun)
+  return pending workflow immediately
+```
+
+后台执行要求：
+
+- 使用 detached context，避免 HTTP request context 结束后取消后台 workflow。
+- 后台执行错误只写入 workflow state，不回写 HTTP response。
+- 如果 goroutine 启动后失败，workflow 应最终可通过 `GET /workflows/{id}` 看到 `failed`。
+
+## HTTP Contract
+
+`POST /workflows` queued response：
+
+```json
+{
+  "id": "wf-queued-1",
+  "status": "pending",
+  "run_mode": "queued",
+  "input_ref": "artifact:wf-queued-1:input"
+}
+```
+
+状态推进后：
+
+```json
+{
+  "id": "wf-queued-1",
+  "status": "waiting_approval",
+  "run_mode": "sync",
+  "input_ref": "artifact:wf-queued-1:input",
+  "output_ref": "artifact:wf-queued-1:agent-output",
+  "agent_run_id": "...",
+  "approval_ref": "approval:wf-queued-1"
+}
+```
+
+当前 `WorkflowRun` 没有持久化 run mode 字段，所以 `GET /workflows/{id}` 仍可返回
+`run_mode: "sync"` 作为兼容 fallback。后续如果需要准确保留 submitted run mode，应在
+workflow metadata 或正式 DTO 中增加 `run_mode`。
+
+## 后续 Durable Worker Contract
+
+真正 durable queued worker 需要新增 contract，例如：
+
+```go
+type QueueStore interface {
+    ClaimRunnable(ctx context.Context, workerID string, now time.Time, lease time.Duration) (WorkflowRun, error)
+    Heartbeat(ctx context.Context, workflowID string, workerID string, leaseUntil time.Time) error
+    Release(ctx context.Context, workflowID string, workerID string, result WorkflowRun) error
+}
+```
+
+对应 workflow 字段可能包括：
+
+- `RunMode`
+- `LeaseOwner`
+- `LeaseUntil`
+- `Attempt`
+- `NextRunAt`
+- `QueuedAt`
+- `StartedAt`
+
+这些字段需要和 SQLite schema migration、memory store、store conformance 一起设计。
+
+## 测试计划
+
+本阶段 proof 覆盖：
+
+- `POST /workflows` with `run_mode: queued` returns `202` and `pending` immediately.
+- polling `GET /workflows/{id}` eventually reaches `waiting_approval`。
+- queued workflow completion exposes `agent_run_id` and `output_ref`。
+- after queued execution reaches waiting approval, `POST /workflows/{id}/approve` succeeds。
+- `GET /workflows/{id}/llm-routes` returns route audit after background execution。
+
+不测试：
+
+- process restart recovery。
+- multi-worker claim。
+- lease timeout。
+- worker crash recovery。
+
+## 完成标准
+
+- `examples/host-api` 支持 in-process queued proof。
+- README、OpenAPI、`docs/host-api-contract.md` 明确 queued 当前是 in-process proof。
+- `./scripts/verify-all.sh` 通过。

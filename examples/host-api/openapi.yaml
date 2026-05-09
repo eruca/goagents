@@ -508,7 +508,10 @@ components:
         - sync
         - queued
       default: sync
-      description: Only sync is implemented. queued currently returns unsupported_run_mode.
+      description: >
+        sync runs during the HTTP request. queued is an in-process proof that
+        returns a pending workflow and advances it in a background goroutine; it
+        is not a durable worker model.
     TaskProfilePreset:
       type: string
       enum:

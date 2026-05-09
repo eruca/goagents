@@ -279,7 +279,7 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 	runMode, ok := parseRunMode(req.RunMode)
 	if !ok {
-		writeError(w, http.StatusBadRequest, "unsupported_run_mode", "only sync run_mode is supported")
+		writeError(w, http.StatusBadRequest, "unsupported_run_mode", "supported run_mode values are sync and queued")
 		return
 	}
 	profile, err := parseTaskProfile(req.TaskProfilePreset, req.TaskProfile, s.models)
@@ -292,19 +292,36 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "artifact_error", err.Error())
 		return
 	}
-	run, err := s.executor.Run(r.Context(), workflowkit.WorkflowRun{
+	run := workflowkit.WorkflowRun{
 		ID:       req.ID,
 		InputRef: inputRef,
 		Metadata: map[string]any{
 			"input_ref":    inputRef,
 			"task_profile": profile,
 		},
-	})
+	}
+	if runMode == RunModeQueued {
+		run.Status = workflowkit.StatusPending
+		if err := s.workflows.Save(r.Context(), run); err != nil {
+			writeError(w, http.StatusInternalServerError, "workflow_error", err.Error())
+			return
+		}
+		s.runQueuedWorkflow(run)
+		writeJSON(w, http.StatusAccepted, workflowToResponse(run, runMode))
+		return
+	}
+	run, err = s.executor.Run(r.Context(), run)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "workflow_error", err.Error())
 		return
 	}
 	writeJSON(w, http.StatusAccepted, workflowToResponse(run, runMode))
+}
+
+func (s *Server) runQueuedWorkflow(run workflowkit.WorkflowRun) {
+	go func() {
+		_, _ = s.executor.Run(context.Background(), run)
+	}()
 }
 
 func (s *Server) handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -1070,7 +1087,7 @@ func parseRunMode(value string) (RunMode, bool) {
 	case "", RunModeSync:
 		return RunModeSync, true
 	case RunModeQueued:
-		return RunModeQueued, false
+		return RunModeQueued, true
 	default:
 		return "", false
 	}

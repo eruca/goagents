@@ -90,8 +90,10 @@ Fields:
 
 - `id`: required workflow id.
 - `input`: input text written as an artifact.
-- `run_mode`: optional. `sync` is supported and default. `queued` is reserved
-  and currently returns `unsupported_run_mode`.
+- `run_mode`: optional. `sync` is supported and default. `queued` is an
+  in-process proof that saves a pending workflow and returns immediately while a
+  background goroutine advances it. `queued` does not provide durable worker
+  recovery, lease, heartbeat, or multi-worker claim semantics.
 - `task_profile_preset`: optional. Supported values are `simple_local`,
   `balanced`, `high_success`, and `local_only`.
 - `task_profile`: optional host patch. Preset values are applied first. Missing

@@ -567,19 +567,33 @@ func TestHostAPIRunModeSyncAndQueuedSemantics(t *testing.T) {
 		t.Fatalf("sync run response = %+v, want sync waiting workflow", syncRun)
 	}
 
-	resp := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/workflows", bytes.NewBufferString(`{
-		"id": "wf-queued",
-		"input": "Review later.",
-		"run_mode": "queued"
-	}`))
-	req.Header.Set("Content-Type", "application/json")
-	server.Handler().ServeHTTP(resp, req)
-	if resp.Code != http.StatusBadRequest {
-		t.Fatalf("queued status = %d, want 400; body=%s", resp.Code, resp.Body.String())
+	queued := doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]string{
+		"id":       "wf-queued",
+		"input":    "Review later.",
+		"run_mode": "queued",
+	})
+	if queued.RunMode != string(RunModeQueued) || queued.Status != string(workflowkit.StatusPending) {
+		t.Fatalf("queued response = %+v, want queued pending workflow", queued)
 	}
-	if !strings.Contains(resp.Body.String(), "unsupported_run_mode") {
-		t.Fatalf("queued body = %s, want unsupported_run_mode", resp.Body.String())
+	if queued.InputRef != "artifact:wf-queued:input" || queued.AgentRunID != "" || queued.OutputRef != "" {
+		t.Fatalf("queued response refs = %+v, want only input ref before background run", queued)
+	}
+
+	loaded := waitForWorkflowStatus(t, server.Handler(), "wf-queued", workflowkit.StatusWaitingApproval)
+	if loaded.AgentRunID == "" || loaded.OutputRef == "" || loaded.ApprovalRef == "" {
+		t.Fatalf("queued loaded workflow = %+v, want agent refs after background run", loaded)
+	}
+	routes := doJSON[llmRoutesResponse](t, server.Handler(), http.MethodGet, "/workflows/wf-queued/llm-routes", nil)
+	if got := selectedModelAlias(t, routes); got != "local-free" {
+		t.Fatalf("queued selected model = %q, want local-free; routes=%+v", got, routes.Routes)
+	}
+
+	approved := doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows/wf-queued/approve", map[string]string{
+		"approved_by": "operator-queued",
+		"note":        "accepted queued",
+	})
+	if approved.Status != string(workflowkit.StatusSucceeded) {
+		t.Fatalf("queued approval = %+v, want succeeded", approved)
 	}
 }
 
@@ -786,6 +800,21 @@ func selectedModelAlias(t *testing.T, routes llmRoutesResponse) string {
 func selectedTaskType(t *testing.T, routes llmRoutesResponse) string {
 	t.Helper()
 	return selectedRoute(t, routes).TaskType
+}
+
+func waitForWorkflowStatus(t *testing.T, handler http.Handler, id string, want workflowkit.Status) workflowResponse {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	var last workflowResponse
+	for time.Now().Before(deadline) {
+		last = doJSON[workflowResponse](t, handler, http.MethodGet, "/workflows/"+id, nil)
+		if last.Status == string(want) {
+			return last
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("workflow %s status = %q, want %q; last=%+v", id, last.Status, want, last)
+	return workflowResponse{}
 }
 
 func selectedRoute(t *testing.T, routes llmRoutesResponse) llmRouteResponse {

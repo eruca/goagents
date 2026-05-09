@@ -91,9 +91,12 @@ reason, score breakdown, candidate aliases, full candidate-level scores or
 filter reasons, and outcome metadata such as success, latency, tokens, and
 estimated cents. It does not return prompts, responses, headers, or API keys.
 
-`POST /workflows` accepts optional `run_mode`. The current example implements
-only `sync`, which is also the default. `queued` is reserved for a future worker
-model and currently returns `unsupported_run_mode`.
+`POST /workflows` accepts optional `run_mode`. `sync` is the default and runs
+the workflow during the HTTP request. `queued` is an in-process proof: it writes
+the input artifact and pending workflow, returns immediately, then a background
+goroutine advances the workflow until `waiting_approval` or terminal. It is not
+a durable worker model; process restart recovery, worker lease, heartbeat, and
+multi-worker claim are intentionally not implemented.
 
 `POST /workflows` also accepts optional `task_profile_preset` and
 `task_profile` so a host can describe the task before routing:
