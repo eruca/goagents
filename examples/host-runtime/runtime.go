@@ -12,7 +12,6 @@ import (
 	"github.com/eruca/llmkit/llmkit"
 	"github.com/eruca/runkit"
 	"github.com/eruca/workflowkit"
-	"github.com/eruca/workflowkit/agentstep"
 )
 
 type Config struct {
@@ -88,42 +87,78 @@ func (r *Runtime) agentReviewStep(llmkitHome string) workflowkit.Step {
 		llmkitHome: llmkitHome,
 		runs:       r.AgentRuns,
 	}
-	return agentstep.New("agent_review", runner, func(run workflowkit.WorkflowRun) agentcore.RunRequest {
-		return agentcore.RunRequest{
-			Input: "Review input artifact " + run.InputRef,
-			Metadata: map[string]any{
-				"workflow_id": run.ID,
-			},
+	return runtimeAgentStep{
+		runner:    runner,
+		artifacts: r.Artifacts,
+		runs:      r.AgentRuns,
+	}
+}
+
+type runtimeAgentStep struct {
+	runner    routingAgentRunner
+	artifacts artifactkit.Store
+	runs      runkit.Store
+}
+
+func (s runtimeAgentStep) Name() string {
+	return "agent_review"
+}
+
+func (s runtimeAgentStep) Run(ctx context.Context, run workflowkit.WorkflowRun) (workflowkit.StepResult, error) {
+	result, err := s.runner.RunDetailed(ctx, agentcore.RunRequest{
+		Input: "Review input artifact " + run.InputRef,
+		Metadata: map[string]any{
+			"workflow_id": run.ID,
+		},
+	})
+	if err != nil {
+		return failedAgentStepResult(result, err), err
+	}
+	if result == nil {
+		err := fmt.Errorf("agent returned nil result")
+		return failedAgentStepResult(nil, err), err
+	}
+
+	outputRef := "artifact:" + run.ID + ":agent-output"
+	if err := putTextArtifact(ctx, s.artifacts, outputRef, result.Content); err != nil {
+		return failedAgentStepResult(result, err), err
+	}
+	if err := s.runs.Complete(ctx, result.RunID.String(), runkit.TerminalSummary{
+		Status:       runkit.StatusSucceeded,
+		ContentRef:   outputRef,
+		InputTokens:  result.Usage.InputTokens,
+		OutputTokens: result.Usage.OutputTokens,
+		LLMCalls:     result.ExecutionSummary.LLMCalls,
+		ToolCalls:    result.ExecutionSummary.ToolCalls,
+		UsedTools:    result.ExecutionSummary.UsedTools,
+	}); err != nil {
+		return failedAgentStepResult(result, err), err
+	}
+
+	return workflowkit.StepResult{
+		Status:        workflowkit.StatusWaitingApproval,
+		OutputRef:     outputRef,
+		AgentRunID:    result.RunID.String(),
+		ApprovalRef:   "approval:" + run.ID,
+		WaitingReason: "operator approval required before finalizing host runtime output",
+		Metadata: map[string]any{
+			"agent_output_ref": outputRef,
+		},
+	}, nil
+}
+
+func failedAgentStepResult(result *agentcore.RunResult, err error) workflowkit.StepResult {
+	out := workflowkit.StepResult{
+		Status: workflowkit.StatusFailed,
+		Error:  err.Error(),
+	}
+	if result != nil {
+		out.AgentRunID = result.RunID.String()
+		if result.ExecutionSummary.AbortReason != "" {
+			out.Error = result.ExecutionSummary.AbortReason
 		}
-	}, agentstep.WithResultMapper(func(run workflowkit.WorkflowRun, result *agentcore.RunResult) workflowkit.StepResult {
-		outputRef := "artifact:" + run.ID + ":agent-output"
-		if result != nil {
-			_ = putTextArtifact(context.Background(), r.Artifacts, outputRef, result.Content)
-			_ = r.AgentRuns.Complete(context.Background(), result.RunID.String(), runkit.TerminalSummary{
-				Status:       runkit.StatusSucceeded,
-				ContentRef:   outputRef,
-				InputTokens:  result.Usage.InputTokens,
-				OutputTokens: result.Usage.OutputTokens,
-				LLMCalls:     result.ExecutionSummary.LLMCalls,
-				ToolCalls:    result.ExecutionSummary.ToolCalls,
-				UsedTools:    result.ExecutionSummary.UsedTools,
-			})
-		}
-		agentRunID := ""
-		if result != nil {
-			agentRunID = result.RunID.String()
-		}
-		return workflowkit.StepResult{
-			Status:        workflowkit.StatusWaitingApproval,
-			OutputRef:     outputRef,
-			AgentRunID:    agentRunID,
-			ApprovalRef:   "approval:" + run.ID,
-			WaitingReason: "operator approval required before finalizing host runtime output",
-			Metadata: map[string]any{
-				"agent_output_ref": outputRef,
-			},
-		}
-	}))
+	}
+	return out
 }
 
 type ingestStep struct {

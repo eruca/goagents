@@ -13,7 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eruca/artifactkit"
 	"github.com/eruca/llmkit/llmkit"
+	"github.com/eruca/runkit"
 	"github.com/eruca/workflowkit"
 )
 
@@ -209,6 +211,62 @@ func TestHostAPIRouteOutcomeResponseIncludesErrorClass(t *testing.T) {
 	}
 	if response.Outcome.ErrorClass != string(llmkit.ErrorClassTimeout) {
 		t.Fatalf("response outcome = %+v, want timeout error_class", response.Outcome)
+	}
+}
+
+func TestHostAPIAgentStepFailsWhenOutputArtifactCannotBeWritten(t *testing.T) {
+	server := &Server{
+		artifacts: failingArtifactStore{err: fmt.Errorf("artifact store unavailable")},
+		runs:      runkit.NewMemoryStore(),
+		health:    llmkit.NewMemoryHealthStore(llmkit.HealthPolicy{}),
+		llmHome:   t.TempDir(),
+		models:    defaultCandidates(),
+		providers: defaultProviders(),
+	}
+
+	result, err := server.agentStep().Run(context.Background(), workflowkit.WorkflowRun{
+		ID: "wf-strict-artifact",
+		Metadata: map[string]any{
+			"task_profile": defaultHostTaskProfile(),
+		},
+	})
+
+	if err == nil {
+		t.Fatalf("agent step returned nil error, result=%+v", result)
+	}
+	if result.Status != workflowkit.StatusFailed {
+		t.Fatalf("agent step status = %q, want failed", result.Status)
+	}
+	if !strings.Contains(err.Error(), "artifact store unavailable") {
+		t.Fatalf("agent step error = %v, want artifact failure", err)
+	}
+}
+
+func TestHostAPIAgentStepFailsWhenTerminalSummaryCannotBeWritten(t *testing.T) {
+	server := &Server{
+		artifacts: artifactkit.NewMemoryStore(),
+		runs:      failingRunStore{err: fmt.Errorf("run store unavailable")},
+		health:    llmkit.NewMemoryHealthStore(llmkit.HealthPolicy{}),
+		llmHome:   t.TempDir(),
+		models:    defaultCandidates(),
+		providers: defaultProviders(),
+	}
+
+	result, err := server.agentStep().Run(context.Background(), workflowkit.WorkflowRun{
+		ID: "wf-strict-run",
+		Metadata: map[string]any{
+			"task_profile": defaultHostTaskProfile(),
+		},
+	})
+
+	if err == nil {
+		t.Fatalf("agent step returned nil error, result=%+v", result)
+	}
+	if result.Status != workflowkit.StatusFailed {
+		t.Fatalf("agent step status = %q, want failed", result.Status)
+	}
+	if !strings.Contains(err.Error(), "run store unavailable") {
+		t.Fatalf("agent step error = %v, want run store failure", err)
 	}
 }
 
@@ -671,6 +729,46 @@ func modelStatsFor(t *testing.T, stats []modelStatsResponse, taskType, modelAlia
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+type failingArtifactStore struct {
+	err error
+}
+
+func (s failingArtifactStore) Put(context.Context, artifactkit.Artifact) error {
+	return s.err
+}
+
+func (s failingArtifactStore) Get(context.Context, string) (artifactkit.Artifact, error) {
+	return artifactkit.Artifact{}, s.err
+}
+
+type failingRunStore struct {
+	err error
+}
+
+func (s failingRunStore) Create(context.Context, runkit.RunRecord) error {
+	return s.err
+}
+
+func (s failingRunStore) Get(context.Context, string) (runkit.RunRecord, error) {
+	return runkit.RunRecord{}, runkit.ErrRunNotFound
+}
+
+func (s failingRunStore) AppendEvent(context.Context, runkit.RunEvent) error {
+	return nil
+}
+
+func (s failingRunStore) Events(context.Context, string) ([]runkit.RunEvent, error) {
+	return nil, s.err
+}
+
+func (s failingRunStore) Complete(context.Context, string, runkit.TerminalSummary) error {
+	return s.err
+}
+
+func (s failingRunStore) FindByWorkflowID(context.Context, string) ([]runkit.RunRecord, error) {
+	return nil, s.err
 }
 
 func writeLLMKitConfig(t *testing.T, home string, content string) {

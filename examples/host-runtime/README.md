@@ -35,6 +35,11 @@ process-local memory for this skeleton. Production hosts can replace the agent
 run store with `runkit/sqlitestore.Open("goagents-runs.db")` without changing
 the workflow or agent contract.
 
+The critical persistence path is strict: the agent review step writes the agent
+output artifact before completing the terminal run summary. If either write
+fails, the workflow step fails instead of advancing with refs that cannot be
+resolved.
+
 This example deliberately leaves production concerns to the host application:
 HTTP APIs, durable database schemas, artifact blob storage, authentication,
 tenant isolation, distributed workers, and dashboards.

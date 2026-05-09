@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/eruca/artifactkit"
 	"github.com/eruca/llmkit/llmkit"
 	"github.com/eruca/runkit"
 	"github.com/eruca/workflowkit"
@@ -98,6 +100,50 @@ func TestRuntimeRunsAgentWorkflowWithArtifactsAuditAndLLMRouting(t *testing.T) {
 	}
 }
 
+func TestRuntimeAgentStepFailsWhenOutputArtifactCannotBeWritten(t *testing.T) {
+	runtime := &Runtime{
+		Artifacts: failingArtifactStore{err: fmt.Errorf("artifact store unavailable")},
+		AgentRuns: runkit.NewMemoryStore(),
+	}
+
+	result, err := runtime.agentReviewStep(t.TempDir()).Run(context.Background(), workflowkit.WorkflowRun{
+		ID:       "wf-strict-artifact",
+		InputRef: "artifact:wf-strict-artifact:input",
+	})
+
+	if err == nil {
+		t.Fatalf("agent step returned nil error, result=%+v", result)
+	}
+	if result.Status != workflowkit.StatusFailed {
+		t.Fatalf("agent step status = %q, want failed", result.Status)
+	}
+	if !strings.Contains(err.Error(), "artifact store unavailable") {
+		t.Fatalf("agent step error = %v, want artifact failure", err)
+	}
+}
+
+func TestRuntimeAgentStepFailsWhenTerminalSummaryCannotBeWritten(t *testing.T) {
+	runtime := &Runtime{
+		Artifacts: artifactkit.NewMemoryStore(),
+		AgentRuns: failingRunStore{err: fmt.Errorf("run store unavailable")},
+	}
+
+	result, err := runtime.agentReviewStep(t.TempDir()).Run(context.Background(), workflowkit.WorkflowRun{
+		ID:       "wf-strict-run",
+		InputRef: "artifact:wf-strict-run:input",
+	})
+
+	if err == nil {
+		t.Fatalf("agent step returned nil error, result=%+v", result)
+	}
+	if result.Status != workflowkit.StatusFailed {
+		t.Fatalf("agent step status = %q, want failed", result.Status)
+	}
+	if !strings.Contains(err.Error(), "run store unavailable") {
+		t.Fatalf("agent step error = %v, want run store failure", err)
+	}
+}
+
 func containsStep(steps []string, want string) bool {
 	for _, step := range steps {
 		if step == want {
@@ -131,4 +177,44 @@ func readSingleJSONL[T any](t *testing.T, path string) T {
 		t.Fatalf("decode %s: %v", path, err)
 	}
 	return out
+}
+
+type failingArtifactStore struct {
+	err error
+}
+
+func (s failingArtifactStore) Put(context.Context, artifactkit.Artifact) error {
+	return s.err
+}
+
+func (s failingArtifactStore) Get(context.Context, string) (artifactkit.Artifact, error) {
+	return artifactkit.Artifact{}, s.err
+}
+
+type failingRunStore struct {
+	err error
+}
+
+func (s failingRunStore) Create(context.Context, runkit.RunRecord) error {
+	return s.err
+}
+
+func (s failingRunStore) Get(context.Context, string) (runkit.RunRecord, error) {
+	return runkit.RunRecord{}, runkit.ErrRunNotFound
+}
+
+func (s failingRunStore) AppendEvent(context.Context, runkit.RunEvent) error {
+	return nil
+}
+
+func (s failingRunStore) Events(context.Context, string) ([]runkit.RunEvent, error) {
+	return nil, s.err
+}
+
+func (s failingRunStore) Complete(context.Context, string, runkit.TerminalSummary) error {
+	return s.err
+}
+
+func (s failingRunStore) FindByWorkflowID(context.Context, string) ([]runkit.RunRecord, error) {
+	return nil, s.err
 }

@@ -138,6 +138,10 @@ selected LLM route: `business_outcome=success` and
 `success_signal=human_accepted`. Provider-level success remains available in the
 same route outcome.
 
+The agent review step uses strict host-owned persistence for the critical audit
+path. If writing the agent output artifact or terminal run summary fails, the
+workflow step fails instead of moving to `waiting_approval` with broken refs.
+
 See `../../docs/host-api-contract.md` for the prose contract and
 `openapi.yaml` for the machine-readable HTTP contract.
 

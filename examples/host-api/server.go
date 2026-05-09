@@ -19,7 +19,6 @@ import (
 	"github.com/eruca/runkit"
 	runsqlite "github.com/eruca/runkit/sqlitestore"
 	"github.com/eruca/workflowkit"
-	"github.com/eruca/workflowkit/agentstep"
 	workflowsqlite "github.com/eruca/workflowkit/sqlitestore"
 )
 
@@ -455,42 +454,80 @@ func (s *Server) agentStep() workflowkit.Step {
 		},
 		providers: s.providers,
 	}
-	return agentstep.New("agent_review", runner, func(run workflowkit.WorkflowRun) agentcore.RunRequest {
-		profile := taskProfileFromMetadata(run.Metadata["task_profile"])
-		return agentcore.RunRequest{
-			Input: "Review input artifact " + run.InputRef,
-			Metadata: map[string]any{
-				"workflow_id":  run.ID,
-				"task_profile": profile,
-			},
+	return hostAgentStep{
+		runner:    runner,
+		artifacts: s.artifacts,
+		runs:      s.runs,
+	}
+}
+
+type hostAgentStep struct {
+	runner    routingAgentRunner
+	artifacts artifactkit.Store
+	runs      runkit.Store
+}
+
+func (s hostAgentStep) Name() string {
+	return "agent_review"
+}
+
+func (s hostAgentStep) Run(ctx context.Context, run workflowkit.WorkflowRun) (workflowkit.StepResult, error) {
+	profile := taskProfileFromMetadata(run.Metadata["task_profile"])
+	result, err := s.runner.RunDetailed(ctx, agentcore.RunRequest{
+		Input: "Review input artifact " + run.InputRef,
+		Metadata: map[string]any{
+			"workflow_id":  run.ID,
+			"task_profile": profile,
+		},
+	})
+	if err != nil {
+		return failedAgentStepResult(result, err), err
+	}
+	if result == nil {
+		err := fmt.Errorf("agent returned nil result")
+		return failedAgentStepResult(nil, err), err
+	}
+
+	outputRef := "artifact:" + run.ID + ":agent-output"
+	if err := putTextArtifact(ctx, s.artifacts, outputRef, result.Content); err != nil {
+		return failedAgentStepResult(result, err), err
+	}
+	if err := s.runs.Complete(ctx, result.RunID.String(), runkit.TerminalSummary{
+		Status:       runkit.StatusSucceeded,
+		ContentRef:   outputRef,
+		InputTokens:  result.Usage.InputTokens,
+		OutputTokens: result.Usage.OutputTokens,
+		LLMCalls:     result.ExecutionSummary.LLMCalls,
+		ToolCalls:    result.ExecutionSummary.ToolCalls,
+		UsedTools:    result.ExecutionSummary.UsedTools,
+	}); err != nil {
+		return failedAgentStepResult(result, err), err
+	}
+
+	return workflowkit.StepResult{
+		Status:        workflowkit.StatusWaitingApproval,
+		OutputRef:     outputRef,
+		AgentRunID:    result.RunID.String(),
+		ApprovalRef:   "approval:" + run.ID,
+		WaitingReason: "operator approval required before finalizing host API output",
+		Metadata: map[string]any{
+			"agent_output_ref": outputRef,
+		},
+	}, nil
+}
+
+func failedAgentStepResult(result *agentcore.RunResult, err error) workflowkit.StepResult {
+	out := workflowkit.StepResult{
+		Status: workflowkit.StatusFailed,
+		Error:  err.Error(),
+	}
+	if result != nil {
+		out.AgentRunID = result.RunID.String()
+		if result.ExecutionSummary.AbortReason != "" {
+			out.Error = result.ExecutionSummary.AbortReason
 		}
-	}, agentstep.WithResultMapper(func(run workflowkit.WorkflowRun, result *agentcore.RunResult) workflowkit.StepResult {
-		outputRef := "artifact:" + run.ID + ":agent-output"
-		agentRunID := ""
-		if result != nil {
-			agentRunID = result.RunID.String()
-			_ = putTextArtifact(context.Background(), s.artifacts, outputRef, result.Content)
-			_ = s.runs.Complete(context.Background(), result.RunID.String(), runkit.TerminalSummary{
-				Status:       runkit.StatusSucceeded,
-				ContentRef:   outputRef,
-				InputTokens:  result.Usage.InputTokens,
-				OutputTokens: result.Usage.OutputTokens,
-				LLMCalls:     result.ExecutionSummary.LLMCalls,
-				ToolCalls:    result.ExecutionSummary.ToolCalls,
-				UsedTools:    result.ExecutionSummary.UsedTools,
-			})
-		}
-		return workflowkit.StepResult{
-			Status:        workflowkit.StatusWaitingApproval,
-			OutputRef:     outputRef,
-			AgentRunID:    agentRunID,
-			ApprovalRef:   "approval:" + run.ID,
-			WaitingReason: "operator approval required before finalizing host API output",
-			Metadata: map[string]any{
-				"agent_output_ref": outputRef,
-			},
-		}
-	}))
+	}
+	return out
 }
 
 type routingAgentRunner struct {
