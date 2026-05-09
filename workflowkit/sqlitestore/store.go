@@ -16,11 +16,16 @@ type Store struct {
 	db *sql.DB
 }
 
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(`PRAGMA busy_timeout = 5000`); err != nil {
+		_ = db.Close()
 		return nil, err
 	}
 	store := &Store{db: db}
@@ -51,8 +56,9 @@ func (s *Store) Save(ctx context.Context, run workflowkit.WorkflowRun) error {
 INSERT INTO workflow_runs (
 	id, status, input_ref, output_ref, agent_run_id, audit_ref, error,
 	approval_ref, waiting_reason, current_step, completed_steps_json,
-	step_attempts_json, step_records_json, metadata_json, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	step_attempts_json, step_records_json, metadata_json, lease_owner, lease_until,
+	created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	status=excluded.status,
 	input_ref=excluded.input_ref,
@@ -67,11 +73,14 @@ ON CONFLICT(id) DO UPDATE SET
 	step_attempts_json=excluded.step_attempts_json,
 	step_records_json=excluded.step_records_json,
 	metadata_json=excluded.metadata_json,
+	lease_owner=excluded.lease_owner,
+	lease_until=excluded.lease_until,
 	created_at=excluded.created_at,
 	updated_at=excluded.updated_at
 `, row.ID, row.Status, row.InputRef, row.OutputRef, row.AgentRunID, row.AuditRef, row.Error,
 		row.ApprovalRef, row.WaitingReason, row.CurrentStep, row.CompletedStepsJSON,
-		row.StepAttemptsJSON, row.StepRecordsJSON, row.MetadataJSON, row.CreatedAt, row.UpdatedAt)
+		row.StepAttemptsJSON, row.StepRecordsJSON, row.MetadataJSON, row.LeaseOwner, row.LeaseUntil,
+		row.CreatedAt, row.UpdatedAt)
 	return err
 }
 
@@ -80,12 +89,14 @@ func (s *Store) Get(ctx context.Context, id string) (workflowkit.WorkflowRun, er
 	err := s.db.QueryRowContext(ctx, `
 SELECT id, status, input_ref, output_ref, agent_run_id, audit_ref, error,
 	approval_ref, waiting_reason, current_step, completed_steps_json,
-	step_attempts_json, step_records_json, metadata_json, created_at, updated_at
+	step_attempts_json, step_records_json, metadata_json, lease_owner, lease_until,
+	created_at, updated_at
 FROM workflow_runs
 WHERE id = ?
 `, id).Scan(&row.ID, &row.Status, &row.InputRef, &row.OutputRef, &row.AgentRunID, &row.AuditRef, &row.Error,
 		&row.ApprovalRef, &row.WaitingReason, &row.CurrentStep, &row.CompletedStepsJSON,
-		&row.StepAttemptsJSON, &row.StepRecordsJSON, &row.MetadataJSON, &row.CreatedAt, &row.UpdatedAt)
+		&row.StepAttemptsJSON, &row.StepRecordsJSON, &row.MetadataJSON, &row.LeaseOwner, &row.LeaseUntil,
+		&row.CreatedAt, &row.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return workflowkit.WorkflowRun{}, workflowkit.ErrRunNotFound
 	}
@@ -111,6 +122,60 @@ func (s *Store) Update(ctx context.Context, id string, mutate func(workflowkit.W
 		return workflowkit.WorkflowRun{}, err
 	}
 	return s.Get(ctx, updated.ID)
+}
+
+func (s *Store) ClaimRunnable(ctx context.Context, workerID string, lease time.Duration) (workflowkit.WorkflowRun, error) {
+	if workerID == "" {
+		return workflowkit.WorkflowRun{}, fmt.Errorf("worker id is required")
+	}
+	if lease <= 0 {
+		return workflowkit.WorkflowRun{}, fmt.Errorf("lease must be greater than zero")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return workflowkit.WorkflowRun{}, err
+	}
+	defer tx.Rollback()
+
+	now := time.Now().UTC()
+	leaseUntil := now.Add(lease)
+	var id string
+	err = tx.QueryRowContext(ctx, `
+SELECT id
+FROM workflow_runs
+WHERE status = ?
+  AND (lease_owner = '' OR lease_until <= ?)
+ORDER BY created_at ASC, id ASC
+LIMIT 1
+`, string(workflowkit.StatusPending), now).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return workflowkit.WorkflowRun{}, workflowkit.ErrNoRunnableWorkflow
+	}
+	if err != nil {
+		return workflowkit.WorkflowRun{}, err
+	}
+
+	result, err := tx.ExecContext(ctx, `
+UPDATE workflow_runs
+SET lease_owner = ?, lease_until = ?, updated_at = ?
+WHERE id = ?
+  AND status = ?
+  AND (lease_owner = '' OR lease_until <= ?)
+`, workerID, leaseUntil, now, id, string(workflowkit.StatusPending), now)
+	if err != nil {
+		return workflowkit.WorkflowRun{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return workflowkit.WorkflowRun{}, err
+	}
+	if affected == 0 {
+		return workflowkit.WorkflowRun{}, workflowkit.ErrNoRunnableWorkflow
+	}
+	if err := tx.Commit(); err != nil {
+		return workflowkit.WorkflowRun{}, err
+	}
+	return s.Get(ctx, id)
 }
 
 func (s *Store) migrate(ctx context.Context) error {
@@ -142,9 +207,44 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
 	step_attempts_json TEXT NOT NULL DEFAULT '{}',
 	step_records_json TEXT NOT NULL DEFAULT '[]',
 	metadata_json TEXT NOT NULL DEFAULT '{}',
+	lease_owner TEXT NOT NULL DEFAULT '',
+	lease_until TIMESTAMP NOT NULL DEFAULT '0001-01-01T00:00:00Z',
 	created_at TIMESTAMP NOT NULL,
 	updated_at TIMESTAMP NOT NULL
 )`, SchemaVersion)
+	if err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing(ctx, "lease_owner", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	return s.addColumnIfMissing(ctx, "lease_until", "TIMESTAMP NOT NULL DEFAULT '0001-01-01T00:00:00Z'")
+}
+
+func (s *Store) addColumnIfMissing(ctx context.Context, name string, definition string) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(workflow_runs)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var columnName string
+		var columnType string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &columnName, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if columnName == name {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE workflow_runs ADD COLUMN %s %s`, name, definition))
 	return err
 }
 
@@ -163,6 +263,8 @@ type runRow struct {
 	StepAttemptsJSON   string
 	StepRecordsJSON    string
 	MetadataJSON       string
+	LeaseOwner         string
+	LeaseUntil         time.Time
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 }
@@ -199,6 +301,8 @@ func encodeRun(run workflowkit.WorkflowRun) (runRow, error) {
 		StepAttemptsJSON:   stepAttempts,
 		StepRecordsJSON:    stepRecords,
 		MetadataJSON:       metadata,
+		LeaseOwner:         run.LeaseOwner,
+		LeaseUntil:         run.LeaseUntil,
 		CreatedAt:          run.CreatedAt,
 		UpdatedAt:          run.UpdatedAt,
 	}, nil
@@ -236,6 +340,8 @@ func decodeRun(row runRow) (workflowkit.WorkflowRun, error) {
 		StepAttempts:   stepAttempts,
 		StepRecords:    stepRecords,
 		Metadata:       metadata,
+		LeaseOwner:     row.LeaseOwner,
+		LeaseUntil:     row.LeaseUntil,
 		CreatedAt:      row.CreatedAt,
 		UpdatedAt:      row.UpdatedAt,
 	}, nil

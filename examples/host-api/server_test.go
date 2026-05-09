@@ -583,6 +583,13 @@ func TestHostAPIRunModeSyncAndQueuedSemantics(t *testing.T) {
 	if loaded.AgentRunID == "" || loaded.OutputRef == "" || loaded.ApprovalRef == "" {
 		t.Fatalf("queued loaded workflow = %+v, want agent refs after background run", loaded)
 	}
+	stored, err := server.workflows.Get(context.Background(), "wf-queued")
+	if err != nil {
+		t.Fatalf("workflow store Get returned error: %v", err)
+	}
+	if stored.LeaseOwner != "host-api-inprocess-worker" || stored.LeaseUntil.IsZero() {
+		t.Fatalf("queued workflow lease = %+v, want in-process worker lease", stored)
+	}
 	routes := doJSON[llmRoutesResponse](t, server.Handler(), http.MethodGet, "/workflows/wf-queued/llm-routes", nil)
 	if got := selectedModelAlias(t, routes); got != "local-free" {
 		t.Fatalf("queued selected model = %q, want local-free; routes=%+v", got, routes.Routes)

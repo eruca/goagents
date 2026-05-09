@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/eruca/workflowkit"
 )
@@ -101,4 +102,97 @@ func RunStoreConformance(t *testing.T, newStore NewStore) {
 			t.Fatalf("err = %v, want ErrRunNotFound", err)
 		}
 	})
+}
+
+func RunQueueStoreConformance(t *testing.T, newStore NewStore) {
+	t.Helper()
+	RunStoreConformance(t, newStore)
+
+	t.Run("claim runnable pending workflow with lease", func(t *testing.T) {
+		store := queueStore(t, newStore)
+		if err := store.Save(context.Background(), workflowkit.WorkflowRun{
+			ID:     "wf-claim",
+			Status: workflowkit.StatusPending,
+		}); err != nil {
+			t.Fatalf("Save returned error: %v", err)
+		}
+
+		claimed, err := store.ClaimRunnable(context.Background(), "worker-1", time.Minute)
+		if err != nil {
+			t.Fatalf("ClaimRunnable returned error: %v", err)
+		}
+		if claimed.ID != "wf-claim" || claimed.Status != workflowkit.StatusPending {
+			t.Fatalf("claimed = %+v, want pending wf-claim", claimed)
+		}
+		if claimed.LeaseOwner != "worker-1" || claimed.LeaseUntil.IsZero() {
+			t.Fatalf("claim lease fields = %+v", claimed)
+		}
+
+		stored, err := store.Get(context.Background(), "wf-claim")
+		if err != nil {
+			t.Fatalf("Get returned error: %v", err)
+		}
+		if stored.LeaseOwner != "worker-1" || stored.LeaseUntil.IsZero() {
+			t.Fatalf("stored lease fields = %+v", stored)
+		}
+	})
+
+	t.Run("claim skips active lease and reclaims expired lease", func(t *testing.T) {
+		store := queueStore(t, newStore)
+		future := time.Now().Add(time.Hour).UTC()
+		if err := store.Save(context.Background(), workflowkit.WorkflowRun{
+			ID:         "wf-active-lease",
+			Status:     workflowkit.StatusPending,
+			LeaseOwner: "worker-1",
+			LeaseUntil: future,
+		}); err != nil {
+			t.Fatalf("Save active lease returned error: %v", err)
+		}
+		if _, err := store.ClaimRunnable(context.Background(), "worker-2", time.Minute); !errors.Is(err, workflowkit.ErrNoRunnableWorkflow) {
+			t.Fatalf("active lease claim err = %v, want ErrNoRunnableWorkflow", err)
+		}
+
+		expired := time.Now().Add(-time.Minute).UTC()
+		if err := store.Save(context.Background(), workflowkit.WorkflowRun{
+			ID:         "wf-active-lease",
+			Status:     workflowkit.StatusPending,
+			LeaseOwner: "worker-1",
+			LeaseUntil: expired,
+		}); err != nil {
+			t.Fatalf("Save expired lease returned error: %v", err)
+		}
+		claimed, err := store.ClaimRunnable(context.Background(), "worker-2", time.Minute)
+		if err != nil {
+			t.Fatalf("ClaimRunnable expired lease returned error: %v", err)
+		}
+		if claimed.LeaseOwner != "worker-2" || !claimed.LeaseUntil.After(time.Now()) {
+			t.Fatalf("reclaimed lease fields = %+v", claimed)
+		}
+	})
+
+	t.Run("claim ignores non pending workflows", func(t *testing.T) {
+		store := queueStore(t, newStore)
+		for _, run := range []workflowkit.WorkflowRun{
+			{ID: "wf-running", Status: workflowkit.StatusRunning},
+			{ID: "wf-waiting", Status: workflowkit.StatusWaitingApproval},
+			{ID: "wf-succeeded", Status: workflowkit.StatusSucceeded},
+		} {
+			if err := store.Save(context.Background(), run); err != nil {
+				t.Fatalf("Save(%s) returned error: %v", run.ID, err)
+			}
+		}
+		if _, err := store.ClaimRunnable(context.Background(), "worker-1", time.Minute); !errors.Is(err, workflowkit.ErrNoRunnableWorkflow) {
+			t.Fatalf("claim err = %v, want ErrNoRunnableWorkflow", err)
+		}
+	})
+}
+
+func queueStore(t *testing.T, newStore NewStore) workflowkit.QueueStore {
+	t.Helper()
+	store := newStore(t)
+	queue, ok := store.(workflowkit.QueueStore)
+	if !ok {
+		t.Fatalf("%T does not implement workflowkit.QueueStore", store)
+	}
+	return queue
 }

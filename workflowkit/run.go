@@ -37,6 +37,8 @@ type WorkflowRun struct {
 	StepAttempts   map[string]int
 	StepRecords    []StepRecord
 	Metadata       map[string]any
+	LeaseOwner     string
+	LeaseUntil     time.Time
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 }

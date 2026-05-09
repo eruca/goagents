@@ -44,12 +44,13 @@ github.com/eruca/workflowkit does not import github.com/eruca/goagent
 - step history through `StepRecords`
 - `Continue` for resuming a persisted run after `waiting_approval`
 - `AuditRef`, `InputRef`, `OutputRef`, `AgentRunID`, and `ApprovalRef` for host-owned references
+- `QueueStore` and `ClaimRunnable` for host-owned worker claim/lease proofs
 - lifecycle guards for `Run`, `Continue`, and `Cancel`
 - explicit retry policy for transient step errors
 - `sqlitestore` for SQLite-backed persistence
 - `storetest` conformance suite for Store implementations
 
-It intentionally does not provide DAG execution, distributed workers, cron,
+It intentionally does not provide DAG execution, distributed worker loops, cron,
 durable databases, UI, or multi-agent team orchestration.
 
 ## Basic Workflow
@@ -178,6 +179,23 @@ and completed steps as JSON fields. It still stores refs and bounded metadata,
 not raw prompts or full tool payloads. The current SQLite schema is versioned as
 `sqlitestore.SchemaVersion`.
 
+## Queue Claim
+
+Use `QueueStore` when a host needs to claim a pending workflow for background
+execution:
+
+```go
+queue := store.(workflowkit.QueueStore)
+run, err := queue.ClaimRunnable(ctx, "worker-1", 30*time.Second)
+```
+
+`ClaimRunnable` selects the oldest pending workflow whose lease is empty or
+expired, writes `LeaseOwner` and `LeaseUntil`, and returns the claimed run. It
+does not run the workflow, start worker goroutines, heartbeat, or recover stuck
+workers. Those remain host-owned execution concerns.
+
+After claiming, hosts can pass the returned pending run to `Executor.Run`.
+
 ## Store Conformance
 
 Use `storetest` when adding a new `Store` implementation:
@@ -233,8 +251,9 @@ The intended stable surface is:
 
 - `WorkflowRun`, `Status`, `Step`, `StepResult`, and `StepRecord`
 - `Executor` methods: `Run`, `Continue`, `Approve`, and `Cancel`
-- `Store`, `MemoryStore`, `RetryPolicy`, `TransientError`
+- `Store`, `QueueStore`, `MemoryStore`, `RetryPolicy`, `TransientError`
 - lifecycle errors: `ErrRunNotFound`, `ErrInvalidTransition`, and `InvalidTransitionError`
+- queue errors: `ErrNoRunnableWorkflow`
 - status errors: `ErrInvalidStatus` and `InvalidStatusError`
 
 Extension packages are useful but still early:

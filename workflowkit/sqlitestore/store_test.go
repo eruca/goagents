@@ -25,6 +25,21 @@ func TestStoreConformance(t *testing.T) {
 	})
 }
 
+func TestQueueStoreConformance(t *testing.T) {
+	storetest.RunQueueStoreConformance(t, func(t *testing.T) workflowkit.Store {
+		store, err := Open(filepath.Join(t.TempDir(), "workflow.db"))
+		if err != nil {
+			t.Fatalf("Open returned error: %v", err)
+		}
+		t.Cleanup(func() {
+			if err := store.Close(); err != nil {
+				t.Fatalf("Close returned error: %v", err)
+			}
+		})
+		return store
+	})
+}
+
 func TestStorePersistsRunAcrossReopen(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "workflow.db")

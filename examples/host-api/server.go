@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/eruca/artifactkit"
 	"github.com/eruca/goagent/agentcore"
@@ -34,6 +35,7 @@ type Server struct {
 	artifacts artifactkit.Store
 	runs      runkit.Store
 	workflows workflowkit.Store
+	queue     workflowkit.QueueStore
 	executor  *workflowkit.Executor
 	health    *llmkit.MemoryHealthStore
 	llmHome   string
@@ -217,6 +219,7 @@ func NewServer(config Config) (*Server, error) {
 		artifacts: artifacts,
 		runs:      runs,
 		workflows: workflows,
+		queue:     workflows,
 		health:    llmkit.NewMemoryHealthStore(llmkit.HealthPolicy{}),
 		llmHome:   resolved.LLMKitHome,
 		models:    models,
@@ -320,7 +323,15 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) runQueuedWorkflow(run workflowkit.WorkflowRun) {
 	go func() {
-		_, _ = s.executor.Run(context.Background(), run)
+		if s.queue == nil {
+			_, _ = s.executor.Run(context.Background(), run)
+			return
+		}
+		claimed, err := s.queue.ClaimRunnable(context.Background(), "host-api-inprocess-worker", time.Minute)
+		if err != nil {
+			return
+		}
+		_, _ = s.executor.Run(context.Background(), claimed)
 	}()
 }
 
