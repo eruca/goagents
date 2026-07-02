@@ -92,6 +92,7 @@ const (
 const (
 	queuedWorkerID      = "host-api-inprocess-worker"
 	queuedLeaseDuration = time.Minute
+	queuedPollInterval  = 100 * time.Millisecond
 )
 
 type agentRunResponse struct {
@@ -332,16 +333,47 @@ func (s *Server) runQueuedWorkflow(run workflowkit.WorkflowRun) {
 			_, _ = s.executor.Run(context.Background(), run)
 			return
 		}
-		ctx := context.Background()
-		claimed, err := s.queue.ClaimRunnable(ctx, queuedWorkerID, queuedLeaseDuration)
-		if err != nil {
+		_, _ = s.runOneQueuedWorkflow(context.Background())
+	}()
+}
+
+// StartQueuedWorker starts the host-owned in-process worker loop for pending workflows.
+func (s *Server) StartQueuedWorker(ctx context.Context) {
+	go s.runQueuedWorkerLoop(ctx)
+}
+
+func (s *Server) runQueuedWorkerLoop(ctx context.Context) {
+	for {
+		if ctx.Err() != nil {
 			return
 		}
-		defer func() {
-			_, _ = s.queue.ReleaseLease(context.Background(), claimed.ID, queuedWorkerID)
-		}()
-		_, _ = s.executor.Run(ctx, claimed)
+		ran, _ := s.runOneQueuedWorkflow(ctx)
+		if ran {
+			continue
+		}
+		timer := time.NewTimer(queuedPollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+func (s *Server) runOneQueuedWorkflow(ctx context.Context) (bool, error) {
+	if s.queue == nil {
+		return false, nil
+	}
+	claimed, err := s.queue.ClaimRunnable(ctx, queuedWorkerID, queuedLeaseDuration)
+	if err != nil {
+		return false, err
+	}
+	defer func() {
+		_, _ = s.queue.ReleaseLease(context.Background(), claimed.ID, queuedWorkerID)
 	}()
+	_, err = s.executor.Run(ctx, claimed)
+	return true, err
 }
 
 func (s *Server) handleGetWorkflow(w http.ResponseWriter, r *http.Request) {

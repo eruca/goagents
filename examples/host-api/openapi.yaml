@@ -511,8 +511,9 @@ components:
       description: >
         sync runs during the HTTP request. queued is an in-process proof that
         returns a pending workflow, claims a workflow lease, advances it in a
-        background goroutine, and releases the lease; it is not a durable worker
-        model.
+        background worker loop, and releases the lease; restarting with the same
+        runtime home can recover pending or expired-lease workflows, but queued
+        is not a distributed worker model.
     TaskProfilePreset:
       type: string
       enum:

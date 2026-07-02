@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
@@ -15,6 +16,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	server.StartQueuedWorker(context.Background())
 	addr := os.Getenv("HOST_API_ADDR")
 	if addr == "" {
 		addr = "127.0.0.1:8080"

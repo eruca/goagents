@@ -130,6 +130,47 @@ func TestHostAPIDurableRuntimeResumesWorkflowAfterReopen(t *testing.T) {
 	}
 }
 
+func TestHostAPIQueuedWorkerRecoversPendingWorkflowAfterReopen(t *testing.T) {
+	runtimeHome := t.TempDir()
+	server, err := NewServer(Config{RuntimeHome: runtimeHome})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+	inputRef := "artifact:wf-queued-recover:input"
+	if err := putTextArtifact(context.Background(), server.artifacts, inputRef, "Review queued recovery."); err != nil {
+		t.Fatalf("put input artifact returned error: %v", err)
+	}
+	if err := server.workflows.Save(context.Background(), workflowkit.WorkflowRun{
+		ID:       "wf-queued-recover",
+		Status:   workflowkit.StatusPending,
+		InputRef: inputRef,
+		Metadata: map[string]any{
+			"input_ref": inputRef,
+		},
+	}); err != nil {
+		t.Fatalf("Save pending workflow returned error: %v", err)
+	}
+	closeStoreIfPossible(t, server.workflows)
+	closeStoreIfPossible(t, server.runs)
+
+	reopened, err := NewServer(Config{RuntimeHome: runtimeHome})
+	if err != nil {
+		t.Fatalf("reopen NewServer returned error: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	reopened.StartQueuedWorker(ctx)
+
+	loaded := waitForWorkflowStatus(t, reopened.Handler(), "wf-queued-recover", workflowkit.StatusWaitingApproval)
+	if loaded.AgentRunID == "" || loaded.OutputRef == "" || loaded.ApprovalRef == "" {
+		t.Fatalf("recovered queued workflow = %+v, want agent refs after worker recovery", loaded)
+	}
+	stored := waitForWorkflowLeaseCleared(t, reopened.workflows, "wf-queued-recover")
+	if stored.Status != workflowkit.StatusWaitingApproval {
+		t.Fatalf("recovered workflow after release = %+v, want waiting approval", stored)
+	}
+}
+
 func TestHostAPIReturnsWorkflowLLMRouteAudit(t *testing.T) {
 	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
 	if err != nil {
@@ -840,6 +881,17 @@ func waitForWorkflowLeaseCleared(t *testing.T, store workflowkit.Store, id strin
 	}
 	t.Fatalf("workflow lease = %+v, want cleared lease", run)
 	return workflowkit.WorkflowRun{}
+}
+
+func closeStoreIfPossible(t *testing.T, store any) {
+	t.Helper()
+	closer, ok := store.(interface{ Close() error })
+	if !ok {
+		return
+	}
+	if err := closer.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
 }
 
 func selectedRoute(t *testing.T, routes llmRoutesResponse) llmRouteResponse {

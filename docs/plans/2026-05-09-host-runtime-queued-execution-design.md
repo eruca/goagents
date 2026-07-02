@@ -6,20 +6,22 @@
 
 1. 在 `examples/host-api` 中实现一个最小 in-process queued proof，证明 HTTP API、
    workflow state、artifact refs 和 agent audit 可以从同步调用解耦。
-2. durable queued worker 的第一步是扩展 workflow claim/lease contract；当前已落地
-   `workflowkit.QueueStore.ClaimRunnable` 以及 `QueueLeaseStore.ExtendLease` /
-   `ReleaseLease`，但 heartbeat loop、process restart recovery 和 stuck recovery
-   仍未实现。
+2. durable queued worker 的第一步是扩展 workflow claim/lease contract，并在
+   `examples/host-api` 提供最小 worker loop；当前已落地
+   `workflowkit.QueueStore.ClaimRunnable`、`QueueLeaseStore.ExtendLease` /
+   `ReleaseLease` 和 `Server.StartQueuedWorker`，但 heartbeat loop、worker crash
+   supervision 和多 worker 调度仍未实现。
 
 因此当前阶段把 `queued` 从“明确不支持”推进为“同进程后台执行 proof + 明确 lease
-生命周期”。进程重启后自动恢复 pending workflow、跨进程 worker heartbeat 和 stuck
-recovery 仍是后续设计。
+生命周期 + 同 runtime home 的 pending/expired lease 恢复”。跨进程 worker heartbeat、
+stuck recovery 和多 worker 调度仍是后续设计。
 
 ## 目标
 
 - `POST /workflows` 支持 `run_mode: "queued"`。
 - queued 请求先保存 input artifact 和 pending workflow，然后立即返回 `202`。
 - 同一进程内的后台 worker 继续执行 workflow，最终进入 `waiting_approval` 或 terminal。
+- host-api 启动 worker loop 后，可恢复同一 runtime home 中已有的 pending/expired lease workflow。
 - `GET /workflows/{id}` 可观察 queued workflow 的状态变化。
 - `GET /workflows/{id}/llm-routes` 和 `GET /agent-runs/{id}` 在后台执行完成后可读取审计。
 - 不把该 proof 抽进 `workflowkit` core。
@@ -28,7 +30,6 @@ recovery 仍是后续设计。
 
 - 不实现 durable queue。
 - 不实现 worker heartbeat。
-- 不实现进程重启后自动恢复 pending workflow。
 - 不实现多 worker 并发调度。
 - 不新增 workflow list API。
 - 不把 background execution 放进 `goagent` core。
@@ -91,10 +92,9 @@ run_mode omitted/sync:
 run_mode queued:
   write input artifact
   save WorkflowRun{Status: pending, InputRef, Metadata}
-  start goroutine
-  goroutine uses QueueLeaseStore.ClaimRunnable(...)
+  worker loop or request wakeup uses QueueLeaseStore.ClaimRunnable(...)
   executor.Run(ctx, claimedRun)
-  goroutine releases QueueLeaseStore lease
+  worker releases QueueLeaseStore lease
   return pending workflow immediately
 ```
 
@@ -103,6 +103,7 @@ run_mode queued:
 - 使用 detached context，避免 HTTP request context 结束后取消后台 workflow。
 - 后台执行错误只写入 workflow state，不回写 HTTP response。
 - 如果 goroutine 启动后失败，workflow 应最终可通过 `GET /workflows/{id}` 看到 `failed`。
+- `Server.StartQueuedWorker(ctx)` 按固定间隔 claim runnable workflow，能够处理启动前遗留的 pending/expired lease workflow。
 
 ## HTTP Contract
 
@@ -137,13 +138,14 @@ workflow metadata 或正式 DTO 中增加 `run_mode`。
 
 ## 后续 Durable Worker Contract
 
-真正 durable queued worker 仍需要 host-side worker loop contract，例如：
+真正 durable queued worker 仍需要更完整的 host-side worker contract，例如：
 
 ```go
 type WorkerLoop interface {
     Start(ctx context.Context) error
     Stop(ctx context.Context) error
-    RecoverPending(ctx context.Context) error
+    Heartbeat(ctx context.Context) error
+    RecoverStuck(ctx context.Context) error
 }
 ```
 
@@ -157,8 +159,8 @@ type WorkerLoop interface {
 - `StartedAt`
 
 `LeaseOwner` 和 `LeaseUntil` 已进入 `WorkflowRun`、memory store、SQLite store 和
-store conformance，并已具备 claim/extend/release 语义。其余字段仍待后续 durable
-worker 设计。
+store conformance，并已具备 claim/extend/release 语义。`examples/host-api`
+已提供最小 `StartQueuedWorker` loop。其余字段仍待后续 durable worker 设计。
 
 ## 测试计划
 
@@ -168,17 +170,17 @@ worker 设计。
 - polling `GET /workflows/{id}` eventually reaches `waiting_approval`。
 - queued workflow completion exposes `agent_run_id` and `output_ref`。
 - queued worker claims through `QueueLeaseStore` and clears the lease after execution stops。
+- reopening with the same runtime home and starting the worker loop recovers pending workflow。
 - after queued execution reaches waiting approval, `POST /workflows/{id}/approve` succeeds。
 - `GET /workflows/{id}/llm-routes` returns route audit after background execution。
 
 不测试：
 
-- process restart recovery。
 - multi-worker claim。
 - worker crash recovery。
 
 ## 完成标准
 
 - `examples/host-api` 支持 in-process queued proof。
-- README、OpenAPI、`docs/host-api-contract.md` 明确 queued 当前是 in-process proof。
+- README、OpenAPI、`docs/host-api-contract.md` 明确 queued 当前是 in-process worker proof。
 - `./scripts/verify-all.sh` 通过。
