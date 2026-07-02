@@ -11,6 +11,7 @@ import (
 
 var ErrRunNotFound = errors.New("workflow run not found")
 var ErrNoRunnableWorkflow = errors.New("no runnable workflow")
+var ErrWorkflowLeaseNotOwned = errors.New("workflow lease not owned")
 
 type Store interface {
 	Save(ctx context.Context, run WorkflowRun) error
@@ -21,6 +22,12 @@ type Store interface {
 type QueueStore interface {
 	Store
 	ClaimRunnable(ctx context.Context, workerID string, lease time.Duration) (WorkflowRun, error)
+}
+
+type QueueLeaseStore interface {
+	QueueStore
+	ExtendLease(ctx context.Context, id string, workerID string, lease time.Duration) (WorkflowRun, error)
+	ReleaseLease(ctx context.Context, id string, workerID string) (WorkflowRun, error)
 }
 
 type MemoryStore struct {
@@ -139,4 +146,68 @@ func (s *MemoryStore) ClaimRunnable(ctx context.Context, workerID string, lease 
 		return cloneRun(run), nil
 	}
 	return WorkflowRun{}, ErrNoRunnableWorkflow
+}
+
+func (s *MemoryStore) ExtendLease(ctx context.Context, id string, workerID string, lease time.Duration) (WorkflowRun, error) {
+	select {
+	case <-ctx.Done():
+		return WorkflowRun{}, ctx.Err()
+	default:
+	}
+	if id == "" {
+		return WorkflowRun{}, fmt.Errorf("workflow id is required")
+	}
+	if workerID == "" {
+		return WorkflowRun{}, fmt.Errorf("worker id is required")
+	}
+	if lease <= 0 {
+		return WorkflowRun{}, fmt.Errorf("lease must be greater than zero")
+	}
+
+	now := s.now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	run, ok := s.runs[id]
+	if !ok {
+		return WorkflowRun{}, ErrRunNotFound
+	}
+	if run.LeaseOwner != workerID || run.LeaseUntil.IsZero() || !run.LeaseUntil.After(now) {
+		return WorkflowRun{}, ErrWorkflowLeaseNotOwned
+	}
+	run.LeaseUntil = now.Add(lease)
+	run.UpdatedAt = now
+	s.runs[id] = cloneRun(run)
+	return cloneRun(run), nil
+}
+
+func (s *MemoryStore) ReleaseLease(ctx context.Context, id string, workerID string) (WorkflowRun, error) {
+	select {
+	case <-ctx.Done():
+		return WorkflowRun{}, ctx.Err()
+	default:
+	}
+	if id == "" {
+		return WorkflowRun{}, fmt.Errorf("workflow id is required")
+	}
+	if workerID == "" {
+		return WorkflowRun{}, fmt.Errorf("worker id is required")
+	}
+
+	now := s.now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	run, ok := s.runs[id]
+	if !ok {
+		return WorkflowRun{}, ErrRunNotFound
+	}
+	if run.LeaseOwner != workerID {
+		return WorkflowRun{}, ErrWorkflowLeaseNotOwned
+	}
+	run.LeaseOwner = ""
+	run.LeaseUntil = time.Time{}
+	run.UpdatedAt = now
+	s.runs[id] = cloneRun(run)
+	return cloneRun(run), nil
 }

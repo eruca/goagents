@@ -178,6 +178,71 @@ WHERE id = ?
 	return s.Get(ctx, id)
 }
 
+func (s *Store) ExtendLease(ctx context.Context, id string, workerID string, lease time.Duration) (workflowkit.WorkflowRun, error) {
+	if id == "" {
+		return workflowkit.WorkflowRun{}, fmt.Errorf("workflow id is required")
+	}
+	if workerID == "" {
+		return workflowkit.WorkflowRun{}, fmt.Errorf("worker id is required")
+	}
+	if lease <= 0 {
+		return workflowkit.WorkflowRun{}, fmt.Errorf("lease must be greater than zero")
+	}
+	now := time.Now().UTC()
+	leaseUntil := now.Add(lease)
+	result, err := s.db.ExecContext(ctx, `
+UPDATE workflow_runs
+SET lease_until = ?, updated_at = ?
+WHERE id = ?
+  AND lease_owner = ?
+  AND lease_until > ?
+`, leaseUntil, now, id, workerID, now)
+	if err != nil {
+		return workflowkit.WorkflowRun{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return workflowkit.WorkflowRun{}, err
+	}
+	if affected == 0 {
+		if _, err := s.Get(ctx, id); err != nil {
+			return workflowkit.WorkflowRun{}, err
+		}
+		return workflowkit.WorkflowRun{}, workflowkit.ErrWorkflowLeaseNotOwned
+	}
+	return s.Get(ctx, id)
+}
+
+func (s *Store) ReleaseLease(ctx context.Context, id string, workerID string) (workflowkit.WorkflowRun, error) {
+	if id == "" {
+		return workflowkit.WorkflowRun{}, fmt.Errorf("workflow id is required")
+	}
+	if workerID == "" {
+		return workflowkit.WorkflowRun{}, fmt.Errorf("worker id is required")
+	}
+	now := time.Now().UTC()
+	result, err := s.db.ExecContext(ctx, `
+UPDATE workflow_runs
+SET lease_owner = '', lease_until = ?, updated_at = ?
+WHERE id = ?
+  AND lease_owner = ?
+`, time.Time{}, now, id, workerID)
+	if err != nil {
+		return workflowkit.WorkflowRun{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return workflowkit.WorkflowRun{}, err
+	}
+	if affected == 0 {
+		if _, err := s.Get(ctx, id); err != nil {
+			return workflowkit.WorkflowRun{}, err
+		}
+		return workflowkit.WorkflowRun{}, workflowkit.ErrWorkflowLeaseNotOwned
+	}
+	return s.Get(ctx, id)
+}
+
 func (s *Store) migrate(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS workflowkit_schema (

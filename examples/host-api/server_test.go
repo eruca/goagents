@@ -583,12 +583,9 @@ func TestHostAPIRunModeSyncAndQueuedSemantics(t *testing.T) {
 	if loaded.AgentRunID == "" || loaded.OutputRef == "" || loaded.ApprovalRef == "" {
 		t.Fatalf("queued loaded workflow = %+v, want agent refs after background run", loaded)
 	}
-	stored, err := server.workflows.Get(context.Background(), "wf-queued")
-	if err != nil {
-		t.Fatalf("workflow store Get returned error: %v", err)
-	}
-	if stored.LeaseOwner != "host-api-inprocess-worker" || stored.LeaseUntil.IsZero() {
-		t.Fatalf("queued workflow lease = %+v, want in-process worker lease", stored)
+	stored := waitForWorkflowLeaseCleared(t, server.workflows, "wf-queued")
+	if stored.Status != workflowkit.StatusWaitingApproval {
+		t.Fatalf("queued workflow after release = %+v, want waiting approval", stored)
 	}
 	routes := doJSON[llmRoutesResponse](t, server.Handler(), http.MethodGet, "/workflows/wf-queued/llm-routes", nil)
 	if got := selectedModelAlias(t, routes); got != "local-free" {
@@ -822,6 +819,27 @@ func waitForWorkflowStatus(t *testing.T, handler http.Handler, id string, want w
 	}
 	t.Fatalf("workflow %s status = %q, want %q; last=%+v", id, last.Status, want, last)
 	return workflowResponse{}
+}
+
+func waitForWorkflowLeaseCleared(t *testing.T, store workflowkit.Store, id string) workflowkit.WorkflowRun {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		run, err := store.Get(context.Background(), id)
+		if err != nil {
+			t.Fatalf("workflow store Get returned error: %v", err)
+		}
+		if run.LeaseOwner == "" && run.LeaseUntil.IsZero() {
+			return run
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	run, err := store.Get(context.Background(), id)
+	if err != nil {
+		t.Fatalf("workflow store Get returned error: %v", err)
+	}
+	t.Fatalf("workflow lease = %+v, want cleared lease", run)
+	return workflowkit.WorkflowRun{}
 }
 
 func selectedRoute(t *testing.T, routes llmRoutesResponse) llmRouteResponse {

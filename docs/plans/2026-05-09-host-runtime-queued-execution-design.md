@@ -7,10 +7,13 @@
 1. 在 `examples/host-api` 中实现一个最小 in-process queued proof，证明 HTTP API、
    workflow state、artifact refs 和 agent audit 可以从同步调用解耦。
 2. durable queued worker 的第一步是扩展 workflow claim/lease contract；当前已落地
-   `workflowkit.QueueStore.ClaimRunnable`，但 heartbeat、release 和 stuck recovery 仍未实现。
+   `workflowkit.QueueStore.ClaimRunnable` 以及 `QueueLeaseStore.ExtendLease` /
+   `ReleaseLease`，但 heartbeat loop、process restart recovery 和 stuck recovery
+   仍未实现。
 
-因此本阶段只把 `queued` 从“明确不支持”推进为“同进程后台执行 proof”。进程重启后
-自动恢复 pending workflow、跨进程 worker heartbeat 和 stuck recovery 仍是后续设计。
+因此当前阶段把 `queued` 从“明确不支持”推进为“同进程后台执行 proof + 明确 lease
+生命周期”。进程重启后自动恢复 pending workflow、跨进程 worker heartbeat 和 stuck
+recovery 仍是后续设计。
 
 ## 目标
 
@@ -46,10 +49,17 @@ Update(ctx, id, mutate func(WorkflowRun) (WorkflowRun, error)) (WorkflowRun, err
 - 按 id 读取 workflow。
 - 对已知 id 做状态更新。
 
-`workflowkit.QueueStore` 当前增加了第一步 claim/lease contract：
+`workflowkit.QueueStore` 当前提供 claim contract：
 
 ```go
 ClaimRunnable(ctx, workerID, lease) (WorkflowRun, error)
+```
+
+`workflowkit.QueueLeaseStore` 嵌入 `QueueStore`，并提供 lease lifecycle contract：
+
+```go
+ExtendLease(ctx, workflowID, workerID, lease) (WorkflowRun, error)
+ReleaseLease(ctx, workflowID, workerID) (WorkflowRun, error)
 ```
 
 它支持：
@@ -58,13 +68,15 @@ ClaimRunnable(ctx, workerID, lease) (WorkflowRun, error)
 - 跳过未过期 lease。
 - 回收已过期 lease。
 - 写入 `LeaseOwner` 和 `LeaseUntil`。
+- 仅允许当前未过期 owner 续租。
+- 仅允许当前 owner 释放 lease。
 
 它仍不支持：
 
-- heartbeat。
-- worker release。
 - stuck recovery loop。
 - 多 worker 调度策略。
+
+此外，heartbeat loop 不是 store 原语，而是 host worker 的执行职责。
 
 ## In-Process Proof 语义
 
@@ -80,8 +92,9 @@ run_mode queued:
   write input artifact
   save WorkflowRun{Status: pending, InputRef, Metadata}
   start goroutine
-  goroutine uses QueueStore.ClaimRunnable(...)
+  goroutine uses QueueLeaseStore.ClaimRunnable(...)
   executor.Run(ctx, claimedRun)
+  goroutine releases QueueLeaseStore lease
   return pending workflow immediately
 ```
 
@@ -124,13 +137,13 @@ workflow metadata 或正式 DTO 中增加 `run_mode`。
 
 ## 后续 Durable Worker Contract
 
-真正 durable queued worker 需要新增 contract，例如：
+真正 durable queued worker 仍需要 host-side worker loop contract，例如：
 
 ```go
-type QueueStore interface {
-    ClaimRunnable(ctx context.Context, workerID string, lease time.Duration) (WorkflowRun, error)
-    Heartbeat(ctx context.Context, workflowID string, workerID string, leaseUntil time.Time) error
-    Release(ctx context.Context, workflowID string, workerID string, result WorkflowRun) error
+type WorkerLoop interface {
+    Start(ctx context.Context) error
+    Stop(ctx context.Context) error
+    RecoverPending(ctx context.Context) error
 }
 ```
 
@@ -144,7 +157,8 @@ type QueueStore interface {
 - `StartedAt`
 
 `LeaseOwner` 和 `LeaseUntil` 已进入 `WorkflowRun`、memory store、SQLite store 和
-store conformance。其余字段仍待后续 durable worker 设计。
+store conformance，并已具备 claim/extend/release 语义。其余字段仍待后续 durable
+worker 设计。
 
 ## 测试计划
 
@@ -153,7 +167,7 @@ store conformance。其余字段仍待后续 durable worker 设计。
 - `POST /workflows` with `run_mode: queued` returns `202` and `pending` immediately.
 - polling `GET /workflows/{id}` eventually reaches `waiting_approval`。
 - queued workflow completion exposes `agent_run_id` and `output_ref`。
-- queued workflow records `LeaseOwner` and `LeaseUntil` through `QueueStore`。
+- queued worker claims through `QueueLeaseStore` and clears the lease after execution stops。
 - after queued execution reaches waiting approval, `POST /workflows/{id}/approve` succeeds。
 - `GET /workflows/{id}/llm-routes` returns route audit after background execution。
 
@@ -161,7 +175,6 @@ store conformance。其余字段仍待后续 durable worker 设计。
 
 - process restart recovery。
 - multi-worker claim。
-- lease timeout。
 - worker crash recovery。
 
 ## 完成标准

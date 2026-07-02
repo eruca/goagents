@@ -35,7 +35,7 @@ type Server struct {
 	artifacts artifactkit.Store
 	runs      runkit.Store
 	workflows workflowkit.Store
-	queue     workflowkit.QueueStore
+	queue     workflowkit.QueueLeaseStore
 	executor  *workflowkit.Executor
 	health    *llmkit.MemoryHealthStore
 	llmHome   string
@@ -87,6 +87,11 @@ type RunMode string
 const (
 	RunModeSync   RunMode = "sync"
 	RunModeQueued RunMode = "queued"
+)
+
+const (
+	queuedWorkerID      = "host-api-inprocess-worker"
+	queuedLeaseDuration = time.Minute
 )
 
 type agentRunResponse struct {
@@ -327,11 +332,15 @@ func (s *Server) runQueuedWorkflow(run workflowkit.WorkflowRun) {
 			_, _ = s.executor.Run(context.Background(), run)
 			return
 		}
-		claimed, err := s.queue.ClaimRunnable(context.Background(), "host-api-inprocess-worker", time.Minute)
+		ctx := context.Background()
+		claimed, err := s.queue.ClaimRunnable(ctx, queuedWorkerID, queuedLeaseDuration)
 		if err != nil {
 			return
 		}
-		_, _ = s.executor.Run(context.Background(), claimed)
+		defer func() {
+			_, _ = s.queue.ReleaseLease(context.Background(), claimed.ID, queuedWorkerID)
+		}()
+		_, _ = s.executor.Run(ctx, claimed)
 	}()
 }
 

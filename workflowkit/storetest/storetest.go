@@ -187,12 +187,92 @@ func RunQueueStoreConformance(t *testing.T, newStore NewStore) {
 	})
 }
 
+func RunQueueLeaseStoreConformance(t *testing.T, newStore NewStore) {
+	t.Helper()
+	RunQueueStoreConformance(t, newStore)
+
+	t.Run("extend lease requires current active owner", func(t *testing.T) {
+		store := queueLeaseStore(t, newStore)
+		originalLease := time.Now().Add(time.Minute).UTC()
+		if err := store.Save(context.Background(), workflowkit.WorkflowRun{
+			ID:         "wf-extend-lease",
+			Status:     workflowkit.StatusRunning,
+			LeaseOwner: "worker-1",
+			LeaseUntil: originalLease,
+		}); err != nil {
+			t.Fatalf("Save returned error: %v", err)
+		}
+
+		if _, err := store.ExtendLease(context.Background(), "wf-extend-lease", "worker-2", time.Minute); !errors.Is(err, workflowkit.ErrWorkflowLeaseNotOwned) {
+			t.Fatalf("wrong owner ExtendLease err = %v, want ErrWorkflowLeaseNotOwned", err)
+		}
+
+		extended, err := store.ExtendLease(context.Background(), "wf-extend-lease", "worker-1", 2*time.Minute)
+		if err != nil {
+			t.Fatalf("ExtendLease returned error: %v", err)
+		}
+		if extended.LeaseOwner != "worker-1" || !extended.LeaseUntil.After(originalLease) {
+			t.Fatalf("extended lease = %+v, want same owner with later deadline", extended)
+		}
+	})
+
+	t.Run("extend lease rejects expired ownership", func(t *testing.T) {
+		store := queueLeaseStore(t, newStore)
+		if err := store.Save(context.Background(), workflowkit.WorkflowRun{
+			ID:         "wf-expired-extend",
+			Status:     workflowkit.StatusRunning,
+			LeaseOwner: "worker-1",
+			LeaseUntil: time.Now().Add(-time.Minute).UTC(),
+		}); err != nil {
+			t.Fatalf("Save returned error: %v", err)
+		}
+
+		if _, err := store.ExtendLease(context.Background(), "wf-expired-extend", "worker-1", time.Minute); !errors.Is(err, workflowkit.ErrWorkflowLeaseNotOwned) {
+			t.Fatalf("expired ExtendLease err = %v, want ErrWorkflowLeaseNotOwned", err)
+		}
+	})
+
+	t.Run("release lease clears current owner only", func(t *testing.T) {
+		store := queueLeaseStore(t, newStore)
+		if err := store.Save(context.Background(), workflowkit.WorkflowRun{
+			ID:         "wf-release-lease",
+			Status:     workflowkit.StatusWaitingApproval,
+			LeaseOwner: "worker-1",
+			LeaseUntil: time.Now().Add(time.Minute).UTC(),
+		}); err != nil {
+			t.Fatalf("Save returned error: %v", err)
+		}
+
+		if _, err := store.ReleaseLease(context.Background(), "wf-release-lease", "worker-2"); !errors.Is(err, workflowkit.ErrWorkflowLeaseNotOwned) {
+			t.Fatalf("wrong owner ReleaseLease err = %v, want ErrWorkflowLeaseNotOwned", err)
+		}
+
+		released, err := store.ReleaseLease(context.Background(), "wf-release-lease", "worker-1")
+		if err != nil {
+			t.Fatalf("ReleaseLease returned error: %v", err)
+		}
+		if released.LeaseOwner != "" || !released.LeaseUntil.IsZero() {
+			t.Fatalf("released lease = %+v, want cleared lease", released)
+		}
+	})
+}
+
 func queueStore(t *testing.T, newStore NewStore) workflowkit.QueueStore {
 	t.Helper()
 	store := newStore(t)
 	queue, ok := store.(workflowkit.QueueStore)
 	if !ok {
 		t.Fatalf("%T does not implement workflowkit.QueueStore", store)
+	}
+	return queue
+}
+
+func queueLeaseStore(t *testing.T, newStore NewStore) workflowkit.QueueLeaseStore {
+	t.Helper()
+	store := newStore(t)
+	queue, ok := store.(workflowkit.QueueLeaseStore)
+	if !ok {
+		t.Fatalf("%T does not implement workflowkit.QueueLeaseStore", store)
 	}
 	return queue
 }
