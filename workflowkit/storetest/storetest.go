@@ -321,6 +321,33 @@ func RunWorkflowQueryStoreConformance(t *testing.T, newStore NewStore) {
 			t.Fatalf("listed ids = %v, want created_at then id order", got)
 		}
 	})
+
+	t.Run("list workflows filters metadata and applies descending limit after filtering", func(t *testing.T) {
+		store := workflowQueryStore(t, newStore)
+		base := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+		for _, run := range []workflowkit.WorkflowRun{
+			{ID: "wf-sync-new", Status: workflowkit.StatusPending, CreatedAt: base.Add(3 * time.Minute), Metadata: map[string]any{"run_mode": "sync"}},
+			{ID: "wf-queued-old", Status: workflowkit.StatusPending, CreatedAt: base, Metadata: map[string]any{"run_mode": "queued"}},
+			{ID: "wf-queued-new", Status: workflowkit.StatusPending, CreatedAt: base.Add(2 * time.Minute), Metadata: map[string]any{"run_mode": "queued"}},
+		} {
+			if err := store.Save(context.Background(), run); err != nil {
+				t.Fatalf("Save(%s) returned error: %v", run.ID, err)
+			}
+		}
+
+		listed, err := store.ListWorkflows(context.Background(), workflowkit.WorkflowQuery{
+			Status:         workflowkit.StatusPending,
+			MetadataEquals: map[string]string{"run_mode": "queued"},
+			Order:          workflowkit.WorkflowOrderDesc,
+			Limit:          1,
+		})
+		if err != nil {
+			t.Fatalf("ListWorkflows returned error: %v", err)
+		}
+		if got := workflowIDs(listed); !equalStrings(got, []string{"wf-queued-new"}) {
+			t.Fatalf("listed ids = %v, want newest queued workflow", got)
+		}
+	})
 }
 
 func queueStore(t *testing.T, newStore NewStore) workflowkit.QueueStore {

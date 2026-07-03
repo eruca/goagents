@@ -23,7 +23,7 @@ worker supervision、stuck recovery 和多 worker 调度仍是后续设计。
 - 同一进程内的后台 worker 继续执行 workflow，最终进入 `waiting_approval` 或 terminal。
 - host-api 启动 worker loop 后，可恢复同一 runtime home 中已有的 pending/expired lease workflow。
 - `GET /workflows/{id}` 可观察 queued workflow 的状态变化。
-- `GET /workflows` 可按 status 返回有界 workflow 列表，用于运营 queued worker。
+- `GET /workflows` 可按 status、run_mode 和 order 返回有界 workflow 列表，用于运营 queued worker。
 - `POST /workflows/{id}/requeue` 可由 operator 显式把 failed/cancelled workflow 放回 queued worker。
 - `GET /workflows/{id}/llm-routes` 和 `GET /agent-runs/{id}` 在后台执行完成后可读取审计。
 - `GET /workers/queued` 可观察进程内 worker claim、completion、idle 和 error 计数。
@@ -147,7 +147,7 @@ manual requeue:
 后续 `GET /workflows/{id}`、`GET /workflows` 和 approval response 中仍返回
 `run_mode: "queued"`。
 
-`GET /workflows?status=pending&limit=50` 返回有界运营列表：
+`GET /workflows?status=pending&run_mode=queued&order=desc&limit=50` 返回有界运营列表：
 
 ```json
 {

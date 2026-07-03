@@ -27,6 +27,22 @@ paths:
           description: Optional workflow status filter.
           schema:
             $ref: '#/components/schemas/WorkflowStatus'
+        - name: run_mode
+          in: query
+          required: false
+          description: Optional submitted run mode filter.
+          schema:
+            $ref: '#/components/schemas/RunMode'
+        - name: order
+          in: query
+          required: false
+          description: Sort order by workflow creation time, then workflow id.
+          schema:
+            type: string
+            enum:
+              - asc
+              - desc
+            default: asc
         - name: limit
           in: query
           required: false

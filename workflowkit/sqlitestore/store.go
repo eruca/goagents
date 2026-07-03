@@ -128,34 +128,35 @@ func (s *Store) ListWorkflows(ctx context.Context, query workflowkit.WorkflowQue
 	if query.Status != "" && !query.Status.IsValid() {
 		return nil, fmt.Errorf("invalid workflow status: %s", query.Status)
 	}
-	limit := query.Limit
-	if limit <= 0 {
-		limit = -1
+	if !query.Order.IsValid() {
+		return nil, fmt.Errorf("invalid workflow order: %s", query.Order)
+	}
+	order := "ASC"
+	if query.Order == workflowkit.WorkflowOrderDesc {
+		order = "DESC"
 	}
 
 	var rows *sql.Rows
 	var err error
 	if query.Status == "" {
-		rows, err = s.db.QueryContext(ctx, `
+		rows, err = s.db.QueryContext(ctx, fmt.Sprintf(`
 SELECT id, status, input_ref, output_ref, agent_run_id, audit_ref, error,
 	approval_ref, waiting_reason, current_step, completed_steps_json,
 	step_attempts_json, step_records_json, metadata_json, lease_owner, lease_until,
 	created_at, updated_at
 FROM workflow_runs
-ORDER BY created_at ASC, id ASC
-LIMIT ?
-`, limit)
+ORDER BY created_at %s, id %s
+`, order, order))
 	} else {
-		rows, err = s.db.QueryContext(ctx, `
+		rows, err = s.db.QueryContext(ctx, fmt.Sprintf(`
 SELECT id, status, input_ref, output_ref, agent_run_id, audit_ref, error,
 	approval_ref, waiting_reason, current_step, completed_steps_json,
 	step_attempts_json, step_records_json, metadata_json, lease_owner, lease_until,
 	created_at, updated_at
 FROM workflow_runs
 WHERE status = ?
-ORDER BY created_at ASC, id ASC
-LIMIT ?
-`, string(query.Status), limit)
+ORDER BY created_at %s, id %s
+`, order, order), string(query.Status))
 	}
 	if err != nil {
 		return nil, err
@@ -175,12 +176,31 @@ LIMIT ?
 		if err != nil {
 			return nil, err
 		}
+		if !workflowMetadataMatches(run, query.MetadataEquals) {
+			continue
+		}
 		runs = append(runs, run)
+		if query.Limit > 0 && len(runs) >= query.Limit {
+			break
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	return runs, nil
+}
+
+func workflowMetadataMatches(run workflowkit.WorkflowRun, equals map[string]string) bool {
+	for key, want := range equals {
+		got, ok := run.Metadata[key]
+		if !ok {
+			return false
+		}
+		if fmt.Sprint(got) != want {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) ClaimRunnable(ctx context.Context, workerID string, lease time.Duration) (workflowkit.WorkflowRun, error) {

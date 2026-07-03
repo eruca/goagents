@@ -213,13 +213,17 @@ workflow runs:
 ```go
 query := store.(workflowkit.WorkflowQueryStore)
 runs, err := query.ListWorkflows(ctx, workflowkit.WorkflowQuery{
-	Status: workflowkit.StatusPending,
-	Limit:  50,
+	Status:         workflowkit.StatusPending,
+	MetadataEquals: map[string]string{"run_mode": "queued"},
+	Order:          workflowkit.WorkflowOrderDesc,
+	Limit:          50,
 })
 ```
 
 `ListWorkflows` returns copies ordered by `CreatedAt` then workflow id. `Status`
-is optional; `Limit` is optional and means no store-level limit when zero.
+and `MetadataEquals` are optional filters. `Order` defaults to ascending and can
+be set to `WorkflowOrderDesc`. `Limit` is optional and means no store-level limit
+when zero.
 
 ## Store Conformance
 

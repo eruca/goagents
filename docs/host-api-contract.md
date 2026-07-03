@@ -136,6 +136,9 @@ Returns a bounded operational list of stored workflows.
 Query parameters:
 
 - `status`: optional workflow status filter.
+- `run_mode`: optional. Supported values are `sync` and `queued`; this filters
+  the submitted mode stored in workflow metadata.
+- `order`: optional. Supported values are `asc` and `desc`. Defaults to `asc`.
 - `limit`: optional positive integer. Defaults to `50` and caps at `100`.
 
 Response:
@@ -156,7 +159,8 @@ Response:
 }
 ```
 
-Invalid `status` or `limit` returns `400 invalid_request`.
+Invalid `status`, `run_mode`, `order`, or `limit` returns
+`400 invalid_request`.
 
 ## GET /workflows/{id}
 

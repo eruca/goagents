@@ -19,9 +19,27 @@ type Store interface {
 	Update(ctx context.Context, id string, mutate func(WorkflowRun) (WorkflowRun, error)) (WorkflowRun, error)
 }
 
+type WorkflowOrder string
+
+const (
+	WorkflowOrderAsc  WorkflowOrder = "asc"
+	WorkflowOrderDesc WorkflowOrder = "desc"
+)
+
+func (o WorkflowOrder) IsValid() bool {
+	switch o {
+	case "", WorkflowOrderAsc, WorkflowOrderDesc:
+		return true
+	default:
+		return false
+	}
+}
+
 type WorkflowQuery struct {
-	Status Status
-	Limit  int
+	Status         Status
+	MetadataEquals map[string]string
+	Order          WorkflowOrder
+	Limit          int
 }
 
 type WorkflowQueryStore interface {
@@ -120,6 +138,9 @@ func (s *MemoryStore) ListWorkflows(ctx context.Context, query WorkflowQuery) ([
 	if query.Status != "" && !query.Status.IsValid() {
 		return nil, fmt.Errorf("invalid workflow status: %s", query.Status)
 	}
+	if !query.Order.IsValid() {
+		return nil, fmt.Errorf("invalid workflow order: %s", query.Order)
+	}
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -129,11 +150,20 @@ func (s *MemoryStore) ListWorkflows(ctx context.Context, query WorkflowQuery) ([
 		if query.Status != "" && run.Status != query.Status {
 			continue
 		}
+		if !workflowMetadataMatches(run, query.MetadataEquals) {
+			continue
+		}
 		runs = append(runs, cloneRun(run))
 	}
 	sort.Slice(runs, func(i, j int) bool {
 		if !runs[i].CreatedAt.Equal(runs[j].CreatedAt) {
+			if query.Order == WorkflowOrderDesc {
+				return runs[i].CreatedAt.After(runs[j].CreatedAt)
+			}
 			return runs[i].CreatedAt.Before(runs[j].CreatedAt)
+		}
+		if query.Order == WorkflowOrderDesc {
+			return runs[i].ID > runs[j].ID
 		}
 		return runs[i].ID < runs[j].ID
 	})
@@ -141,6 +171,19 @@ func (s *MemoryStore) ListWorkflows(ctx context.Context, query WorkflowQuery) ([
 		runs = runs[:query.Limit]
 	}
 	return runs, nil
+}
+
+func workflowMetadataMatches(run WorkflowRun, equals map[string]string) bool {
+	for key, want := range equals {
+		got, ok := run.Metadata[key]
+		if !ok {
+			return false
+		}
+		if fmt.Sprint(got) != want {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *MemoryStore) ClaimRunnable(ctx context.Context, workerID string, lease time.Duration) (WorkflowRun, error) {

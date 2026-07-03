@@ -95,9 +95,9 @@ filter reasons, and outcome metadata such as success, latency, tokens, and
 estimated cents. It does not return prompts, responses, headers, or API keys.
 
 `GET /workflows` returns a bounded operational list. It accepts optional
-`status` and `limit` query parameters, for example
-`GET /workflows?status=pending&limit=50`. Results are ordered by workflow
-creation time, then workflow id.
+`status`, `run_mode`, `order`, and `limit` query parameters, for example
+`GET /workflows?status=pending&run_mode=queued&order=desc&limit=50`. Results are
+ordered by workflow creation time, then workflow id; `order=desc` reverses both.
 
 `POST /workflows` accepts optional `run_mode`. `sync` is the default and runs
 the workflow during the HTTP request. `queued` is an in-process proof: it writes

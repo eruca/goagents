@@ -115,9 +115,11 @@ Use `storetest.RunStoreConformance` for new store implementations.
 ## Workflow Query Store
 
 `WorkflowQueryStore` is an optional store extension for host-owned operational
-views. `ListWorkflows` accepts an optional `Status` filter and optional `Limit`.
-Results are ordered by `CreatedAt` and then workflow id, and returned workflows
-must preserve the same copy semantics as `Get`.
+views. `ListWorkflows` accepts optional `Status` and `MetadataEquals` filters,
+optional `Order` (`asc` by default or `desc`), and optional `Limit`. Results are
+ordered by `CreatedAt` and then workflow id, with both fields reversed for
+descending order. Returned workflows must preserve the same copy semantics as
+`Get`.
 
 Use `storetest.RunWorkflowQueryStoreConformance` for implementations that expose
 workflow listing.

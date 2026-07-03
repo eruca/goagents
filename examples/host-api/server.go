@@ -1436,6 +1436,20 @@ func parseWorkflowQuery(r *http.Request) (workflowkit.WorkflowQuery, error) {
 		}
 		query.Status = status
 	}
+	if rawRunMode := strings.TrimSpace(values.Get("run_mode")); rawRunMode != "" {
+		runMode, ok := parseRunMode(rawRunMode)
+		if !ok {
+			return workflowkit.WorkflowQuery{}, fmt.Errorf("unsupported run_mode %q", rawRunMode)
+		}
+		query.MetadataEquals = map[string]string{"run_mode": string(runMode)}
+	}
+	if rawOrder := strings.TrimSpace(values.Get("order")); rawOrder != "" {
+		order := workflowkit.WorkflowOrder(rawOrder)
+		if !order.IsValid() || order == "" {
+			return workflowkit.WorkflowQuery{}, fmt.Errorf("unsupported workflow order %q", rawOrder)
+		}
+		query.Order = order
+	}
 	if rawLimit := strings.TrimSpace(values.Get("limit")); rawLimit != "" {
 		limit, err := strconv.Atoi(rawLimit)
 		if err != nil || limit <= 0 {

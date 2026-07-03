@@ -360,6 +360,55 @@ func TestHostAPIListsWorkflowsByStatusAndLimit(t *testing.T) {
 	}
 }
 
+func TestHostAPIListsWorkflowsByRunModeAndDescendingOrder(t *testing.T) {
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+	base := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+	for _, run := range []workflowkit.WorkflowRun{
+		{
+			ID:        "wf-list-sync-new",
+			Status:    workflowkit.StatusPending,
+			InputRef:  "artifact:wf-list-sync-new:input",
+			CreatedAt: base.Add(3 * time.Minute),
+			Metadata: map[string]any{
+				"run_mode": string(RunModeSync),
+			},
+		},
+		{
+			ID:        "wf-list-queued-old",
+			Status:    workflowkit.StatusPending,
+			InputRef:  "artifact:wf-list-queued-old:input",
+			CreatedAt: base,
+			Metadata: map[string]any{
+				"run_mode": string(RunModeQueued),
+			},
+		},
+		{
+			ID:        "wf-list-queued-new",
+			Status:    workflowkit.StatusPending,
+			InputRef:  "artifact:wf-list-queued-new:input",
+			CreatedAt: base.Add(2 * time.Minute),
+			Metadata: map[string]any{
+				"run_mode": string(RunModeQueued),
+			},
+		},
+	} {
+		if err := server.workflows.Save(context.Background(), run); err != nil {
+			t.Fatalf("Save(%s) returned error: %v", run.ID, err)
+		}
+	}
+
+	listed := doJSON[workflowListResponse](t, server.Handler(), http.MethodGet, "/workflows?status=pending&run_mode=queued&order=desc&limit=1", nil)
+	if len(listed.Workflows) != 1 {
+		t.Fatalf("listed workflows = %+v, want one result", listed.Workflows)
+	}
+	if listed.Workflows[0].ID != "wf-list-queued-new" || listed.Workflows[0].RunMode != string(RunModeQueued) {
+		t.Fatalf("listed workflow = %+v, want newest queued workflow", listed.Workflows[0])
+	}
+}
+
 func TestHostAPIReturnsWorkflowLLMRouteAudit(t *testing.T) {
 	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
 	if err != nil {
