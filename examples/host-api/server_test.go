@@ -171,6 +171,65 @@ func TestHostAPIQueuedWorkerRecoversPendingWorkflowAfterReopen(t *testing.T) {
 	}
 }
 
+func TestHostAPIQueuedWorkerStatusTracksCompletedRun(t *testing.T) {
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	server.StartQueuedWorker(ctx)
+
+	queued := doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]string{
+		"id":       "wf-worker-status",
+		"input":    "Review worker observability.",
+		"run_mode": "queued",
+	})
+	if queued.Status != string(workflowkit.StatusPending) {
+		t.Fatalf("queued response = %+v, want pending", queued)
+	}
+	waitForWorkflowStatus(t, server.Handler(), "wf-worker-status", workflowkit.StatusWaitingApproval)
+	waitForWorkflowLeaseCleared(t, server.workflows, "wf-worker-status")
+
+	status := waitForQueuedWorkerStatus(t, server.Handler(), func(status queuedWorkerStatusResponse) bool {
+		return status.Started &&
+			status.WorkerID == queuedWorkerID &&
+			status.Claimed >= 1 &&
+			status.Completed >= 1 &&
+			status.LastWorkflowID == "wf-worker-status"
+	})
+	if status.Errors != 0 || status.LastError != "" {
+		t.Fatalf("worker status = %+v, want no errors", status)
+	}
+}
+
+func TestHostAPIQueuedWorkerStatusTracksRunError(t *testing.T) {
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+	if err := server.workflows.Save(context.Background(), workflowkit.WorkflowRun{
+		ID:       "wf-worker-error",
+		Status:   workflowkit.StatusPending,
+		InputRef: "artifact:wf-worker-error:missing",
+	}); err != nil {
+		t.Fatalf("Save pending workflow returned error: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	server.StartQueuedWorker(ctx)
+
+	waitForWorkflowStatus(t, server.Handler(), "wf-worker-error", workflowkit.StatusFailed)
+	status := waitForQueuedWorkerStatus(t, server.Handler(), func(status queuedWorkerStatusResponse) bool {
+		return status.Errors >= 1 &&
+			status.LastError != "" &&
+			status.LastErrorWorkflowID == "wf-worker-error"
+	})
+	if status.Completed != 0 {
+		t.Fatalf("worker status = %+v, want no completed runs after workflow error", status)
+	}
+}
+
 func TestHostAPIReturnsWorkflowLLMRouteAudit(t *testing.T) {
 	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
 	if err != nil {
@@ -881,6 +940,34 @@ func waitForWorkflowLeaseCleared(t *testing.T, store workflowkit.Store, id strin
 	}
 	t.Fatalf("workflow lease = %+v, want cleared lease", run)
 	return workflowkit.WorkflowRun{}
+}
+
+type queuedWorkerStatusResponse struct {
+	Started             bool   `json:"started"`
+	WorkerID            string `json:"worker_id"`
+	ClaimAttempts       int    `json:"claim_attempts"`
+	Claimed             int    `json:"claimed"`
+	Completed           int    `json:"completed"`
+	Idle                int    `json:"idle"`
+	Errors              int    `json:"errors"`
+	LastWorkflowID      string `json:"last_workflow_id,omitempty"`
+	LastError           string `json:"last_error,omitempty"`
+	LastErrorWorkflowID string `json:"last_error_workflow_id,omitempty"`
+}
+
+func waitForQueuedWorkerStatus(t *testing.T, handler http.Handler, accept func(queuedWorkerStatusResponse) bool) queuedWorkerStatusResponse {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	var last queuedWorkerStatusResponse
+	for time.Now().Before(deadline) {
+		last = doJSON[queuedWorkerStatusResponse](t, handler, http.MethodGet, "/workers/queued", nil)
+		if accept(last) {
+			return last
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("queued worker status = %+v, did not satisfy condition", last)
+	return queuedWorkerStatusResponse{}
 }
 
 func closeStoreIfPossible(t *testing.T, store any) {

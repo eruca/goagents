@@ -9,8 +9,8 @@
 2. durable queued worker 的第一步是扩展 workflow claim/lease contract，并在
    `examples/host-api` 提供最小 worker loop；当前已落地
    `workflowkit.QueueStore.ClaimRunnable`、`QueueLeaseStore.ExtendLease` /
-   `ReleaseLease` 和 `Server.StartQueuedWorker`，但 heartbeat loop、worker crash
-   supervision 和多 worker 调度仍未实现。
+   `ReleaseLease`、`Server.StartQueuedWorker` 和进程内 worker 状态 API，但
+   heartbeat loop、worker crash supervision 和多 worker 调度仍未实现。
 
 因此当前阶段把 `queued` 从“明确不支持”推进为“同进程后台执行 proof + 明确 lease
 生命周期 + 同 runtime home 的 pending/expired lease 恢复”。跨进程 worker heartbeat、
@@ -24,11 +24,13 @@ stuck recovery 和多 worker 调度仍是后续设计。
 - host-api 启动 worker loop 后，可恢复同一 runtime home 中已有的 pending/expired lease workflow。
 - `GET /workflows/{id}` 可观察 queued workflow 的状态变化。
 - `GET /workflows/{id}/llm-routes` 和 `GET /agent-runs/{id}` 在后台执行完成后可读取审计。
+- `GET /workers/queued` 可观察进程内 worker claim、completion、idle 和 error 计数。
 - 不把该 proof 抽进 `workflowkit` core。
 
 ## 非目标
 
 - 不实现 durable queue。
+- 不实现 durable worker metrics。
 - 不实现 worker heartbeat。
 - 不实现多 worker 并发调度。
 - 不新增 workflow list API。
@@ -136,6 +138,23 @@ run_mode queued:
 `run_mode: "sync"` 作为兼容 fallback。后续如果需要准确保留 submitted run mode，应在
 workflow metadata 或正式 DTO 中增加 `run_mode`。
 
+`GET /workers/queued` 返回进程内 worker 诊断：
+
+```json
+{
+  "started": true,
+  "worker_id": "host-api-inprocess-worker",
+  "claim_attempts": 3,
+  "claimed": 1,
+  "completed": 1,
+  "idle": 2,
+  "errors": 0,
+  "last_workflow_id": "wf-queued-1"
+}
+```
+
+这些计数重启后清零，只用于本地诊断，不是持久 metrics contract。
+
 ## 后续 Durable Worker Contract
 
 真正 durable queued worker 仍需要更完整的 host-side worker contract，例如：
@@ -160,7 +179,8 @@ type WorkerLoop interface {
 
 `LeaseOwner` 和 `LeaseUntil` 已进入 `WorkflowRun`、memory store、SQLite store 和
 store conformance，并已具备 claim/extend/release 语义。`examples/host-api`
-已提供最小 `StartQueuedWorker` loop。其余字段仍待后续 durable worker 设计。
+已提供最小 `StartQueuedWorker` loop 和进程内 worker 状态 API。其余字段仍待后续
+durable worker 设计。
 
 ## 测试计划
 
@@ -171,6 +191,7 @@ store conformance，并已具备 claim/extend/release 语义。`examples/host-ap
 - queued workflow completion exposes `agent_run_id` and `output_ref`。
 - queued worker claims through `QueueLeaseStore` and clears the lease after execution stops。
 - reopening with the same runtime home and starting the worker loop recovers pending workflow。
+- `GET /workers/queued` exposes process-local worker counters and latest execution error。
 - after queued execution reaches waiting approval, `POST /workflows/{id}/approve` succeeds。
 - `GET /workflows/{id}/llm-routes` returns route audit after background execution。
 
@@ -183,4 +204,5 @@ store conformance，并已具备 claim/extend/release 语义。`examples/host-ap
 
 - `examples/host-api` 支持 in-process queued proof。
 - README、OpenAPI、`docs/host-api-contract.md` 明确 queued 当前是 in-process worker proof。
+- worker 状态 API 明确是进程内诊断，不是 durable metrics。
 - `./scripts/verify-all.sh` 通过。

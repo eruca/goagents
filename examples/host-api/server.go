@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/eruca/artifactkit"
@@ -41,6 +42,7 @@ type Server struct {
 	llmHome   string
 	models    []llmkit.Candidate
 	providers map[string]goagentadapter.ProviderClient
+	worker    queuedWorkerStatus
 }
 
 type createWorkflowRequest struct {
@@ -108,6 +110,99 @@ type modelsResponse struct {
 	Models []modelResponse               `json:"models"`
 	Health llmkit.ProviderHealthSnapshot `json:"health"`
 	Stats  []modelStatsResponse          `json:"stats,omitempty"`
+}
+
+type queuedWorkerResponse struct {
+	Started             bool   `json:"started"`
+	WorkerID            string `json:"worker_id"`
+	ClaimAttempts       int    `json:"claim_attempts"`
+	Claimed             int    `json:"claimed"`
+	Completed           int    `json:"completed"`
+	Idle                int    `json:"idle"`
+	Errors              int    `json:"errors"`
+	LastWorkflowID      string `json:"last_workflow_id,omitempty"`
+	LastError           string `json:"last_error,omitempty"`
+	LastErrorWorkflowID string `json:"last_error_workflow_id,omitempty"`
+}
+
+type queuedWorkerStatus struct {
+	mu                  sync.RWMutex
+	started             bool
+	workerID            string
+	claimAttempts       int
+	claimed             int
+	completed           int
+	idle                int
+	errors              int
+	lastWorkflowID      string
+	lastError           string
+	lastErrorWorkflowID string
+}
+
+func (s *queuedWorkerStatus) markStarted(workerID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.started = true
+	s.workerID = workerID
+}
+
+func (s *queuedWorkerStatus) recordClaimAttempt() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.claimAttempts++
+}
+
+func (s *queuedWorkerStatus) recordClaimed(workflowID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.claimed++
+	s.lastWorkflowID = workflowID
+}
+
+func (s *queuedWorkerStatus) recordCompleted(workflowID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.completed++
+	s.lastWorkflowID = workflowID
+}
+
+func (s *queuedWorkerStatus) recordIdle() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.idle++
+}
+
+func (s *queuedWorkerStatus) recordError(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.errors++
+	s.lastError = err.Error()
+}
+
+func (s *queuedWorkerStatus) recordWorkflowError(workflowID string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.errors++
+	s.lastWorkflowID = workflowID
+	s.lastErrorWorkflowID = workflowID
+	s.lastError = err.Error()
+}
+
+func (s *queuedWorkerStatus) snapshot() queuedWorkerResponse {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return queuedWorkerResponse{
+		Started:             s.started,
+		WorkerID:            s.workerID,
+		ClaimAttempts:       s.claimAttempts,
+		Claimed:             s.claimed,
+		Completed:           s.completed,
+		Idle:                s.idle,
+		Errors:              s.errors,
+		LastWorkflowID:      s.lastWorkflowID,
+		LastError:           s.lastError,
+		LastErrorWorkflowID: s.lastErrorWorkflowID,
+	}
 }
 
 type llmRoutesResponse struct {
@@ -274,6 +369,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /workflows/{id}/llm-routes", s.handleGetWorkflowLLMRoutes)
 	mux.HandleFunc("GET /agent-runs/{id}", s.handleGetAgentRun)
 	mux.HandleFunc("GET /llmkit/models", s.handleModels)
+	mux.HandleFunc("GET /workers/queued", s.handleQueuedWorker)
 	return mux
 }
 
@@ -339,6 +435,7 @@ func (s *Server) runQueuedWorkflow(run workflowkit.WorkflowRun) {
 
 // StartQueuedWorker starts the host-owned in-process worker loop for pending workflows.
 func (s *Server) StartQueuedWorker(ctx context.Context) {
+	s.worker.markStarted(queuedWorkerID)
 	go s.runQueuedWorkerLoop(ctx)
 }
 
@@ -365,14 +462,26 @@ func (s *Server) runOneQueuedWorkflow(ctx context.Context) (bool, error) {
 	if s.queue == nil {
 		return false, nil
 	}
+	s.worker.recordClaimAttempt()
 	claimed, err := s.queue.ClaimRunnable(ctx, queuedWorkerID, queuedLeaseDuration)
 	if err != nil {
+		if errors.Is(err, workflowkit.ErrNoRunnableWorkflow) {
+			s.worker.recordIdle()
+		} else {
+			s.worker.recordError(err)
+		}
 		return false, err
 	}
+	s.worker.recordClaimed(claimed.ID)
 	defer func() {
 		_, _ = s.queue.ReleaseLease(context.Background(), claimed.ID, queuedWorkerID)
 	}()
 	_, err = s.executor.Run(ctx, claimed)
+	if err != nil {
+		s.worker.recordWorkflowError(claimed.ID, err)
+		return true, err
+	}
+	s.worker.recordCompleted(claimed.ID)
 	return true, err
 }
 
@@ -476,6 +585,10 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		Health: s.health.Snapshot(),
 		Stats:  modelStatsToResponse(stats),
 	})
+}
+
+func (s *Server) handleQueuedWorker(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.worker.snapshot())
 }
 
 func (s *Server) recordBusinessOutcome(ctx context.Context, workflowID string) error {

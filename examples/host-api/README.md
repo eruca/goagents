@@ -84,6 +84,7 @@ Endpoints:
 - `GET /workflows/{id}/llm-routes`
 - `GET /agent-runs/{id}`
 - `GET /llmkit/models`
+- `GET /workers/queued`
 
 `GET /workflows/{id}/llm-routes` returns the sanitized llmkit routing audit for
 that workflow: effective task profile, selected model/account aliases, provider,
@@ -100,6 +101,11 @@ worker loop on boot, so restarting with the same `HOST_RUNTIME_HOME` can recover
 pending or expired-lease workflows. It is still not a distributed worker model;
 heartbeat loops, worker crash supervision, and multi-worker scheduling are
 intentionally not implemented.
+
+`GET /workers/queued` returns in-process worker observability: whether the
+worker loop has been started, the worker id, claim/completion/idle/error counts,
+the last workflow id, and the latest error. These counters are process-local
+diagnostics, not durable metrics.
 
 `POST /workflows` also accepts optional `task_profile_preset` and
 `task_profile` so a host can describe the task before routing:

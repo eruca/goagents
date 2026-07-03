@@ -12,6 +12,7 @@ tags:
   - name: workflows
   - name: agent-runs
   - name: llmkit
+  - name: workers
 paths:
   /workflows:
     post:
@@ -162,6 +163,19 @@ paths:
                 $ref: '#/components/schemas/ModelsResponse'
         '500':
           $ref: '#/components/responses/ErrorResponse'
+  /workers/queued:
+    get:
+      tags:
+        - workers
+      summary: Get in-process queued worker status
+      operationId: getQueuedWorkerStatus
+      responses:
+        '200':
+          description: Process-local queued worker counters and latest error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueuedWorkerStatus'
 components:
   parameters:
     WorkflowID:
@@ -384,6 +398,38 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ModelStats'
+    QueuedWorkerStatus:
+      type: object
+      additionalProperties: false
+      required:
+        - started
+        - worker_id
+        - claim_attempts
+        - claimed
+        - completed
+        - idle
+        - errors
+      properties:
+        started:
+          type: boolean
+        worker_id:
+          type: string
+        claim_attempts:
+          type: integer
+        claimed:
+          type: integer
+        completed:
+          type: integer
+        idle:
+          type: integer
+        errors:
+          type: integer
+        last_workflow_id:
+          type: string
+        last_error:
+          type: string
+        last_error_workflow_id:
+          type: string
     Model:
       type: object
       additionalProperties: false

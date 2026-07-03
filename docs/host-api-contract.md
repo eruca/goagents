@@ -331,10 +331,34 @@ Response:
 Host-api also refreshes stats before route decisions, so long-running processes
 can use newly written outcomes.
 
+## GET /workers/queued
+
+Returns process-local observability for the in-process queued worker loop.
+
+Response:
+
+```json
+{
+  "started": true,
+  "worker_id": "host-api-inprocess-worker",
+  "claim_attempts": 3,
+  "claimed": 1,
+  "completed": 1,
+  "idle": 2,
+  "errors": 0,
+  "last_workflow_id": "wf-review-1"
+}
+```
+
+`last_error` and `last_error_workflow_id` are present only after a claim or
+workflow execution error. These counters reset when the host process restarts;
+they are diagnostics, not durable metrics.
+
 ## Current Non-Goals
 
 - Authentication and multi-tenant authorization.
-- Queued worker execution.
+- Distributed queued worker scheduling.
+- Durable worker metrics.
 - Server-sent events or live workflow updates.
 - Distributed provider health.
 - Project-wide or account-wide cost budgets.
