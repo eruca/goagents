@@ -17,6 +17,8 @@ Environment:
   temporary directory.
 - `LLMKIT_HOME`: llmkit config and audit directory. If unset, it defaults to
   `$HOST_RUNTIME_HOME/.llmkit`.
+- `HOST_API_QUEUED_LEASE_DURATION`: optional Go duration for the in-process
+  queued worker lease. Defaults to `1m`.
 
 Runtime files:
 
@@ -93,10 +95,10 @@ Fields:
 - `run_mode`: optional. `sync` is supported and default. `queued` is an
   in-process proof that saves a pending workflow and returns immediately while a
   background worker loop claims a `workflowkit.QueueLeaseStore` lease, advances
-  it, and releases the lease. Restarting the host with the same runtime home can
-  recover pending or expired-lease workflows. `queued` does not provide
-  heartbeat loops, worker crash supervision, or multi-worker scheduling
-  semantics.
+  it, extends the lease while the workflow is running, and releases the lease.
+  Restarting the host with the same runtime home can recover pending or
+  expired-lease workflows. `queued` does not provide worker crash supervision or
+  multi-worker scheduling semantics.
 - `task_profile_preset`: optional. Supported values are `simple_local`,
   `balanced`, `high_success`, and `local_only`.
 - `task_profile`: optional host patch. Preset values are applied first. Missing
@@ -378,13 +380,17 @@ Response:
   "completed": 1,
   "idle": 2,
   "errors": 0,
+  "lease_extensions": 4,
+  "heartbeat_errors": 0,
+  "last_heartbeat_workflow_id": "wf-review-1",
   "last_workflow_id": "wf-review-1"
 }
 ```
 
 `last_error` and `last_error_workflow_id` are present only after a claim or
-workflow execution error. These counters reset when the host process restarts;
-they are diagnostics, not durable metrics.
+workflow execution error. `last_heartbeat_error` is present only after a lease
+extension error. These counters reset when the host process restarts; they are
+diagnostics, not durable metrics.
 
 ## Current Non-Goals
 

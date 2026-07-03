@@ -45,6 +45,7 @@ type Server struct {
 	models    []llmkit.Candidate
 	providers map[string]goagentadapter.ProviderClient
 	worker    queuedWorkerStatus
+	workerCfg queuedWorkerConfig
 }
 
 type createWorkflowRequest struct {
@@ -98,10 +99,16 @@ const (
 )
 
 const (
-	queuedWorkerID      = "host-api-inprocess-worker"
-	queuedLeaseDuration = time.Minute
-	queuedPollInterval  = 100 * time.Millisecond
+	queuedWorkerID             = "host-api-inprocess-worker"
+	defaultQueuedLeaseDuration = time.Minute
+	queuedLeaseDurationEnv     = "HOST_API_QUEUED_LEASE_DURATION"
+	queuedPollInterval         = 100 * time.Millisecond
+	minQueuedHeartbeatInterval = time.Millisecond
 )
+
+type queuedWorkerConfig struct {
+	leaseDuration time.Duration
+}
 
 type agentRunResponse struct {
 	RunID      string                 `json:"run_id"`
@@ -119,30 +126,38 @@ type modelsResponse struct {
 }
 
 type queuedWorkerResponse struct {
-	Started             bool   `json:"started"`
-	WorkerID            string `json:"worker_id"`
-	ClaimAttempts       int    `json:"claim_attempts"`
-	Claimed             int    `json:"claimed"`
-	Completed           int    `json:"completed"`
-	Idle                int    `json:"idle"`
-	Errors              int    `json:"errors"`
-	LastWorkflowID      string `json:"last_workflow_id,omitempty"`
-	LastError           string `json:"last_error,omitempty"`
-	LastErrorWorkflowID string `json:"last_error_workflow_id,omitempty"`
+	Started                 bool   `json:"started"`
+	WorkerID                string `json:"worker_id"`
+	ClaimAttempts           int    `json:"claim_attempts"`
+	Claimed                 int    `json:"claimed"`
+	Completed               int    `json:"completed"`
+	Idle                    int    `json:"idle"`
+	Errors                  int    `json:"errors"`
+	LeaseExtensions         int    `json:"lease_extensions"`
+	HeartbeatErrors         int    `json:"heartbeat_errors"`
+	LastWorkflowID          string `json:"last_workflow_id,omitempty"`
+	LastError               string `json:"last_error,omitempty"`
+	LastErrorWorkflowID     string `json:"last_error_workflow_id,omitempty"`
+	LastHeartbeatWorkflowID string `json:"last_heartbeat_workflow_id,omitempty"`
+	LastHeartbeatError      string `json:"last_heartbeat_error,omitempty"`
 }
 
 type queuedWorkerStatus struct {
-	mu                  sync.RWMutex
-	started             bool
-	workerID            string
-	claimAttempts       int
-	claimed             int
-	completed           int
-	idle                int
-	errors              int
-	lastWorkflowID      string
-	lastError           string
-	lastErrorWorkflowID string
+	mu                      sync.RWMutex
+	started                 bool
+	workerID                string
+	claimAttempts           int
+	claimed                 int
+	completed               int
+	idle                    int
+	errors                  int
+	leaseExtensions         int
+	heartbeatErrors         int
+	lastWorkflowID          string
+	lastError               string
+	lastErrorWorkflowID     string
+	lastHeartbeatWorkflowID string
+	lastHeartbeatError      string
 }
 
 func (s *queuedWorkerStatus) markStarted(workerID string) {
@@ -194,20 +209,40 @@ func (s *queuedWorkerStatus) recordWorkflowError(workflowID string, err error) {
 	s.lastError = err.Error()
 }
 
+func (s *queuedWorkerStatus) recordLeaseExtended(workflowID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.leaseExtensions++
+	s.lastHeartbeatWorkflowID = workflowID
+	s.lastHeartbeatError = ""
+}
+
+func (s *queuedWorkerStatus) recordHeartbeatError(workflowID string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.heartbeatErrors++
+	s.lastHeartbeatWorkflowID = workflowID
+	s.lastHeartbeatError = err.Error()
+}
+
 func (s *queuedWorkerStatus) snapshot() queuedWorkerResponse {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return queuedWorkerResponse{
-		Started:             s.started,
-		WorkerID:            s.workerID,
-		ClaimAttempts:       s.claimAttempts,
-		Claimed:             s.claimed,
-		Completed:           s.completed,
-		Idle:                s.idle,
-		Errors:              s.errors,
-		LastWorkflowID:      s.lastWorkflowID,
-		LastError:           s.lastError,
-		LastErrorWorkflowID: s.lastErrorWorkflowID,
+		Started:                 s.started,
+		WorkerID:                s.workerID,
+		ClaimAttempts:           s.claimAttempts,
+		Claimed:                 s.claimed,
+		Completed:               s.completed,
+		Idle:                    s.idle,
+		Errors:                  s.errors,
+		LeaseExtensions:         s.leaseExtensions,
+		HeartbeatErrors:         s.heartbeatErrors,
+		LastWorkflowID:          s.lastWorkflowID,
+		LastError:               s.lastError,
+		LastErrorWorkflowID:     s.lastErrorWorkflowID,
+		LastHeartbeatWorkflowID: s.lastHeartbeatWorkflowID,
+		LastHeartbeatError:      s.lastHeartbeatError,
 	}
 }
 
@@ -305,6 +340,10 @@ func NewServer(config Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	workerCfg, err := loadQueuedWorkerConfig(os.Getenv)
+	if err != nil {
+		return nil, err
+	}
 	models, providers, _, err := loadLLMKitComposition(resolved.LLMKitHome)
 	if err != nil {
 		return nil, err
@@ -332,6 +371,7 @@ func NewServer(config Config) (*Server, error) {
 		llmHome:   resolved.LLMKitHome,
 		models:    models,
 		providers: providers,
+		workerCfg: workerCfg,
 	}
 	server.executor = workflowkit.NewExecutor(workflows, []workflowkit.Step{
 		ingestStep{artifacts: artifacts},
@@ -366,6 +406,38 @@ func resolveRuntimeConfig(config Config) (Config, error) {
 		config.LLMKitHome = filepath.Join(runtimeHome, ".llmkit")
 	}
 	return config, nil
+}
+
+func loadQueuedWorkerConfig(getenv func(string) string) (queuedWorkerConfig, error) {
+	config := queuedWorkerConfig{leaseDuration: defaultQueuedLeaseDuration}
+	rawLease := strings.TrimSpace(getenv(queuedLeaseDurationEnv))
+	if rawLease == "" {
+		return config, nil
+	}
+	lease, err := time.ParseDuration(rawLease)
+	if err != nil {
+		return queuedWorkerConfig{}, fmt.Errorf("%s must be a Go duration such as 1m or 500ms: %w", queuedLeaseDurationEnv, err)
+	}
+	if lease <= 0 {
+		return queuedWorkerConfig{}, fmt.Errorf("%s must be greater than zero", queuedLeaseDurationEnv)
+	}
+	config.leaseDuration = lease
+	return config, nil
+}
+
+func queuedHeartbeatInterval(lease time.Duration) time.Duration {
+	interval := lease / 2
+	if interval < minQueuedHeartbeatInterval {
+		return minQueuedHeartbeatInterval
+	}
+	return interval
+}
+
+func (s *Server) queuedLeaseDuration() time.Duration {
+	if s.workerCfg.leaseDuration <= 0 {
+		return defaultQueuedLeaseDuration
+	}
+	return s.workerCfg.leaseDuration
 }
 
 func (s *Server) Handler() http.Handler {
@@ -472,7 +544,7 @@ func (s *Server) runOneQueuedWorkflow(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	s.worker.recordClaimAttempt()
-	claimed, err := s.queue.ClaimRunnable(ctx, queuedWorkerID, queuedLeaseDuration)
+	claimed, err := s.queue.ClaimRunnable(ctx, queuedWorkerID, s.queuedLeaseDuration())
 	if err != nil {
 		if errors.Is(err, workflowkit.ErrNoRunnableWorkflow) {
 			s.worker.recordIdle()
@@ -482,7 +554,9 @@ func (s *Server) runOneQueuedWorkflow(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	s.worker.recordClaimed(claimed.ID)
+	stopHeartbeat := s.startQueuedLeaseHeartbeat(ctx, claimed.ID)
 	defer func() {
+		stopHeartbeat()
 		_, _ = s.queue.ReleaseLease(context.Background(), claimed.ID, queuedWorkerID)
 	}()
 	_, err = s.executor.Run(ctx, claimed)
@@ -492,6 +566,36 @@ func (s *Server) runOneQueuedWorkflow(ctx context.Context) (bool, error) {
 	}
 	s.worker.recordCompleted(claimed.ID)
 	return true, err
+}
+
+func (s *Server) startQueuedLeaseHeartbeat(ctx context.Context, workflowID string) func() {
+	heartbeatCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		leaseDuration := s.queuedLeaseDuration()
+		ticker := time.NewTicker(queuedHeartbeatInterval(leaseDuration))
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				return
+			case <-ticker.C:
+				if _, err := s.queue.ExtendLease(heartbeatCtx, workflowID, queuedWorkerID, leaseDuration); err != nil {
+					if heartbeatCtx.Err() != nil {
+						return
+					}
+					s.worker.recordHeartbeatError(workflowID, err)
+					continue
+				}
+				s.worker.recordLeaseExtended(workflowID)
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
 }
 
 func (s *Server) handleListWorkflows(w http.ResponseWriter, r *http.Request) {

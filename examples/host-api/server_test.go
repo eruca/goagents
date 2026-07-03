@@ -203,6 +203,43 @@ func TestHostAPIQueuedWorkerStatusTracksCompletedRun(t *testing.T) {
 	}
 }
 
+func TestHostAPIQueuedWorkerExtendsLeaseWhileWorkflowRuns(t *testing.T) {
+	t.Setenv("HOST_API_QUEUED_LEASE_DURATION", "40ms")
+
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+	server.executor = workflowkit.NewExecutor(server.workflows, []workflowkit.Step{
+		slowApprovalStep{delay: 500 * time.Millisecond},
+	})
+
+	queued := doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]string{
+		"id":       "wf-worker-heartbeat",
+		"input":    "Review worker heartbeat.",
+		"run_mode": "queued",
+	})
+	if queued.Status != string(workflowkit.StatusPending) {
+		t.Fatalf("queued response = %+v, want pending", queued)
+	}
+
+	claimed := waitForWorkflowLeasePresent(t, server.workflows, "wf-worker-heartbeat")
+	extended := waitForWorkflowLeaseExtendedAfter(t, server.workflows, "wf-worker-heartbeat", claimed.LeaseUntil)
+	if !extended.LeaseUntil.After(claimed.LeaseUntil) {
+		t.Fatalf("extended lease = %+v, want after %s", extended, claimed.LeaseUntil)
+	}
+
+	status := waitForQueuedWorkerStatus(t, server.Handler(), func(status queuedWorkerStatusResponse) bool {
+		return status.LeaseExtensions >= 1 && status.LastHeartbeatWorkflowID == "wf-worker-heartbeat"
+	})
+	if status.HeartbeatErrors != 0 || status.LastHeartbeatError != "" {
+		t.Fatalf("worker status = %+v, want successful heartbeat", status)
+	}
+
+	waitForWorkflowStatus(t, server.Handler(), "wf-worker-heartbeat", workflowkit.StatusWaitingApproval)
+	waitForWorkflowLeaseCleared(t, server.workflows, "wf-worker-heartbeat")
+}
+
 func TestHostAPIQueuedWorkerStatusTracksRunError(t *testing.T) {
 	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
 	if err != nil {
@@ -994,16 +1031,20 @@ func waitForWorkflowLeaseCleared(t *testing.T, store workflowkit.Store, id strin
 }
 
 type queuedWorkerStatusResponse struct {
-	Started             bool   `json:"started"`
-	WorkerID            string `json:"worker_id"`
-	ClaimAttempts       int    `json:"claim_attempts"`
-	Claimed             int    `json:"claimed"`
-	Completed           int    `json:"completed"`
-	Idle                int    `json:"idle"`
-	Errors              int    `json:"errors"`
-	LastWorkflowID      string `json:"last_workflow_id,omitempty"`
-	LastError           string `json:"last_error,omitempty"`
-	LastErrorWorkflowID string `json:"last_error_workflow_id,omitempty"`
+	Started                 bool   `json:"started"`
+	WorkerID                string `json:"worker_id"`
+	ClaimAttempts           int    `json:"claim_attempts"`
+	Claimed                 int    `json:"claimed"`
+	Completed               int    `json:"completed"`
+	Idle                    int    `json:"idle"`
+	Errors                  int    `json:"errors"`
+	LeaseExtensions         int    `json:"lease_extensions"`
+	HeartbeatErrors         int    `json:"heartbeat_errors"`
+	LastWorkflowID          string `json:"last_workflow_id,omitempty"`
+	LastError               string `json:"last_error,omitempty"`
+	LastErrorWorkflowID     string `json:"last_error_workflow_id,omitempty"`
+	LastHeartbeatWorkflowID string `json:"last_heartbeat_workflow_id,omitempty"`
+	LastHeartbeatError      string `json:"last_heartbeat_error,omitempty"`
 }
 
 func workflowResponseIDs(workflows []workflowResponse) []string {
@@ -1027,6 +1068,71 @@ func waitForQueuedWorkerStatus(t *testing.T, handler http.Handler, accept func(q
 	}
 	t.Fatalf("queued worker status = %+v, did not satisfy condition", last)
 	return queuedWorkerStatusResponse{}
+}
+
+type slowApprovalStep struct {
+	delay time.Duration
+}
+
+func (s slowApprovalStep) Name() string {
+	return "slow_approval"
+}
+
+func (s slowApprovalStep) Run(ctx context.Context, run workflowkit.WorkflowRun) (workflowkit.StepResult, error) {
+	timer := time.NewTimer(s.delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return workflowkit.StepResult{}, ctx.Err()
+	case <-timer.C:
+	}
+	return workflowkit.StepResult{
+		Status:        workflowkit.StatusWaitingApproval,
+		ApprovalRef:   "approval:" + run.ID,
+		WaitingReason: "operator approval required after slow review",
+	}, nil
+}
+
+func waitForWorkflowLeasePresent(t *testing.T, store workflowkit.Store, id string) workflowkit.WorkflowRun {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		run, err := store.Get(context.Background(), id)
+		if err != nil {
+			t.Fatalf("workflow store Get returned error: %v", err)
+		}
+		if run.LeaseOwner != "" && !run.LeaseUntil.IsZero() {
+			return run
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	run, err := store.Get(context.Background(), id)
+	if err != nil {
+		t.Fatalf("workflow store Get returned error: %v", err)
+	}
+	t.Fatalf("workflow lease = %+v, want active lease", run)
+	return workflowkit.WorkflowRun{}
+}
+
+func waitForWorkflowLeaseExtendedAfter(t *testing.T, store workflowkit.Store, id string, previous time.Time) workflowkit.WorkflowRun {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		run, err := store.Get(context.Background(), id)
+		if err != nil {
+			t.Fatalf("workflow store Get returned error: %v", err)
+		}
+		if run.LeaseOwner != "" && run.LeaseUntil.After(previous) {
+			return run
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	run, err := store.Get(context.Background(), id)
+	if err != nil {
+		t.Fatalf("workflow store Get returned error: %v", err)
+	}
+	t.Fatalf("workflow lease = %+v, want lease extended after %s", run, previous)
+	return workflowkit.WorkflowRun{}
 }
 
 func closeStoreIfPossible(t *testing.T, store any) {

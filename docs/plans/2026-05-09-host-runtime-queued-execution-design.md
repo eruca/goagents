@@ -9,12 +9,12 @@
 2. durable queued worker 的第一步是扩展 workflow claim/lease contract，并在
    `examples/host-api` 提供最小 worker loop；当前已落地
    `workflowkit.QueueStore.ClaimRunnable`、`QueueLeaseStore.ExtendLease` /
-   `ReleaseLease`、`Server.StartQueuedWorker` 和进程内 worker 状态 API，但
-   heartbeat loop、worker crash supervision 和多 worker 调度仍未实现。
+   `ReleaseLease`、`Server.StartQueuedWorker`、执行期 heartbeat loop 和进程内
+   worker 状态 API，但 worker crash supervision 和多 worker 调度仍未实现。
 
 因此当前阶段把 `queued` 从“明确不支持”推进为“同进程后台执行 proof + 明确 lease
-生命周期 + 同 runtime home 的 pending/expired lease 恢复”。跨进程 worker heartbeat、
-stuck recovery 和多 worker 调度仍是后续设计。
+生命周期 + 执行期续租 + 同 runtime home 的 pending/expired lease 恢复”。跨进程
+worker supervision、stuck recovery 和多 worker 调度仍是后续设计。
 
 ## 目标
 
@@ -32,7 +32,7 @@ stuck recovery 和多 worker 调度仍是后续设计。
 
 - 不实现 durable queue。
 - 不实现 durable worker metrics。
-- 不实现 worker heartbeat。
+- 不实现跨进程 worker crash supervision。
 - 不实现多 worker 并发调度。
 - 不把 background execution 放进 `goagent` core。
 
@@ -164,6 +164,9 @@ run_mode queued:
   "completed": 1,
   "idle": 2,
   "errors": 0,
+  "lease_extensions": 4,
+  "heartbeat_errors": 0,
+  "last_heartbeat_workflow_id": "wf-queued-1",
   "last_workflow_id": "wf-queued-1"
 }
 ```
@@ -206,6 +209,7 @@ durable worker 设计。
 - `GET /workflows` filters by status and preserves submitted `run_mode`。
 - queued workflow completion exposes `agent_run_id` and `output_ref`。
 - queued worker claims through `QueueLeaseStore` and clears the lease after execution stops。
+- queued worker extends the lease while a workflow is still running。
 - reopening with the same runtime home and starting the worker loop recovers pending workflow。
 - `GET /workers/queued` exposes process-local worker counters and latest execution error。
 - after queued execution reaches waiting approval, `POST /workflows/{id}/approve` succeeds。

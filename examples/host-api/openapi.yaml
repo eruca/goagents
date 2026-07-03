@@ -451,6 +451,8 @@ components:
         - completed
         - idle
         - errors
+        - lease_extensions
+        - heartbeat_errors
       properties:
         started:
           type: boolean
@@ -466,11 +468,21 @@ components:
           type: integer
         errors:
           type: integer
+        lease_extensions:
+          type: integer
+          description: Number of successful in-process lease heartbeat extensions.
+        heartbeat_errors:
+          type: integer
+          description: Number of in-process lease heartbeat extension errors.
         last_workflow_id:
           type: string
         last_error:
           type: string
         last_error_workflow_id:
+          type: string
+        last_heartbeat_workflow_id:
+          type: string
+        last_heartbeat_error:
           type: string
     Model:
       type: object
@@ -599,9 +611,9 @@ components:
       description: >
         sync runs during the HTTP request. queued is an in-process proof that
         returns a pending workflow, claims a workflow lease, advances it in a
-        background worker loop, and releases the lease; restarting with the same
-        runtime home can recover pending or expired-lease workflows, but queued
-        is not a distributed worker model.
+        background worker loop, extends the lease while running, and releases
+        the lease; restarting with the same runtime home can recover pending or
+        expired-lease workflows, but queued is not a distributed worker model.
     TaskProfilePreset:
       type: string
       enum:

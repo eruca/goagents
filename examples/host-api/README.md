@@ -102,16 +102,16 @@ creation time, then workflow id.
 the workflow during the HTTP request. `queued` is an in-process proof: it writes
 the input artifact and pending workflow, returns immediately, then a background
 worker loop claims a `workflowkit.QueueLeaseStore` lease, advances the workflow
-until `waiting_approval` or terminal, and releases the lease. The CLI starts the
-worker loop on boot, so restarting with the same `HOST_RUNTIME_HOME` can recover
-pending or expired-lease workflows. It is still not a distributed worker model;
-heartbeat loops, worker crash supervision, and multi-worker scheduling are
-intentionally not implemented.
+until `waiting_approval` or terminal, extends the lease while the workflow is
+running, and releases the lease. The CLI starts the worker loop on boot, so
+restarting with the same `HOST_RUNTIME_HOME` can recover pending or
+expired-lease workflows. It is still not a distributed worker model; worker
+crash supervision and multi-worker scheduling are intentionally not implemented.
 
 `GET /workers/queued` returns in-process worker observability: whether the
 worker loop has been started, the worker id, claim/completion/idle/error counts,
-the last workflow id, and the latest error. These counters are process-local
-diagnostics, not durable metrics.
+lease extension and heartbeat error counts, the last workflow id, and the latest
+error. These counters are process-local diagnostics, not durable metrics.
 
 `POST /workflows` also accepts optional `task_profile_preset` and
 `task_profile` so a host can describe the task before routing:
@@ -171,4 +171,6 @@ go run .
 
 Set `HOST_API_ADDR` to choose the listen address and `LLMKIT_HOME` to choose the
 audit directory. If `LLMKIT_HOME` is unset, it defaults to
-`$HOST_RUNTIME_HOME/.llmkit`.
+`$HOST_RUNTIME_HOME/.llmkit`. Set `HOST_API_QUEUED_LEASE_DURATION` to tune the
+in-process queued worker lease duration; it accepts Go durations such as `30s`
+or `2m` and defaults to `1m`.
