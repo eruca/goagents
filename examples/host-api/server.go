@@ -106,6 +106,8 @@ const (
 	minQueuedHeartbeatInterval = time.Millisecond
 )
 
+var errWorkflowNotRequeueable = errors.New("workflow status cannot be requeued")
+
 type queuedWorkerConfig struct {
 	leaseDuration time.Duration
 }
@@ -446,6 +448,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /workflows", s.handleListWorkflows)
 	mux.HandleFunc("GET /workflows/{id}", s.handleGetWorkflow)
 	mux.HandleFunc("POST /workflows/{id}/approve", s.handleApproveWorkflow)
+	mux.HandleFunc("POST /workflows/{id}/requeue", s.handleRequeueWorkflow)
 	mux.HandleFunc("GET /workflows/{id}/llm-routes", s.handleGetWorkflowLLMRoutes)
 	mux.HandleFunc("GET /agent-runs/{id}", s.handleGetAgentRun)
 	mux.HandleFunc("GET /llmkit/models", s.handleModels)
@@ -627,6 +630,37 @@ func (s *Server) handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, workflowToResponse(run, RunModeSync))
+}
+
+func (s *Server) handleRequeueWorkflow(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	run, err := s.workflows.Update(r.Context(), id, func(run workflowkit.WorkflowRun) (workflowkit.WorkflowRun, error) {
+		if run.Status != workflowkit.StatusFailed && run.Status != workflowkit.StatusCancelled {
+			return run, errWorkflowNotRequeueable
+		}
+		run.Status = workflowkit.StatusPending
+		run.Error = ""
+		run.CurrentStep = ""
+		run.ApprovalRef = ""
+		run.WaitingReason = ""
+		run.LeaseOwner = ""
+		run.LeaseUntil = time.Time{}
+		if run.Metadata == nil {
+			run.Metadata = make(map[string]any)
+		}
+		run.Metadata["run_mode"] = string(RunModeQueued)
+		return run, nil
+	})
+	if err != nil {
+		if errors.Is(err, errWorkflowNotRequeueable) {
+			writeError(w, http.StatusBadRequest, "invalid_request", "only failed or cancelled workflows can be requeued")
+			return
+		}
+		writeWorkflowStoreError(w, err)
+		return
+	}
+	s.runQueuedWorkflow(run)
+	writeJSON(w, http.StatusAccepted, workflowToResponse(run, RunModeQueued))
 }
 
 func (s *Server) handleApproveWorkflow(w http.ResponseWriter, r *http.Request) {

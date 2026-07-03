@@ -24,6 +24,7 @@ worker supervision、stuck recovery 和多 worker 调度仍是后续设计。
 - host-api 启动 worker loop 后，可恢复同一 runtime home 中已有的 pending/expired lease workflow。
 - `GET /workflows/{id}` 可观察 queued workflow 的状态变化。
 - `GET /workflows` 可按 status 返回有界 workflow 列表，用于运营 queued worker。
+- `POST /workflows/{id}/requeue` 可由 operator 显式把 failed/cancelled workflow 放回 queued worker。
 - `GET /workflows/{id}/llm-routes` 和 `GET /agent-runs/{id}` 在后台执行完成后可读取审计。
 - `GET /workers/queued` 可观察进程内 worker claim、completion、idle 和 error 计数。
 - 不把该 proof 抽进 `workflowkit` core。
@@ -98,6 +99,14 @@ run_mode queued:
   executor.Run(ctx, claimedRun)
   worker releases QueueLeaseStore lease
   return pending workflow immediately
+
+manual requeue:
+  require current status failed or cancelled
+  update same WorkflowRun back to pending
+  preserve completed steps, attempts, and step records
+  clear terminal error, current step, waiting approval fields, and lease
+  set metadata.run_mode = "queued"
+  wake queued worker
 ```
 
 后台执行要求：
@@ -152,6 +161,20 @@ run_mode queued:
   ]
 }
 ```
+
+`POST /workflows/{id}/requeue` 返回重新 pending 的同一 workflow：
+
+```json
+{
+  "id": "wf-queued-1",
+  "status": "pending",
+  "run_mode": "queued",
+  "input_ref": "artifact:wf-queued-1:input"
+}
+```
+
+只有 `failed` / `cancelled` 可 requeue；`waiting_approval` 应继续走 approval，
+`succeeded` 不应重跑。
 
 `GET /workers/queued` 返回进程内 worker 诊断：
 
@@ -210,6 +233,7 @@ durable worker 设计。
 - queued workflow completion exposes `agent_run_id` and `output_ref`。
 - queued worker claims through `QueueLeaseStore` and clears the lease after execution stops。
 - queued worker extends the lease while a workflow is still running。
+- failed workflow can be explicitly requeued and then reaches `waiting_approval` after the missing condition is fixed。
 - reopening with the same runtime home and starting the worker loop recovers pending workflow。
 - `GET /workers/queued` exposes process-local worker counters and latest execution error。
 - after queued execution reaches waiting approval, `POST /workflows/{id}/approve` succeeds。

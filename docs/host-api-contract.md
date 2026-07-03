@@ -168,6 +168,40 @@ Response shape is the same workflow response used by `POST /workflows`.
 
 Missing workflow response: `404 not_found`.
 
+## POST /workflows/{id}/requeue
+
+Explicitly moves a failed or cancelled workflow back to the queued worker.
+
+Request body: none.
+
+Behavior:
+
+- Allowed only when the stored workflow status is `failed` or `cancelled`.
+- Updates the same workflow id back to `pending`; it does not create a new
+  workflow.
+- Clears the terminal error, current step, waiting approval fields, and any
+  stale lease.
+- Preserves completed steps, step attempts, and step records so the executor can
+  continue from unfinished work.
+- Stores `run_mode: "queued"` in workflow metadata and wakes the in-process
+  queued worker.
+
+Response status: `202 Accepted`.
+
+Response:
+
+```json
+{
+  "id": "wf-review-1",
+  "status": "pending",
+  "run_mode": "queued",
+  "input_ref": "artifact:wf-review-1:input"
+}
+```
+
+Requeueing `pending`, `running`, `waiting_approval`, or `succeeded` returns
+`400 invalid_request`. Missing workflow response: `404 not_found`.
+
 ## POST /workflows/{id}/approve
 
 Approves and finalizes a waiting workflow.

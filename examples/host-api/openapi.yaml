@@ -102,6 +102,29 @@ paths:
           $ref: '#/components/responses/ErrorResponse'
         '400':
           $ref: '#/components/responses/ErrorResponse'
+  /workflows/{id}/requeue:
+    post:
+      tags:
+        - workflows
+      summary: Requeue a failed or cancelled workflow
+      description: >
+        Explicit operator action that moves the same failed or cancelled
+        workflow back to pending queued execution. Step history is preserved and
+        no new workflow id is created.
+      operationId: requeueWorkflow
+      parameters:
+        - $ref: '#/components/parameters/WorkflowID'
+      responses:
+        '202':
+          description: Workflow was moved back to pending queued execution.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
   /workflows/{id}/approve:
     post:
       tags:

@@ -267,6 +267,54 @@ func TestHostAPIQueuedWorkerStatusTracksRunError(t *testing.T) {
 	}
 }
 
+func TestHostAPIRequeuesFailedWorkflow(t *testing.T) {
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+	inputRef := "artifact:wf-requeue-failed:input"
+	if err := server.workflows.Save(context.Background(), workflowkit.WorkflowRun{
+		ID:       "wf-requeue-failed",
+		Status:   workflowkit.StatusPending,
+		InputRef: inputRef,
+		Metadata: map[string]any{
+			"input_ref": inputRef,
+			"run_mode":  string(RunModeQueued),
+		},
+	}); err != nil {
+		t.Fatalf("Save pending workflow returned error: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	server.StartQueuedWorker(ctx)
+	failed := waitForWorkflowStatus(t, server.Handler(), "wf-requeue-failed", workflowkit.StatusFailed)
+	if failed.RunMode != string(RunModeQueued) {
+		t.Fatalf("failed workflow = %+v, want queued workflow", failed)
+	}
+	storedFailed, err := server.workflows.Get(context.Background(), "wf-requeue-failed")
+	if err != nil {
+		t.Fatalf("Get failed workflow returned error: %v", err)
+	}
+	if storedFailed.Error == "" {
+		t.Fatalf("failed workflow = %+v, want stored error", storedFailed)
+	}
+
+	if err := putTextArtifact(context.Background(), server.artifacts, inputRef, "Review requeued workflow."); err != nil {
+		t.Fatalf("put input artifact returned error: %v", err)
+	}
+	requeued := doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows/wf-requeue-failed/requeue", nil)
+	if requeued.Status != string(workflowkit.StatusPending) || requeued.RunMode != string(RunModeQueued) {
+		t.Fatalf("requeue response = %+v, want queued pending workflow", requeued)
+	}
+
+	loaded := waitForWorkflowStatus(t, server.Handler(), "wf-requeue-failed", workflowkit.StatusWaitingApproval)
+	if loaded.AgentRunID == "" || loaded.OutputRef == "" || loaded.ApprovalRef == "" {
+		t.Fatalf("requeued workflow = %+v, want agent refs after worker retry", loaded)
+	}
+	waitForWorkflowLeaseCleared(t, server.workflows, "wf-requeue-failed")
+}
+
 func TestHostAPIListsWorkflowsByStatusAndLimit(t *testing.T) {
 	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
 	if err != nil {

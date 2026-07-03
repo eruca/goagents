@@ -81,6 +81,7 @@ Endpoints:
 - `POST /workflows`
 - `GET /workflows`
 - `GET /workflows/{id}`
+- `POST /workflows/{id}/requeue`
 - `POST /workflows/{id}/approve`
 - `GET /workflows/{id}/llm-routes`
 - `GET /agent-runs/{id}`
@@ -107,6 +108,11 @@ running, and releases the lease. The CLI starts the worker loop on boot, so
 restarting with the same `HOST_RUNTIME_HOME` can recover pending or
 expired-lease workflows. It is still not a distributed worker model; worker
 crash supervision and multi-worker scheduling are intentionally not implemented.
+
+`POST /workflows/{id}/requeue` is an explicit operator action for failed or
+cancelled workflows. It moves the existing workflow back to `pending`, preserves
+step history, records `run_mode: "queued"`, and lets the queued worker retry the
+unfinished work. It does not create a new workflow id.
 
 `GET /workers/queued` returns in-process worker observability: whether the
 worker loop has been started, the worker id, claim/completion/idle/error counts,
