@@ -84,7 +84,7 @@ Operational blockers before an actual public tag:
 
 These are documented and do not block `v0.1.0`:
 
-- SQLite schema compatibility is limited to `SchemaVersion = 1` until migration
+- SQLite schema compatibility is limited to `SchemaVersion = 2` until migration
   helpers are introduced.
 - Retry is process-local and immediate; it is not a delayed job scheduler.
 - `StepRecords` stores refs and bounded metadata, not raw prompts, tool inputs,

@@ -19,6 +19,16 @@ type Store interface {
 	Update(ctx context.Context, id string, mutate func(WorkflowRun) (WorkflowRun, error)) (WorkflowRun, error)
 }
 
+type WorkflowQuery struct {
+	Status Status
+	Limit  int
+}
+
+type WorkflowQueryStore interface {
+	Store
+	ListWorkflows(ctx context.Context, query WorkflowQuery) ([]WorkflowRun, error)
+}
+
 type QueueStore interface {
 	Store
 	ClaimRunnable(ctx context.Context, workerID string, lease time.Duration) (WorkflowRun, error)
@@ -99,6 +109,38 @@ func (s *MemoryStore) Update(ctx context.Context, id string, mutate func(Workflo
 	updated.UpdatedAt = s.now()
 	s.runs[id] = cloneRun(updated)
 	return cloneRun(updated), nil
+}
+
+func (s *MemoryStore) ListWorkflows(ctx context.Context, query WorkflowQuery) ([]WorkflowRun, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	if query.Status != "" && !query.Status.IsValid() {
+		return nil, fmt.Errorf("invalid workflow status: %s", query.Status)
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	runs := make([]WorkflowRun, 0, len(s.runs))
+	for _, run := range s.runs {
+		if query.Status != "" && run.Status != query.Status {
+			continue
+		}
+		runs = append(runs, cloneRun(run))
+	}
+	sort.Slice(runs, func(i, j int) bool {
+		if !runs[i].CreatedAt.Equal(runs[j].CreatedAt) {
+			return runs[i].CreatedAt.Before(runs[j].CreatedAt)
+		}
+		return runs[i].ID < runs[j].ID
+	})
+	if query.Limit > 0 && len(runs) > query.Limit {
+		runs = runs[:query.Limit]
+	}
+	return runs, nil
 }
 
 func (s *MemoryStore) ClaimRunnable(ctx context.Context, workerID string, lease time.Duration) (WorkflowRun, error) {

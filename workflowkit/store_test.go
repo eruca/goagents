@@ -18,3 +18,9 @@ func TestMemoryQueueLeaseStoreConformance(t *testing.T) {
 		return workflowkit.NewMemoryStore()
 	})
 }
+
+func TestMemoryWorkflowQueryStoreConformance(t *testing.T) {
+	storetest.RunWorkflowQueryStoreConformance(t, func(t *testing.T) workflowkit.Store {
+		return workflowkit.NewMemoryStore()
+	})
+}

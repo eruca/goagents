@@ -85,8 +85,8 @@ Also run adjacent module checks when this workspace is the release source:
 The intended stable API surface is listed in `README.md` and
 `docs/contracts.md`.
 
-`sqlitestore` currently records `SchemaVersion = 1`. Until versioned migration
-helpers are added, treat SQLite schema compatibility as limited to this first
+`sqlitestore` currently records `SchemaVersion = 2`. Until versioned migration
+helpers are added, treat SQLite schema compatibility as limited to the current
 schema. Future releases that change schema shape must bump the version and add
 explicit migration tests.
 

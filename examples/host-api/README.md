@@ -79,6 +79,7 @@ long-running process visible without waiting for restart.
 Endpoints:
 
 - `POST /workflows`
+- `GET /workflows`
 - `GET /workflows/{id}`
 - `POST /workflows/{id}/approve`
 - `GET /workflows/{id}/llm-routes`
@@ -91,6 +92,11 @@ that workflow: effective task profile, selected model/account aliases, provider,
 reason, score breakdown, candidate aliases, full candidate-level scores or
 filter reasons, and outcome metadata such as success, latency, tokens, and
 estimated cents. It does not return prompts, responses, headers, or API keys.
+
+`GET /workflows` returns a bounded operational list. It accepts optional
+`status` and `limit` query parameters, for example
+`GET /workflows?status=pending&limit=50`. Results are ordered by workflow
+creation time, then workflow id.
 
 `POST /workflows` accepts optional `run_mode`. `sync` is the default and runs
 the workflow during the HTTP request. `queued` is an in-process proof: it writes

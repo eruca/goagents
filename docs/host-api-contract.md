@@ -124,6 +124,38 @@ Response:
 }
 ```
 
+For queued submissions, `run_mode` remains `queued` in later `GET` and approval
+responses because the submitted mode is stored in workflow metadata.
+
+## GET /workflows
+
+Returns a bounded operational list of stored workflows.
+
+Query parameters:
+
+- `status`: optional workflow status filter.
+- `limit`: optional positive integer. Defaults to `50` and caps at `100`.
+
+Response:
+
+```json
+{
+  "workflows": [
+    {
+      "id": "wf-review-1",
+      "status": "waiting_approval",
+      "run_mode": "sync",
+      "input_ref": "artifact:wf-review-1:input",
+      "output_ref": "artifact:wf-review-1:agent-output",
+      "agent_run_id": "00000000-0000-0000-0000-000000000000",
+      "approval_ref": "approval:wf-review-1"
+    }
+  ]
+}
+```
+
+Invalid `status` or `limit` returns `400 invalid_request`.
+
 ## GET /workflows/{id}
 
 Returns the stored workflow state.

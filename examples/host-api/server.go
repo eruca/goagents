@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +37,7 @@ type Server struct {
 	artifacts artifactkit.Store
 	runs      runkit.Store
 	workflows workflowkit.Store
+	queries   workflowkit.WorkflowQueryStore
 	queue     workflowkit.QueueLeaseStore
 	executor  *workflowkit.Executor
 	health    *llmkit.MemoryHealthStore
@@ -82,6 +84,10 @@ type workflowResponse struct {
 	ApprovalRef   string   `json:"approval_ref,omitempty"`
 	WaitingReason string   `json:"waiting_reason,omitempty"`
 	Completed     []string `json:"completed_steps,omitempty"`
+}
+
+type workflowListResponse struct {
+	Workflows []workflowResponse `json:"workflows"`
 }
 
 type RunMode string
@@ -320,6 +326,7 @@ func NewServer(config Config) (*Server, error) {
 		artifacts: artifacts,
 		runs:      runs,
 		workflows: workflows,
+		queries:   workflows,
 		queue:     workflows,
 		health:    llmkit.NewMemoryHealthStore(llmkit.HealthPolicy{}),
 		llmHome:   resolved.LLMKitHome,
@@ -364,6 +371,7 @@ func resolveRuntimeConfig(config Config) (Config, error) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /workflows", s.handleCreateWorkflow)
+	mux.HandleFunc("GET /workflows", s.handleListWorkflows)
 	mux.HandleFunc("GET /workflows/{id}", s.handleGetWorkflow)
 	mux.HandleFunc("POST /workflows/{id}/approve", s.handleApproveWorkflow)
 	mux.HandleFunc("GET /workflows/{id}/llm-routes", s.handleGetWorkflowLLMRoutes)
@@ -402,6 +410,7 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		InputRef: inputRef,
 		Metadata: map[string]any{
 			"input_ref":    inputRef,
+			"run_mode":     string(runMode),
 			"task_profile": profile,
 		},
 	}
@@ -483,6 +492,28 @@ func (s *Server) runOneQueuedWorkflow(ctx context.Context) (bool, error) {
 	}
 	s.worker.recordCompleted(claimed.ID)
 	return true, err
+}
+
+func (s *Server) handleListWorkflows(w http.ResponseWriter, r *http.Request) {
+	if s.queries == nil {
+		writeError(w, http.StatusInternalServerError, "workflow_error", "workflow query store is not configured")
+		return
+	}
+	query, err := parseWorkflowQuery(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	runs, err := s.queries.ListWorkflows(r.Context(), query)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "workflow_error", err.Error())
+		return
+	}
+	workflows := make([]workflowResponse, 0, len(runs))
+	for _, run := range runs {
+		workflows = append(workflows, workflowToResponse(run, RunModeSync))
+	}
+	writeJSON(w, http.StatusOK, workflowListResponse{Workflows: workflows})
 }
 
 func (s *Server) handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -924,9 +955,7 @@ func defaultCandidates() []llmkit.Candidate {
 }
 
 func workflowToResponse(run workflowkit.WorkflowRun, runMode RunMode) workflowResponse {
-	if runMode == "" {
-		runMode = RunModeSync
-	}
+	runMode = workflowRunMode(run, runMode)
 	return workflowResponse{
 		ID:            run.ID,
 		Status:        string(run.Status),
@@ -939,6 +968,18 @@ func workflowToResponse(run workflowkit.WorkflowRun, runMode RunMode) workflowRe
 		WaitingReason: run.WaitingReason,
 		Completed:     append([]string(nil), run.CompletedSteps...),
 	}
+}
+
+func workflowRunMode(run workflowkit.WorkflowRun, fallback RunMode) RunMode {
+	if value, ok := run.Metadata["run_mode"].(string); ok {
+		if runMode, valid := parseRunMode(value); valid {
+			return runMode
+		}
+	}
+	if fallback == "" {
+		return RunModeSync
+	}
+	return fallback
 }
 
 func llmRouteToResponse(record llmkit.RouteAuditRecord) llmRouteResponse {
@@ -1245,6 +1286,29 @@ func taskProfileFromMap(values map[string]any) llmkit.TaskProfile {
 	profile.NeedsJSON, _ = values["needs_json"].(bool)
 	profile.NeedsLongContext, _ = values["needs_long_context"].(bool)
 	return profile
+}
+
+func parseWorkflowQuery(r *http.Request) (workflowkit.WorkflowQuery, error) {
+	values := r.URL.Query()
+	query := workflowkit.WorkflowQuery{Limit: 50}
+	if rawStatus := strings.TrimSpace(values.Get("status")); rawStatus != "" {
+		status := workflowkit.Status(rawStatus)
+		if !status.IsValid() {
+			return workflowkit.WorkflowQuery{}, fmt.Errorf("unsupported workflow status %q", rawStatus)
+		}
+		query.Status = status
+	}
+	if rawLimit := strings.TrimSpace(values.Get("limit")); rawLimit != "" {
+		limit, err := strconv.Atoi(rawLimit)
+		if err != nil || limit <= 0 {
+			return workflowkit.WorkflowQuery{}, fmt.Errorf("limit must be a positive integer")
+		}
+		query.Limit = limit
+	}
+	if query.Limit > 100 {
+		query.Limit = 100
+	}
+	return query, nil
 }
 
 func parseRunMode(value string) (RunMode, bool) {

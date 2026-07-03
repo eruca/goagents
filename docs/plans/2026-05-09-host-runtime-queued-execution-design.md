@@ -23,6 +23,7 @@ stuck recovery 和多 worker 调度仍是后续设计。
 - 同一进程内的后台 worker 继续执行 workflow，最终进入 `waiting_approval` 或 terminal。
 - host-api 启动 worker loop 后，可恢复同一 runtime home 中已有的 pending/expired lease workflow。
 - `GET /workflows/{id}` 可观察 queued workflow 的状态变化。
+- `GET /workflows` 可按 status 返回有界 workflow 列表，用于运营 queued worker。
 - `GET /workflows/{id}/llm-routes` 和 `GET /agent-runs/{id}` 在后台执行完成后可读取审计。
 - `GET /workers/queued` 可观察进程内 worker claim、completion、idle 和 error 计数。
 - 不把该 proof 抽进 `workflowkit` core。
@@ -33,7 +34,6 @@ stuck recovery 和多 worker 调度仍是后续设计。
 - 不实现 durable worker metrics。
 - 不实现 worker heartbeat。
 - 不实现多 worker 并发调度。
-- 不新增 workflow list API。
 - 不把 background execution 放进 `goagent` core。
 
 ## 当前 Store 边界
@@ -126,7 +126,7 @@ run_mode queued:
 {
   "id": "wf-queued-1",
   "status": "waiting_approval",
-  "run_mode": "sync",
+  "run_mode": "queued",
   "input_ref": "artifact:wf-queued-1:input",
   "output_ref": "artifact:wf-queued-1:agent-output",
   "agent_run_id": "...",
@@ -134,9 +134,24 @@ run_mode queued:
 }
 ```
 
-当前 `WorkflowRun` 没有持久化 run mode 字段，所以 `GET /workflows/{id}` 仍可返回
-`run_mode: "sync"` 作为兼容 fallback。后续如果需要准确保留 submitted run mode，应在
-workflow metadata 或正式 DTO 中增加 `run_mode`。
+当前 submitted `run_mode` 持久化在 workflow metadata 中，所以 queued workflow 在
+后续 `GET /workflows/{id}`、`GET /workflows` 和 approval response 中仍返回
+`run_mode: "queued"`。
+
+`GET /workflows?status=pending&limit=50` 返回有界运营列表：
+
+```json
+{
+  "workflows": [
+    {
+      "id": "wf-queued-1",
+      "status": "pending",
+      "run_mode": "queued",
+      "input_ref": "artifact:wf-queued-1:input"
+    }
+  ]
+}
+```
 
 `GET /workers/queued` 返回进程内 worker 诊断：
 
@@ -188,6 +203,7 @@ durable worker 设计。
 
 - `POST /workflows` with `run_mode: queued` returns `202` and `pending` immediately.
 - polling `GET /workflows/{id}` eventually reaches `waiting_approval`。
+- `GET /workflows` filters by status and preserves submitted `run_mode`。
 - queued workflow completion exposes `agent_run_id` and `output_ref`。
 - queued worker claims through `QueueLeaseStore` and clears the lease after execution stops。
 - reopening with the same runtime home and starting the worker loop recovers pending workflow。

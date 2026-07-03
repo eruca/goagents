@@ -44,6 +44,7 @@ github.com/eruca/workflowkit does not import github.com/eruca/goagent
 - step history through `StepRecords`
 - `Continue` for resuming a persisted run after `waiting_approval`
 - `AuditRef`, `InputRef`, `OutputRef`, `AgentRunID`, and `ApprovalRef` for host-owned references
+- `WorkflowQueryStore` for host-owned workflow list/query views
 - `QueueStore` for worker claim proofs and `QueueLeaseStore` for host-owned lease lifecycle proofs
 - lifecycle guards for `Run`, `Continue`, and `Cancel`
 - explicit retry policy for transient step errors
@@ -204,6 +205,22 @@ host-owned execution concerns.
 
 After claiming, hosts can pass the returned pending run to `Executor.Run`.
 
+## Workflow Query
+
+Use `WorkflowQueryStore` when a host needs an operational list view over stored
+workflow runs:
+
+```go
+query := store.(workflowkit.WorkflowQueryStore)
+runs, err := query.ListWorkflows(ctx, workflowkit.WorkflowQuery{
+	Status: workflowkit.StatusPending,
+	Limit:  50,
+})
+```
+
+`ListWorkflows` returns copies ordered by `CreatedAt` then workflow id. `Status`
+is optional; `Limit` is optional and means no store-level limit when zero.
+
 ## Store Conformance
 
 Use `storetest` when adding a new `Store` implementation:
@@ -259,7 +276,7 @@ The intended stable surface is:
 
 - `WorkflowRun`, `Status`, `Step`, `StepResult`, and `StepRecord`
 - `Executor` methods: `Run`, `Continue`, `Approve`, and `Cancel`
-- `Store`, `QueueStore`, `QueueLeaseStore`, `MemoryStore`, `RetryPolicy`, `TransientError`
+- `Store`, `WorkflowQueryStore`, `QueueStore`, `QueueLeaseStore`, `MemoryStore`, `RetryPolicy`, `TransientError`
 - lifecycle errors: `ErrRunNotFound`, `ErrInvalidTransition`, and `InvalidTransitionError`
 - queue errors: `ErrNoRunnableWorkflow` and `ErrWorkflowLeaseNotOwned`
 - status errors: `ErrInvalidStatus` and `InvalidStatusError`

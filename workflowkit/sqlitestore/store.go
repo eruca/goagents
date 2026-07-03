@@ -124,6 +124,65 @@ func (s *Store) Update(ctx context.Context, id string, mutate func(workflowkit.W
 	return s.Get(ctx, updated.ID)
 }
 
+func (s *Store) ListWorkflows(ctx context.Context, query workflowkit.WorkflowQuery) ([]workflowkit.WorkflowRun, error) {
+	if query.Status != "" && !query.Status.IsValid() {
+		return nil, fmt.Errorf("invalid workflow status: %s", query.Status)
+	}
+	limit := query.Limit
+	if limit <= 0 {
+		limit = -1
+	}
+
+	var rows *sql.Rows
+	var err error
+	if query.Status == "" {
+		rows, err = s.db.QueryContext(ctx, `
+SELECT id, status, input_ref, output_ref, agent_run_id, audit_ref, error,
+	approval_ref, waiting_reason, current_step, completed_steps_json,
+	step_attempts_json, step_records_json, metadata_json, lease_owner, lease_until,
+	created_at, updated_at
+FROM workflow_runs
+ORDER BY created_at ASC, id ASC
+LIMIT ?
+`, limit)
+	} else {
+		rows, err = s.db.QueryContext(ctx, `
+SELECT id, status, input_ref, output_ref, agent_run_id, audit_ref, error,
+	approval_ref, waiting_reason, current_step, completed_steps_json,
+	step_attempts_json, step_records_json, metadata_json, lease_owner, lease_until,
+	created_at, updated_at
+FROM workflow_runs
+WHERE status = ?
+ORDER BY created_at ASC, id ASC
+LIMIT ?
+`, string(query.Status), limit)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	runs := []workflowkit.WorkflowRun{}
+	for rows.Next() {
+		row := runRow{}
+		if err := rows.Scan(&row.ID, &row.Status, &row.InputRef, &row.OutputRef, &row.AgentRunID, &row.AuditRef, &row.Error,
+			&row.ApprovalRef, &row.WaitingReason, &row.CurrentStep, &row.CompletedStepsJSON,
+			&row.StepAttemptsJSON, &row.StepRecordsJSON, &row.MetadataJSON, &row.LeaseOwner, &row.LeaseUntil,
+			&row.CreatedAt, &row.UpdatedAt); err != nil {
+			return nil, err
+		}
+		run, err := decodeRun(row)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return runs, nil
+}
+
 func (s *Store) ClaimRunnable(ctx context.Context, workerID string, lease time.Duration) (workflowkit.WorkflowRun, error) {
 	if workerID == "" {
 		return workflowkit.WorkflowRun{}, fmt.Errorf("worker id is required")

@@ -112,10 +112,20 @@ Missing runs return `ErrRunNotFound`.
 
 Use `storetest.RunStoreConformance` for new store implementations.
 
+## Workflow Query Store
+
+`WorkflowQueryStore` is an optional store extension for host-owned operational
+views. `ListWorkflows` accepts an optional `Status` filter and optional `Limit`.
+Results are ordered by `CreatedAt` and then workflow id, and returned workflows
+must preserve the same copy semantics as `Get`.
+
+Use `storetest.RunWorkflowQueryStoreConformance` for implementations that expose
+workflow listing.
+
 ## SQLite Store
 
 `sqlitestore` persists workflow state in SQLite and currently uses
-`SchemaVersion = 1`.
+`SchemaVersion = 2`.
 
 The schema version is recorded in `workflowkit_schema` with id `sqlitestore`.
 Until migration helpers are introduced, schema compatibility is limited to the

@@ -257,6 +257,72 @@ func RunQueueLeaseStoreConformance(t *testing.T, newStore NewStore) {
 	})
 }
 
+func RunWorkflowQueryStoreConformance(t *testing.T, newStore NewStore) {
+	t.Helper()
+	RunStoreConformance(t, newStore)
+
+	t.Run("list workflows filters by status and limit", func(t *testing.T) {
+		store := workflowQueryStore(t, newStore)
+		base := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+		runs := []workflowkit.WorkflowRun{
+			{ID: "wf-pending-b", Status: workflowkit.StatusPending, CreatedAt: base.Add(2 * time.Minute), Metadata: map[string]any{"order": "second"}},
+			{ID: "wf-waiting", Status: workflowkit.StatusWaitingApproval, CreatedAt: base.Add(time.Minute)},
+			{ID: "wf-pending-a", Status: workflowkit.StatusPending, CreatedAt: base, Metadata: map[string]any{"order": "first"}},
+			{ID: "wf-failed", Status: workflowkit.StatusFailed, CreatedAt: base.Add(3 * time.Minute)},
+		}
+		for _, run := range runs {
+			if err := store.Save(context.Background(), run); err != nil {
+				t.Fatalf("Save(%s) returned error: %v", run.ID, err)
+			}
+		}
+
+		listed, err := store.ListWorkflows(context.Background(), workflowkit.WorkflowQuery{
+			Status: workflowkit.StatusPending,
+			Limit:  1,
+		})
+		if err != nil {
+			t.Fatalf("ListWorkflows returned error: %v", err)
+		}
+		if got := workflowIDs(listed); !equalStrings(got, []string{"wf-pending-a"}) {
+			t.Fatalf("listed ids = %v, want oldest pending limited to one", got)
+		}
+
+		listed[0].Metadata["order"] = "mutated"
+		again, err := store.ListWorkflows(context.Background(), workflowkit.WorkflowQuery{
+			Status: workflowkit.StatusPending,
+			Limit:  1,
+		})
+		if err != nil {
+			t.Fatalf("ListWorkflows returned error: %v", err)
+		}
+		if again[0].Metadata["order"] != "first" {
+			t.Fatalf("listed workflow mutated stored copy: %#v", again[0].Metadata)
+		}
+	})
+
+	t.Run("list workflows returns all statuses in stable order", func(t *testing.T) {
+		store := workflowQueryStore(t, newStore)
+		base := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+		for _, run := range []workflowkit.WorkflowRun{
+			{ID: "wf-b", Status: workflowkit.StatusSucceeded, CreatedAt: base.Add(time.Minute)},
+			{ID: "wf-a", Status: workflowkit.StatusPending, CreatedAt: base.Add(time.Minute)},
+			{ID: "wf-old", Status: workflowkit.StatusFailed, CreatedAt: base},
+		} {
+			if err := store.Save(context.Background(), run); err != nil {
+				t.Fatalf("Save(%s) returned error: %v", run.ID, err)
+			}
+		}
+
+		listed, err := store.ListWorkflows(context.Background(), workflowkit.WorkflowQuery{})
+		if err != nil {
+			t.Fatalf("ListWorkflows returned error: %v", err)
+		}
+		if got := workflowIDs(listed); !equalStrings(got, []string{"wf-old", "wf-a", "wf-b"}) {
+			t.Fatalf("listed ids = %v, want created_at then id order", got)
+		}
+	})
+}
+
 func queueStore(t *testing.T, newStore NewStore) workflowkit.QueueStore {
 	t.Helper()
 	store := newStore(t)
@@ -265,6 +331,36 @@ func queueStore(t *testing.T, newStore NewStore) workflowkit.QueueStore {
 		t.Fatalf("%T does not implement workflowkit.QueueStore", store)
 	}
 	return queue
+}
+
+func workflowQueryStore(t *testing.T, newStore NewStore) workflowkit.WorkflowQueryStore {
+	t.Helper()
+	store := newStore(t)
+	query, ok := store.(workflowkit.WorkflowQueryStore)
+	if !ok {
+		t.Fatalf("%T does not implement workflowkit.WorkflowQueryStore", store)
+	}
+	return query
+}
+
+func workflowIDs(runs []workflowkit.WorkflowRun) []string {
+	ids := make([]string, 0, len(runs))
+	for _, run := range runs {
+		ids = append(ids, run.ID)
+	}
+	return ids
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func queueLeaseStore(t *testing.T, newStore NewStore) workflowkit.QueueLeaseStore {

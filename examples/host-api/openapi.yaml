@@ -15,6 +15,36 @@ tags:
   - name: workers
 paths:
   /workflows:
+    get:
+      tags:
+        - workflows
+      summary: List stored workflows
+      operationId: listWorkflows
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: Optional workflow status filter.
+          schema:
+            $ref: '#/components/schemas/WorkflowStatus'
+        - name: limit
+          in: query
+          required: false
+          description: Positive result limit. Defaults to 50 and caps at 100.
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        '200':
+          description: Stored workflow list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowListResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
     post:
       tags:
         - workflows
@@ -233,14 +263,7 @@ components:
         id:
           type: string
         status:
-          type: string
-          enum:
-            - pending
-            - running
-            - waiting_approval
-            - succeeded
-            - failed
-            - cancelled
+          $ref: '#/components/schemas/WorkflowStatus'
         run_mode:
           $ref: '#/components/schemas/RunMode'
         input_ref:
@@ -259,6 +282,25 @@ components:
           type: array
           items:
             type: string
+    WorkflowListResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - workflows
+      properties:
+        workflows:
+          type: array
+          items:
+            $ref: '#/components/schemas/WorkflowResponse'
+    WorkflowStatus:
+      type: string
+      enum:
+        - pending
+        - running
+        - waiting_approval
+        - succeeded
+        - failed
+        - cancelled
     AgentRunResponse:
       type: object
       additionalProperties: false

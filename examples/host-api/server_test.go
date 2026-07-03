@@ -230,6 +230,51 @@ func TestHostAPIQueuedWorkerStatusTracksRunError(t *testing.T) {
 	}
 }
 
+func TestHostAPIListsWorkflowsByStatusAndLimit(t *testing.T) {
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+	base := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+	for _, run := range []workflowkit.WorkflowRun{
+		{
+			ID:        "wf-list-queued",
+			Status:    workflowkit.StatusPending,
+			InputRef:  "artifact:wf-list-queued:input",
+			CreatedAt: base,
+			Metadata: map[string]any{
+				"run_mode": string(RunModeQueued),
+			},
+		},
+		{
+			ID:        "wf-list-sync",
+			Status:    workflowkit.StatusWaitingApproval,
+			InputRef:  "artifact:wf-list-sync:input",
+			CreatedAt: base.Add(time.Minute),
+			Metadata: map[string]any{
+				"run_mode": string(RunModeSync),
+			},
+		},
+	} {
+		if err := server.workflows.Save(context.Background(), run); err != nil {
+			t.Fatalf("Save(%s) returned error: %v", run.ID, err)
+		}
+	}
+
+	pending := doJSON[workflowListResponse](t, server.Handler(), http.MethodGet, "/workflows?status=pending&limit=1", nil)
+	if len(pending.Workflows) != 1 {
+		t.Fatalf("pending workflows = %+v, want one result", pending.Workflows)
+	}
+	if pending.Workflows[0].ID != "wf-list-queued" || pending.Workflows[0].RunMode != string(RunModeQueued) {
+		t.Fatalf("pending workflow = %+v, want queued workflow with persisted run mode", pending.Workflows[0])
+	}
+
+	waiting := doJSON[workflowListResponse](t, server.Handler(), http.MethodGet, "/workflows?status=waiting_approval", nil)
+	if got := workflowResponseIDs(waiting.Workflows); !containsString(got, "wf-list-sync") {
+		t.Fatalf("waiting workflows ids = %v, want wf-list-sync", got)
+	}
+}
+
 func TestHostAPIReturnsWorkflowLLMRouteAudit(t *testing.T) {
 	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
 	if err != nil {
@@ -683,6 +728,9 @@ func TestHostAPIRunModeSyncAndQueuedSemantics(t *testing.T) {
 	if loaded.AgentRunID == "" || loaded.OutputRef == "" || loaded.ApprovalRef == "" {
 		t.Fatalf("queued loaded workflow = %+v, want agent refs after background run", loaded)
 	}
+	if loaded.RunMode != string(RunModeQueued) {
+		t.Fatalf("queued loaded run mode = %q, want queued", loaded.RunMode)
+	}
 	stored := waitForWorkflowLeaseCleared(t, server.workflows, "wf-queued")
 	if stored.Status != workflowkit.StatusWaitingApproval {
 		t.Fatalf("queued workflow after release = %+v, want waiting approval", stored)
@@ -698,6 +746,9 @@ func TestHostAPIRunModeSyncAndQueuedSemantics(t *testing.T) {
 	})
 	if approved.Status != string(workflowkit.StatusSucceeded) {
 		t.Fatalf("queued approval = %+v, want succeeded", approved)
+	}
+	if approved.RunMode != string(RunModeQueued) {
+		t.Fatalf("queued approved run mode = %q, want queued", approved.RunMode)
 	}
 }
 
@@ -953,6 +1004,14 @@ type queuedWorkerStatusResponse struct {
 	LastWorkflowID      string `json:"last_workflow_id,omitempty"`
 	LastError           string `json:"last_error,omitempty"`
 	LastErrorWorkflowID string `json:"last_error_workflow_id,omitempty"`
+}
+
+func workflowResponseIDs(workflows []workflowResponse) []string {
+	ids := make([]string, 0, len(workflows))
+	for _, workflow := range workflows {
+		ids = append(ids, workflow.ID)
+	}
+	return ids
 }
 
 func waitForQueuedWorkerStatus(t *testing.T, handler http.Handler, accept func(queuedWorkerStatusResponse) bool) queuedWorkerStatusResponse {
