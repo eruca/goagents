@@ -66,6 +66,9 @@ Use `runkit` or `artifactkit` when a host wants durable trace or artifact
 storage. Use a host adapter to map `goagent.RunDetailed`, workflow runs, or
 service endpoints into `evalkit.Harness`.
 
+See `../examples/evalkit-goagent-regression` for a runnable `goagent` regression
+evaluation that uses a mock LLM, repeated trials, and graders.
+
 ## Verify
 
 ```bash

@@ -4,6 +4,7 @@ use (
 	./artifactkit
 	./contextkit
 	./evalkit
+	./examples/evalkit-goagent-regression
 	./goagent
 	./llmkit
 	./mcpkit

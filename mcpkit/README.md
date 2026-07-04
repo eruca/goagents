@@ -52,6 +52,19 @@ It does not own:
 
 Those concerns stay in host applications or future transport-specific adapters.
 
+## Next Adapter Layer
+
+The next production layer should be a real MCP client adapter for stdio and/or
+HTTP transports. Do not add that inside the current descriptor adapter until the
+project chooses one of these paths:
+
+- adopt a maintained MCP Go SDK and keep `mcpkit` as the `goagent` mapping layer
+- implement a small JSON-RPC client transport locally, with explicit lifecycle,
+  cancellation, timeout, and auth boundaries
+
+Until that decision is made, `mcpkit.Client` remains the stable seam for tests
+and host-owned integrations.
+
 ## Verify
 
 ```bash

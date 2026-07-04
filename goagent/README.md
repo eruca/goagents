@@ -31,6 +31,7 @@ go run ./examples/basic
 - `examples/audit-log` shows a host-owned JSONL audit adapter around `Agent.Stream`.
 - `examples/approval` shows host-controlled tool approval with stream events.
 - `examples/approval-deny` shows approval denial with partial stream summaries.
+- `examples/structured-output` shows JSON Schema output validation success and failure.
 
 ## What The Core Owns
 
