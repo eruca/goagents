@@ -25,6 +25,8 @@ type Agent struct {
 	contextProjector     ContextProjector
 	eventSink            EventSink
 	toolApprover         ToolApprover
+	outputFormat         OutputFormat
+	outputValidator      OutputValidator
 	budgetGuard          BudgetGuard
 	maxIterations        int
 }
@@ -100,6 +102,18 @@ func WithEventSink(sink EventSink) Option {
 func WithToolApprover(approver ToolApprover) Option {
 	return func(a *Agent) {
 		a.toolApprover = approver
+	}
+}
+
+func WithOutputFormat(format OutputFormat) Option {
+	return func(a *Agent) {
+		a.outputFormat = cloneOutputFormat(format)
+	}
+}
+
+func WithOutputValidator(validator OutputValidator) Option {
+	return func(a *Agent) {
+		a.outputValidator = validator
 	}
 }
 
@@ -186,6 +200,8 @@ func (a *Agent) runWithEventSink(ctx context.Context, req RunRequest, detailed b
 		ToolProvider:         a.toolProvider,
 		ContextProjector:     a.contextProjector,
 		ToolApprover:         a.toolApprover,
+		OutputFormat:         a.outputFormat,
+		OutputValidator:      a.outputValidator,
 		BudgetGuard:          a.budgetGuard,
 		MaxIterations:        a.maxIterations,
 	})

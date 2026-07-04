@@ -12,6 +12,7 @@ Core modules:
 - `github.com/eruca/goagent` in `goagent/`
 - `github.com/eruca/artifactkit` in `artifactkit/`
 - `github.com/eruca/contextkit` in `contextkit/`
+- `github.com/eruca/evalkit` in `evalkit/`
 - `github.com/eruca/ocrs` in `ocrs/`
 - `github.com/eruca/runkit` in `runkit/`
 - `github.com/eruca/workflowkit` in `workflowkit/`
@@ -22,6 +23,9 @@ Optional adapter/capability modules:
 - `github.com/eruca/llmkit` in `llmkit/` for LLM routing, account/model policy,
   and audit contracts. It is optional host-side capability, not part of
   `goagent` core.
+- `github.com/eruca/mcpkit` in `mcpkit/` for adapting MCP-style tool
+  descriptors to `goagent` tools. It is optional host-side capability, not part
+  of `goagent` core.
 
 Verification/example modules:
 
@@ -41,6 +45,7 @@ Keep core modules independent:
 goagent       must not import workflowkit, contextkit, ocrs, or llmkit
 workflowkit   must not import goagent, contextkit, ocrs, or workflowkit/agentstep
 contextkit    must not import goagent, workflowkit, or ocrs
+evalkit       must not import goagent, workflowkit, llmkit, runkit, or artifactkit
 ocrs          must not import goagent, workflowkit, or contextkit
 llmkit        must not import goagent from its core routing package
 artifactkit   must not import goagent, workflowkit, llmkit, contextkit, or ocrs
@@ -52,6 +57,7 @@ Adapter and composition modules may depend on multiple core modules:
 ```text
 workflowkit/agentstep        may import workflowkit + goagent
 llmkit adapters              may import llmkit + goagent
+mcpkit                       may import goagent
 examples/host-api            may import workflowkit + agentstep + goagent + llmkit + artifactkit + runkit
 examples/host-runtime        may import workflowkit + agentstep + goagent + llmkit + artifactkit + runkit
 examples/agent-approval      may import workflowkit + agentstep + goagent
@@ -75,11 +81,13 @@ Use Go subdirectory module tags:
 goagent/v0.1.0
 artifactkit/v0.1.0
 contextkit/v0.1.0
+evalkit/v0.1.0
 ocrs/v0.1.0
 runkit/v0.1.0
 workflowkit/v0.1.0
 workflowkit/agentstep/v0.1.0
 llmkit/v0.1.0
+mcpkit/v0.1.0
 ```
 
 Only tag modules that changed. If `workflowkit/agentstep` changes without a core
@@ -100,10 +108,12 @@ Module-specific checks:
 
 ```bash
 (cd contextkit && go test ./...)
+(cd evalkit && go test ./...)
 (cd artifactkit && go test ./...)
 (cd ocrs && go test ./...)
 (cd runkit && go test ./...)
 (cd llmkit && go test ./...)
+(cd mcpkit && go test ./...)
 (cd examples/host-api && go test ./...)
 (cd examples/host-runtime && go test ./...)
 (cd goagent && make verify)

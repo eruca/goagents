@@ -11,7 +11,10 @@ import (
 
 var ErrMaxIterations = errors.New("max iterations reached")
 
-type FinalizeStage struct{}
+type FinalizeStage struct {
+	OutputFormat    OutputFormat
+	OutputValidator OutputValidator
+}
 
 func (s FinalizeStage) Name() string {
 	return "finalize"
@@ -21,11 +24,27 @@ func (s FinalizeStage) Run(ctx context.Context, state *RunState) (StageResult, e
 	if state.LastResponse == nil || state.LastResponse.Content == "" || len(state.LastResponse.ToolCalls) > 0 || len(state.PendingCalls) > 0 || len(state.ToolResults) > 0 {
 		return StageContinue, nil
 	}
+	structured, metadata, err := validateFinalOutput(ctx, state, state.LastResponse.Content, s.OutputFormat, s.OutputValidator)
+	if err != nil {
+		return StageAbort, err
+	}
 	state.Final = &RunResult{
 		RunID:            state.RunID,
 		Content:          state.LastResponse.Content,
+		StructuredOutput: structured,
+		OutputMetadata:   metadata,
 		Usage:            state.Usage,
 		ExecutionSummary: state.executionSummary(""),
+	}
+	if len(structured) > 0 || len(metadata) > 0 {
+		eventMetadata := map[string]any{}
+		if s.OutputFormat.Name != "" {
+			eventMetadata["output_format"] = s.OutputFormat.Name
+		}
+		if len(structured) > 0 {
+			eventMetadata["structured"] = true
+		}
+		state.Emit(ctx, Event{Type: EventOutputValidated, Metadata: eventMetadata})
 	}
 	return StageBreak, nil
 }
@@ -42,6 +61,8 @@ type ReActConfig struct {
 	ToolProvider         ToolProvider
 	ContextProjector     ContextProjector
 	ToolApprover         ToolApprover
+	OutputFormat         OutputFormat
+	OutputValidator      OutputValidator
 	BudgetGuard          BudgetGuard
 	MaxIterations        int
 }
@@ -70,6 +91,7 @@ func NewReActRunner(config ReActConfig) *ReActRunner {
 			SystemPromptStage{Provider: config.SystemPromptProvider},
 			SkillStage{Provider: config.SkillProvider},
 			ToolProviderStage{Provider: config.ToolProvider, Registry: registry},
+			OutputFormatStage{Format: config.OutputFormat},
 			PromptStage{Compiler: config.PromptCompiler, Blocks: config.PromptBlocks},
 			ContextProjectionStage{Projector: config.ContextProjector, Budget: budgetFromGuard(config.BudgetGuard)},
 			ThinkStage{LLM: config.LLM, ToolRegistry: registry},
@@ -78,7 +100,7 @@ func NewReActRunner(config ReActConfig) *ReActRunner {
 			ApprovalStage{Approver: config.ToolApprover},
 			ActStage{Executor: tools.NewExecutor(registry)},
 			ObserveStage{},
-			FinalizeStage{},
+			FinalizeStage{OutputFormat: config.OutputFormat, OutputValidator: config.OutputValidator},
 		),
 	}
 }

@@ -48,6 +48,7 @@ The stable host-facing API is the surface applications should build around:
 
 - `agentcore.NewAgent`, `Agent.Run`, `Agent.RunDetailed`, `RunRequest`, `RunResult`, and `RunID`
 - `agentcore.Option` values such as `WithLLM`, `WithToolRegistry`, `WithPolicyEngine`, `WithMemoryProvider`, `WithContextProjector`, `WithBudget`, and `WithEventSink`
+- `agentcore.WithOutputFormat` and `WithOutputValidator` for final-output format instructions and validation
 - `agentcore.Event`, `EventSink`, `Skill`, `SkillProvider`, `SystemPromptProvider`, `ToolProvider`, and `Module`
 - `ports` interfaces and DTOs for LLM, prompt, tools, policy, and memory
 - concrete helper packages such as `prompt`, `tools`, `policy`, and `memory`
@@ -218,6 +219,21 @@ agent, err := agentcore.NewAgent(
 ```
 
 Budget checks run after each model response and before policy or tool execution. When a budget is exceeded, `Run` returns an error that matches `agentcore.ErrBudgetExceeded`.
+
+## Structured Output
+
+Use `WithOutputFormat` when a host needs the final answer to follow a declared
+shape. If `JSONSchema` is set, the core adds model-facing output instructions
+before the first LLM call and validates the final answer as JSON before building
+`RunResult`. Valid structured output is copied to `RunResult.StructuredOutput`.
+
+Use `WithOutputValidator` for host-specific output checks that cannot be
+represented as JSON Schema. Validation runs after the final model response and
+before memory save. A validation failure aborts the run with an error matching
+`agentcore.ErrOutputInvalid`.
+
+This is an output contract, not a model-as-judge or business grading system.
+Reusable quality checks should live in host code or `evalkit` graders.
 
 ## Session Memory
 

@@ -1,6 +1,7 @@
 package agentcore
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/eruca/goagent/policy"
@@ -20,6 +21,8 @@ type RunRequest struct {
 type RunResult struct {
 	RunID            RunID
 	Content          string
+	StructuredOutput json.RawMessage
+	OutputMetadata   map[string]any
 	Usage            Usage
 	ExecutionSummary ExecutionSummary
 }
