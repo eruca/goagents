@@ -118,6 +118,28 @@ paths:
           $ref: '#/components/responses/ErrorResponse'
         '400':
           $ref: '#/components/responses/ErrorResponse'
+  /workflows/{id}/events:
+    get:
+      tags:
+        - workflows
+      summary: Get workflow operation events
+      description: >
+        Returns step records and operator events such as manual requeues for a
+        stored workflow.
+      operationId: getWorkflowEvents
+      parameters:
+        - $ref: '#/components/parameters/WorkflowID'
+      responses:
+        '200':
+          description: Workflow operation timeline.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowEventsResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
   /workflows/{id}/requeue:
     post:
       tags:
@@ -331,6 +353,73 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/WorkflowResponse'
+    WorkflowEventsResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - workflow_id
+        - status
+        - run_mode
+        - events
+      properties:
+        workflow_id:
+          type: string
+        status:
+          $ref: '#/components/schemas/WorkflowStatus'
+        run_mode:
+          $ref: '#/components/schemas/RunMode'
+        current_step:
+          type: string
+        completed_steps:
+          type: array
+          items:
+            type: string
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/WorkflowEvent'
+    WorkflowEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+      properties:
+        type:
+          type: string
+          enum:
+            - step
+            - workflow_requeued
+        name:
+          type: string
+        status:
+          $ref: '#/components/schemas/WorkflowStatus'
+        attempt:
+          type: integer
+        output_ref:
+          type: string
+        agent_run_id:
+          type: string
+        audit_ref:
+          type: string
+        error:
+          type: string
+        approval_ref:
+          type: string
+        waiting_reason:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        ended_at:
+          type: string
+          format: date-time
+        from_status:
+          $ref: '#/components/schemas/WorkflowStatus'
+        to_status:
+          $ref: '#/components/schemas/WorkflowStatus'
+        at:
+          type: string
+          format: date-time
     WorkflowStatus:
       type: string
       enum:

@@ -91,6 +91,33 @@ type workflowListResponse struct {
 	Workflows []workflowResponse `json:"workflows"`
 }
 
+type workflowEventsResponse struct {
+	WorkflowID  string                  `json:"workflow_id"`
+	Status      string                  `json:"status"`
+	RunMode     string                  `json:"run_mode"`
+	CurrentStep string                  `json:"current_step,omitempty"`
+	Completed   []string                `json:"completed_steps,omitempty"`
+	Events      []workflowEventResponse `json:"events"`
+}
+
+type workflowEventResponse struct {
+	Type          string    `json:"type"`
+	Name          string    `json:"name,omitempty"`
+	Status        string    `json:"status,omitempty"`
+	Attempt       int       `json:"attempt,omitempty"`
+	OutputRef     string    `json:"output_ref,omitempty"`
+	AgentRunID    string    `json:"agent_run_id,omitempty"`
+	AuditRef      string    `json:"audit_ref,omitempty"`
+	Error         string    `json:"error,omitempty"`
+	ApprovalRef   string    `json:"approval_ref,omitempty"`
+	WaitingReason string    `json:"waiting_reason,omitempty"`
+	StartedAt     time.Time `json:"started_at,omitempty"`
+	EndedAt       time.Time `json:"ended_at,omitempty"`
+	FromStatus    string    `json:"from_status,omitempty"`
+	ToStatus      string    `json:"to_status,omitempty"`
+	At            time.Time `json:"at,omitempty"`
+}
+
 type RunMode string
 
 const (
@@ -104,6 +131,7 @@ const (
 	queuedLeaseDurationEnv     = "HOST_API_QUEUED_LEASE_DURATION"
 	queuedPollInterval         = 100 * time.Millisecond
 	minQueuedHeartbeatInterval = time.Millisecond
+	requeueEventsMetadataKey   = "requeue_events"
 )
 
 var errWorkflowNotRequeueable = errors.New("workflow status cannot be requeued")
@@ -447,6 +475,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /workflows", s.handleCreateWorkflow)
 	mux.HandleFunc("GET /workflows", s.handleListWorkflows)
 	mux.HandleFunc("GET /workflows/{id}", s.handleGetWorkflow)
+	mux.HandleFunc("GET /workflows/{id}/events", s.handleWorkflowEvents)
 	mux.HandleFunc("POST /workflows/{id}/approve", s.handleApproveWorkflow)
 	mux.HandleFunc("POST /workflows/{id}/requeue", s.handleRequeueWorkflow)
 	mux.HandleFunc("GET /workflows/{id}/llm-routes", s.handleGetWorkflowLLMRoutes)
@@ -632,12 +661,22 @@ func (s *Server) handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, workflowToResponse(run, RunModeSync))
 }
 
+func (s *Server) handleWorkflowEvents(w http.ResponseWriter, r *http.Request) {
+	run, err := s.workflows.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeWorkflowStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, workflowToEventsResponse(run))
+}
+
 func (s *Server) handleRequeueWorkflow(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	run, err := s.workflows.Update(r.Context(), id, func(run workflowkit.WorkflowRun) (workflowkit.WorkflowRun, error) {
 		if run.Status != workflowkit.StatusFailed && run.Status != workflowkit.StatusCancelled {
 			return run, errWorkflowNotRequeueable
 		}
+		fromStatus := run.Status
 		run.Status = workflowkit.StatusPending
 		run.Error = ""
 		run.CurrentStep = ""
@@ -649,6 +688,7 @@ func (s *Server) handleRequeueWorkflow(w http.ResponseWriter, r *http.Request) {
 			run.Metadata = make(map[string]any)
 		}
 		run.Metadata["run_mode"] = string(RunModeQueued)
+		appendRequeueEvent(run.Metadata, fromStatus, workflowkit.StatusPending, time.Now().UTC())
 		return run, nil
 	})
 	if err != nil {
@@ -1106,6 +1146,111 @@ func workflowToResponse(run workflowkit.WorkflowRun, runMode RunMode) workflowRe
 		WaitingReason: run.WaitingReason,
 		Completed:     append([]string(nil), run.CompletedSteps...),
 	}
+}
+
+func workflowToEventsResponse(run workflowkit.WorkflowRun) workflowEventsResponse {
+	events := make([]workflowEventResponse, 0, len(run.StepRecords))
+	for _, record := range run.StepRecords {
+		events = append(events, stepRecordToEvent(record))
+	}
+	events = append(events, requeueEventsFromMetadata(run.Metadata)...)
+	sort.SliceStable(events, func(i, j int) bool {
+		left := workflowEventTime(events[i])
+		right := workflowEventTime(events[j])
+		if left.IsZero() || right.IsZero() {
+			return false
+		}
+		return left.Before(right)
+	})
+	return workflowEventsResponse{
+		WorkflowID:  run.ID,
+		Status:      string(run.Status),
+		RunMode:     string(workflowRunMode(run, RunModeSync)),
+		CurrentStep: run.CurrentStep,
+		Completed:   append([]string(nil), run.CompletedSteps...),
+		Events:      events,
+	}
+}
+
+func stepRecordToEvent(record workflowkit.StepRecord) workflowEventResponse {
+	return workflowEventResponse{
+		Type:          "step",
+		Name:          record.Name,
+		Status:        string(record.Status),
+		Attempt:       record.Attempt,
+		OutputRef:     record.OutputRef,
+		AgentRunID:    record.AgentRunID,
+		AuditRef:      record.AuditRef,
+		Error:         record.Error,
+		ApprovalRef:   record.ApprovalRef,
+		WaitingReason: record.WaitingReason,
+		StartedAt:     record.StartedAt,
+		EndedAt:       record.EndedAt,
+	}
+}
+
+func workflowEventTime(event workflowEventResponse) time.Time {
+	if !event.StartedAt.IsZero() {
+		return event.StartedAt
+	}
+	return event.At
+}
+
+func appendRequeueEvent(metadata map[string]any, from workflowkit.Status, to workflowkit.Status, at time.Time) {
+	event := map[string]any{
+		"type":        "workflow_requeued",
+		"from_status": string(from),
+		"to_status":   string(to),
+		"at":          at.Format(time.RFC3339Nano),
+	}
+	metadata[requeueEventsMetadataKey] = appendMetadataEvent(metadata[requeueEventsMetadataKey], event)
+}
+
+func appendMetadataEvent(existing any, event map[string]any) []any {
+	events := metadataEventSlice(existing)
+	return append(events, event)
+}
+
+func metadataEventSlice(value any) []any {
+	switch typed := value.(type) {
+	case []any:
+		return append([]any(nil), typed...)
+	case []map[string]any:
+		events := make([]any, 0, len(typed))
+		for _, event := range typed {
+			events = append(events, event)
+		}
+		return events
+	default:
+		return nil
+	}
+}
+
+func requeueEventsFromMetadata(metadata map[string]any) []workflowEventResponse {
+	rawEvents := metadataEventSlice(metadata[requeueEventsMetadataKey])
+	events := make([]workflowEventResponse, 0, len(rawEvents))
+	for _, raw := range rawEvents {
+		event, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if metadataString(event, "type") != "workflow_requeued" {
+			continue
+		}
+		at, _ := time.Parse(time.RFC3339Nano, metadataString(event, "at"))
+		events = append(events, workflowEventResponse{
+			Type:       "workflow_requeued",
+			FromStatus: metadataString(event, "from_status"),
+			ToStatus:   metadataString(event, "to_status"),
+			At:         at,
+		})
+	}
+	return events
+}
+
+func metadataString(values map[string]any, key string) string {
+	value, _ := values[key].(string)
+	return value
 }
 
 func workflowRunMode(run workflowkit.WorkflowRun, fallback RunMode) RunMode {

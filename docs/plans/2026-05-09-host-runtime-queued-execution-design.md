@@ -23,6 +23,7 @@ worker supervision、stuck recovery 和多 worker 调度仍是后续设计。
 - 同一进程内的后台 worker 继续执行 workflow，最终进入 `waiting_approval` 或 terminal。
 - host-api 启动 worker loop 后，可恢复同一 runtime home 中已有的 pending/expired lease workflow。
 - `GET /workflows/{id}` 可观察 queued workflow 的状态变化。
+- `GET /workflows/{id}/events` 可观察 step records、失败点和手动 requeue 事件。
 - `GET /workflows` 可按 status、run_mode 和 order 返回有界 workflow 列表，用于运营 queued worker。
 - `POST /workflows/{id}/requeue` 可由 operator 显式把 failed/cancelled workflow 放回 queued worker。
 - `GET /workflows/{id}/llm-routes` 和 `GET /agent-runs/{id}` 在后台执行完成后可读取审计。
@@ -176,6 +177,30 @@ manual requeue:
 只有 `failed` / `cancelled` 可 requeue；`waiting_approval` 应继续走 approval，
 `succeeded` 不应重跑。
 
+`GET /workflows/{id}/events` 返回 workflow 运营时间线：
+
+```json
+{
+  "workflow_id": "wf-queued-1",
+  "status": "waiting_approval",
+  "run_mode": "queued",
+  "events": [
+    {
+      "type": "step",
+      "name": "ingest",
+      "status": "failed",
+      "attempt": 1,
+      "error": "artifact not found"
+    },
+    {
+      "type": "workflow_requeued",
+      "from_status": "failed",
+      "to_status": "pending"
+    }
+  ]
+}
+```
+
 `GET /workers/queued` 返回进程内 worker 诊断：
 
 ```json
@@ -234,6 +259,7 @@ durable worker 设计。
 - queued worker claims through `QueueLeaseStore` and clears the lease after execution stops。
 - queued worker extends the lease while a workflow is still running。
 - failed workflow can be explicitly requeued and then reaches `waiting_approval` after the missing condition is fixed。
+- `GET /workflows/{id}/events` exposes failed step records and manual requeue events。
 - reopening with the same runtime home and starting the worker loop recovers pending workflow。
 - `GET /workers/queued` exposes process-local worker counters and latest execution error。
 - after queued execution reaches waiting approval, `POST /workflows/{id}/approve` succeeds。

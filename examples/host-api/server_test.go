@@ -315,6 +315,57 @@ func TestHostAPIRequeuesFailedWorkflow(t *testing.T) {
 	waitForWorkflowLeaseCleared(t, server.workflows, "wf-requeue-failed")
 }
 
+func TestHostAPIWorkflowEventsExposeStepFailureAndRequeue(t *testing.T) {
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+	inputRef := "artifact:wf-events:input"
+	if err := server.workflows.Save(context.Background(), workflowkit.WorkflowRun{
+		ID:       "wf-events",
+		Status:   workflowkit.StatusPending,
+		InputRef: inputRef,
+		Metadata: map[string]any{
+			"input_ref": inputRef,
+			"run_mode":  string(RunModeQueued),
+		},
+	}); err != nil {
+		t.Fatalf("Save pending workflow returned error: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	server.StartQueuedWorker(ctx)
+	waitForWorkflowStatus(t, server.Handler(), "wf-events", workflowkit.StatusFailed)
+
+	if err := putTextArtifact(context.Background(), server.artifacts, inputRef, "Review workflow events."); err != nil {
+		t.Fatalf("put input artifact returned error: %v", err)
+	}
+	doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows/wf-events/requeue", nil)
+	waitForWorkflowStatus(t, server.Handler(), "wf-events", workflowkit.StatusWaitingApproval)
+
+	events := doJSON[workflowEventsResponse](t, server.Handler(), http.MethodGet, "/workflows/wf-events/events", nil)
+	if events.WorkflowID != "wf-events" || events.Status != string(workflowkit.StatusWaitingApproval) || events.RunMode != string(RunModeQueued) {
+		t.Fatalf("events response = %+v, want queued waiting workflow", events)
+	}
+	if !workflowEventsContain(events.Events, func(event workflowEventResponse) bool {
+		return event.Type == "step" &&
+			event.Name == "ingest" &&
+			event.Status == string(workflowkit.StatusFailed) &&
+			event.Error != ""
+	}) {
+		t.Fatalf("events = %+v, want failed ingest step event", events.Events)
+	}
+	if !workflowEventsContain(events.Events, func(event workflowEventResponse) bool {
+		return event.Type == "workflow_requeued" &&
+			event.FromStatus == string(workflowkit.StatusFailed) &&
+			event.ToStatus == string(workflowkit.StatusPending) &&
+			!event.At.IsZero()
+	}) {
+		t.Fatalf("events = %+v, want workflow_requeued event", events.Events)
+	}
+}
+
 func TestHostAPIListsWorkflowsByStatusAndLimit(t *testing.T) {
 	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
 	if err != nil {
@@ -1142,6 +1193,15 @@ type queuedWorkerStatusResponse struct {
 	LastErrorWorkflowID     string `json:"last_error_workflow_id,omitempty"`
 	LastHeartbeatWorkflowID string `json:"last_heartbeat_workflow_id,omitempty"`
 	LastHeartbeatError      string `json:"last_heartbeat_error,omitempty"`
+}
+
+func workflowEventsContain(events []workflowEventResponse, accept func(workflowEventResponse) bool) bool {
+	for _, event := range events {
+		if accept(event) {
+			return true
+		}
+	}
+	return false
 }
 
 func workflowResponseIDs(workflows []workflowResponse) []string {

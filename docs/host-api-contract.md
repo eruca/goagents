@@ -172,6 +172,46 @@ Response shape is the same workflow response used by `POST /workflows`.
 
 Missing workflow response: `404 not_found`.
 
+## GET /workflows/{id}/events
+
+Returns a workflow operation timeline for debugging and operator review.
+
+Response status: `200 OK`.
+
+Response:
+
+```json
+{
+  "workflow_id": "wf-review-1",
+  "status": "waiting_approval",
+  "run_mode": "queued",
+  "current_step": "agent_review",
+  "completed_steps": ["ingest", "agent_review"],
+  "events": [
+    {
+      "type": "step",
+      "name": "ingest",
+      "status": "failed",
+      "attempt": 1,
+      "error": "artifact not found",
+      "started_at": "2026-05-09T12:00:00Z",
+      "ended_at": "2026-05-09T12:00:01Z"
+    },
+    {
+      "type": "workflow_requeued",
+      "from_status": "failed",
+      "to_status": "pending",
+      "at": "2026-05-09T12:01:00Z"
+    }
+  ]
+}
+```
+
+Step records are returned as `type: "step"` events and preserve step name,
+status, attempt, refs, error, approval fields, and timestamps. Manual requeues
+are returned as `type: "workflow_requeued"` events. Missing workflow response:
+`404 not_found`.
+
 ## POST /workflows/{id}/requeue
 
 Explicitly moves a failed or cancelled workflow back to the queued worker.
@@ -189,6 +229,8 @@ Behavior:
   continue from unfinished work.
 - Stores `run_mode: "queued"` in workflow metadata and wakes the in-process
   queued worker.
+- Appends a `workflow_requeued` event to workflow metadata for
+  `GET /workflows/{id}/events`.
 
 Response status: `202 Accepted`.
 

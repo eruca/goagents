@@ -81,6 +81,7 @@ Endpoints:
 - `POST /workflows`
 - `GET /workflows`
 - `GET /workflows/{id}`
+- `GET /workflows/{id}/events`
 - `POST /workflows/{id}/requeue`
 - `POST /workflows/{id}/approve`
 - `GET /workflows/{id}/llm-routes`
@@ -99,6 +100,11 @@ estimated cents. It does not return prompts, responses, headers, or API keys.
 `GET /workflows?status=pending&run_mode=queued&order=desc&limit=50`. Results are
 ordered by workflow creation time, then workflow id; `order=desc` reverses both.
 
+`GET /workflows/{id}/events` returns a workflow operation timeline. Step records
+are returned as `type: "step"` events with step name, status, attempt, refs,
+errors, and timestamps. Manual requeues are returned as
+`type: "workflow_requeued"` events.
+
 `POST /workflows` accepts optional `run_mode`. `sync` is the default and runs
 the workflow during the HTTP request. `queued` is an in-process proof: it writes
 the input artifact and pending workflow, returns immediately, then a background
@@ -112,7 +118,8 @@ crash supervision and multi-worker scheduling are intentionally not implemented.
 `POST /workflows/{id}/requeue` is an explicit operator action for failed or
 cancelled workflows. It moves the existing workflow back to `pending`, preserves
 step history, records `run_mode: "queued"`, and lets the queued worker retry the
-unfinished work. It does not create a new workflow id.
+unfinished work. It also records a `workflow_requeued` event in workflow
+metadata. It does not create a new workflow id.
 
 `GET /workers/queued` returns in-process worker observability: whether the
 worker loop has been started, the worker id, claim/completion/idle/error counts,
