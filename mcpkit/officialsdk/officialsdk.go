@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"time"
 
 	"github.com/eruca/mcpkit"
+	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -30,6 +32,19 @@ type StdioConfig struct {
 	TerminateDuration time.Duration
 }
 
+// StreamableHTTPConfig describes a remote MCP endpoint managed through the
+// official SDK StreamableClientTransport. The first adapter slice defaults to
+// request/response mode by disabling standalone SSE unless explicitly enabled.
+type StreamableHTTPConfig struct {
+	Endpoint            string
+	HTTPClient          *http.Client
+	MaxRetries          int
+	EnableStandaloneSSE bool
+	OAuthHandler        auth.OAuthHandler
+	Name                string
+	Version             string
+}
+
 // Client adapts an official MCP SDK client session to the transport-neutral
 // mcpkit.Client interface.
 type Client struct {
@@ -40,22 +55,13 @@ func ConnectStdio(ctx context.Context, cfg StdioConfig) (*Client, error) {
 	if cfg.Command == "" {
 		return nil, fmt.Errorf("stdio command is required")
 	}
-	name := cfg.Name
-	if name == "" {
-		name = defaultClientName
-	}
-	version := cfg.Version
-	if version == "" {
-		version = defaultClientVersion
-	}
-
 	cmd := exec.Command(cfg.Command, cfg.Args...)
 	if len(cfg.Env) > 0 {
 		cmd.Env = append(os.Environ(), cfg.Env...)
 	}
 	cmd.Dir = cfg.Dir
 
-	sdkClient := mcp.NewClient(&mcp.Implementation{Name: name, Version: version}, nil)
+	sdkClient := newSDKClient(cfg.Name, cfg.Version)
 	session, err := sdkClient.Connect(ctx, &mcp.CommandTransport{
 		Command:           cmd,
 		TerminateDuration: cfg.TerminateDuration,
@@ -64,6 +70,34 @@ func ConnectStdio(ctx context.Context, cfg StdioConfig) (*Client, error) {
 		return nil, err
 	}
 	return &Client{session: session}, nil
+}
+
+func ConnectStreamableHTTP(ctx context.Context, cfg StreamableHTTPConfig) (*Client, error) {
+	if cfg.Endpoint == "" {
+		return nil, fmt.Errorf("streamable http endpoint is required")
+	}
+	transport := &mcp.StreamableClientTransport{
+		Endpoint:             cfg.Endpoint,
+		HTTPClient:           cfg.HTTPClient,
+		MaxRetries:           cfg.MaxRetries,
+		DisableStandaloneSSE: !cfg.EnableStandaloneSSE,
+		OAuthHandler:         cfg.OAuthHandler,
+	}
+	session, err := newSDKClient(cfg.Name, cfg.Version).Connect(ctx, transport, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{session: session}, nil
+}
+
+func newSDKClient(name string, version string) *mcp.Client {
+	if name == "" {
+		name = defaultClientName
+	}
+	if version == "" {
+		version = defaultClientVersion
+	}
+	return mcp.NewClient(&mcp.Implementation{Name: name, Version: version}, nil)
 }
 
 func (c *Client) ListTools(ctx context.Context) ([]mcpkit.ToolDescriptor, error) {

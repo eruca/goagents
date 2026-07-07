@@ -56,11 +56,12 @@ Those concerns stay in host applications or transport-specific adapter modules.
 
 The first transport-specific adapter is `github.com/eruca/mcpkit/officialsdk`
 in `mcpkit/officialsdk/`. It uses the official MCP Go SDK to connect to stdio
-MCP servers and exposes the existing `mcpkit.Client` interface.
+and Streamable HTTP MCP servers, then exposes the existing `mcpkit.Client`
+interface.
 
-Streamable HTTP remains a separate adapter decision. Keep it out of this core
-descriptor mapper until its auth, HTTP client, retry, and SSE/session lifecycle
-boundaries are explicitly designed.
+Streamable HTTP defaults to request/response mode by disabling standalone SSE.
+Enable SSE explicitly only when a host needs server-initiated notifications and
+has designed the associated session lifecycle.
 
 ## Verify
 

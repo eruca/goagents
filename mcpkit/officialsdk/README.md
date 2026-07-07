@@ -3,9 +3,10 @@
 `officialsdk` adapts the official `github.com/modelcontextprotocol/go-sdk`
 client session into the transport-neutral `mcpkit.Client` interface.
 
-The first slice only supports stdio MCP servers through the SDK's
-`mcp.CommandTransport`. It intentionally does not expose resources, prompts,
-OAuth, Streamable HTTP, or server implementation helpers.
+It supports stdio MCP servers through the SDK's `mcp.CommandTransport` and
+Streamable HTTP MCP servers through `mcp.StreamableClientTransport`. It
+intentionally does not expose resources, prompts, or server implementation
+helpers.
 
 ## Use
 
@@ -26,9 +27,24 @@ _, err = mcpkit.RegisterTools(ctx, registry, client, mcpkit.RegisterOptions{
 })
 ```
 
+For Streamable HTTP:
+
+```go
+client, err := officialsdk.ConnectStreamableHTTP(ctx, officialsdk.StreamableHTTPConfig{
+    Endpoint: "https://example.com/mcp",
+    Name: "goagents-host",
+    Version: "v0.1.0",
+})
+if err != nil {
+    return err
+}
+defer client.Close()
+```
+
 ## Verify
 
 ```bash
 go test ./...
 go run ./examples/stdio-smoke
+go run ./examples/http-smoke
 ```

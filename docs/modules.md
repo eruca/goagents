@@ -27,8 +27,8 @@ Optional adapter/capability modules:
   descriptors to `goagent` tools. It is optional host-side capability, not part
   of `goagent` core.
 - `github.com/eruca/mcpkit/officialsdk` in `mcpkit/officialsdk/` for adapting
-  the official MCP Go SDK stdio client to `mcpkit.Client`. It is optional and
-  keeps SDK transport/session dependencies out of `mcpkit`.
+  the official MCP Go SDK stdio and Streamable HTTP clients to `mcpkit.Client`.
+  It is optional and keeps SDK transport/session dependencies out of `mcpkit`.
 
 Verification/example modules:
 
@@ -121,6 +121,7 @@ Module-specific checks:
 (cd mcpkit && go test ./...)
 (cd mcpkit/officialsdk && go test ./...)
 (cd mcpkit/officialsdk && go run ./examples/stdio-smoke)
+(cd mcpkit/officialsdk && go run ./examples/http-smoke)
 (cd examples/host-api && go test ./...)
 (cd examples/host-runtime && go test ./...)
 (cd goagent && make verify)

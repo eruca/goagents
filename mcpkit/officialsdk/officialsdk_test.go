@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -75,6 +78,68 @@ func TestStdioClientListsCallsAndRegistersTools(t *testing.T) {
 	}
 }
 
+func TestStreamableHTTPClientListsCallsAndRegistersTools(t *testing.T) {
+	var getRequests atomic.Int32
+	handler := mcp.NewStreamableHTTPHandler(func(req *http.Request) *mcp.Server {
+		return newGreetingServer()
+	}, &mcp.StreamableHTTPOptions{JSONResponse: true})
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodGet {
+			getRequests.Add(1)
+		}
+		handler.ServeHTTP(w, req)
+	}))
+	defer httpServer.Close()
+
+	client, err := ConnectStreamableHTTP(context.Background(), StreamableHTTPConfig{
+		Endpoint: httpServer.URL,
+		Name:     "mcpkit-http-test",
+		Version:  "v0.1.0",
+	})
+	if err != nil {
+		t.Fatalf("ConnectStreamableHTTP returned error: %v", err)
+	}
+	defer client.Close()
+
+	descriptors, err := client.ListTools(context.Background())
+	if err != nil {
+		t.Fatalf("ListTools returned error: %v", err)
+	}
+	if len(descriptors) != 1 || descriptors[0].Name != "greet" {
+		t.Fatalf("descriptors = %#v", descriptors)
+	}
+	result, err := client.CallTool(context.Background(), "greet", json.RawMessage(`{"name":"HTTP"}`))
+	if err != nil {
+		t.Fatalf("CallTool returned error: %v", err)
+	}
+	if firstText(result) != "hello HTTP" {
+		t.Fatalf("tool result = %#v", result)
+	}
+
+	registry := tools.NewRegistry()
+	specs, err := mcpkit.RegisterTools(context.Background(), registry, client, mcpkit.RegisterOptions{MaxLLMChars: 100})
+	if err != nil {
+		t.Fatalf("RegisterTools returned error: %v", err)
+	}
+	if len(specs) != 1 || specs[0].Permission != policy.PermissionRead {
+		t.Fatalf("specs = %#v", specs)
+	}
+	registered, ok := registry.Get("greet")
+	if !ok {
+		t.Fatal("registered tool missing")
+	}
+	toolResult, err := registered.Execute(context.Background(), json.RawMessage(`{"name":"Streamable"}`), tools.Env{})
+	if err != nil {
+		t.Fatalf("registered tool Execute returned error: %v", err)
+	}
+	if toolResult.ForLLM != "structured_content={\"greeting\":\"hello Streamable\"}\nhello Streamable" {
+		t.Fatalf("ForLLM = %q", toolResult.ForLLM)
+	}
+	if got := getRequests.Load(); got != 0 {
+		t.Fatalf("standalone SSE GET requests = %d, want 0 by default", got)
+	}
+}
+
 func TestDescriptorMappingPreservesExplicitAnnotations(t *testing.T) {
 	destructive := true
 	openWorld := false
@@ -134,6 +199,13 @@ func TestConnectStdioRequiresCommand(t *testing.T) {
 	}
 }
 
+func TestConnectStreamableHTTPRequiresEndpoint(t *testing.T) {
+	_, err := ConnectStreamableHTTP(context.Background(), StreamableHTTPConfig{})
+	if err == nil {
+		t.Fatal("expected missing endpoint error")
+	}
+}
+
 func TestHelperMCPServer(t *testing.T) {
 	if os.Getenv("MCPKIT_OFFICIALSDK_HELPER") != "1" {
 		return
@@ -146,6 +218,10 @@ func TestHelperMCPServer(t *testing.T) {
 }
 
 func runHelperMCPServer() error {
+	return newGreetingServer().Run(context.Background(), &mcp.StdioTransport{})
+}
+
+func newGreetingServer() *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{Name: "helper", Version: "v0.1.0"}, nil)
 	server.AddTool(&mcp.Tool{
 		Name:        "greet",
@@ -170,7 +246,7 @@ func runHelperMCPServer() error {
 			StructuredContent: map[string]any{"greeting": greeting},
 		}, nil
 	})
-	return server.Run(context.Background(), &mcp.StdioTransport{})
+	return server
 }
 
 func TestCloseNilClient(t *testing.T) {

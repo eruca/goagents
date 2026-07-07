@@ -27,7 +27,9 @@ official SDK transport/session
 
 - `mcpkit/officialsdk` 已按该结论落地 stdio client adapter。
 - `mcpkit/officialsdk/examples/stdio-smoke` 已提供 fake MCP server 的可运行证明。
-- Streamable HTTP 仍未实现，需单独设计 auth、HTTP client、retry 和 SSE/session 生命周期。
+- Streamable HTTP adapter 已追加落地，默认关闭 standalone SSE，只覆盖 request/response
+  的 `tools/list` 和 `tools/call`。
+- OAuth、远程生产认证、retry policy 和 SSE/session 生命周期仍需单独扩展设计。
 
 ## 调研基线
 
@@ -80,7 +82,8 @@ stdio 是最小可验证路径：
 - 可以直接用 mock MCP server command 做端到端测试。
 - 足够验证 `tools/list` 和 `tools/call` 能进入 `goagent` tool registry。
 
-Streamable HTTP 放第二步，因为它引入远程安全边界：
+Streamable HTTP 已作为第二步追加，但第一版只覆盖 request/response 工具调用。完整
+远程生产使用仍然引入安全边界：
 
 - endpoint、headers、session id、standalone SSE 的生命周期。
 - OAuth/authorization 或 token 注入。
@@ -206,12 +209,11 @@ binary 直接塞进模型上下文，只保留 type、MIME 和必要 metadata；
 
 ## 后续 HTTP adapter 决策点
 
-只有在 stdio adapter 稳定后，再做 Streamable HTTP：
+第一版 Streamable HTTP adapter 已完成。后续增强仍需要单独设计：
 
-- 是否继续使用官方 SDK `mcp.StreamableClientTransport`。
+- 是否继续用 request/response 模式，还是显式开启 standalone SSE。
 - 是否需要注入自定义 `*http.Client`、OpenTelemetry、proxy、retry。
 - auth 边界放 adapter config，还是 host 传入 OAuth handler。
-- standalone SSE 默认开还是关。
 - 是否需要 resumability/event store；如果需要，必须先设计持久化边界。
 
 ## 实施拆分
@@ -220,4 +222,6 @@ binary 直接塞进模型上下文，只保留 type、MIME 和必要 metadata；
 2. 已完成：实现 `ConnectStdio` 和 SDK DTO -> `mcpkit` DTO 映射。
 3. 已完成：增加 stdio fake server 示例和测试。
 4. 已完成：把示例接入 `scripts/verify-all.sh`。
-5. 后续：稳定后再开 Streamable HTTP design，不和 stdio 第一版混做。
+5. 已完成：追加 `ConnectStreamableHTTP`，默认关闭 standalone SSE。
+6. 已完成：增加 Streamable HTTP fake server 示例并接入 `scripts/verify-all.sh`。
+7. 后续：生产远程 HTTP/OAuth/SSE 生命周期单独设计，不和基础 adapter 混做。
