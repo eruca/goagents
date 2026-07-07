@@ -26,6 +26,9 @@ Optional adapter/capability modules:
 - `github.com/eruca/mcpkit` in `mcpkit/` for adapting MCP-style tool
   descriptors to `goagent` tools. It is optional host-side capability, not part
   of `goagent` core.
+- `github.com/eruca/mcpkit/officialsdk` in `mcpkit/officialsdk/` for adapting
+  the official MCP Go SDK stdio client to `mcpkit.Client`. It is optional and
+  keeps SDK transport/session dependencies out of `mcpkit`.
 
 Verification/example modules:
 
@@ -58,6 +61,7 @@ Adapter and composition modules may depend on multiple core modules:
 workflowkit/agentstep        may import workflowkit + goagent
 llmkit adapters              may import llmkit + goagent
 mcpkit                       may import goagent
+mcpkit/officialsdk           may import mcpkit + official MCP Go SDK
 examples/host-api            may import workflowkit + agentstep + goagent + llmkit + artifactkit + runkit
 examples/host-runtime        may import workflowkit + agentstep + goagent + llmkit + artifactkit + runkit
 examples/agent-approval      may import workflowkit + agentstep + goagent
@@ -88,6 +92,7 @@ workflowkit/v0.1.0
 workflowkit/agentstep/v0.1.0
 llmkit/v0.1.0
 mcpkit/v0.1.0
+mcpkit/officialsdk/v0.1.0
 ```
 
 Only tag modules that changed. If `workflowkit/agentstep` changes without a core
@@ -114,6 +119,8 @@ Module-specific checks:
 (cd runkit && go test ./...)
 (cd llmkit && go test ./...)
 (cd mcpkit && go test ./...)
+(cd mcpkit/officialsdk && go test ./...)
+(cd mcpkit/officialsdk && go run ./examples/stdio-smoke)
 (cd examples/host-api && go test ./...)
 (cd examples/host-runtime && go test ./...)
 (cd goagent && make verify)

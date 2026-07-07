@@ -50,20 +50,17 @@ It does not own:
 - OAuth or remote authorization
 - tool approval UI
 
-Those concerns stay in host applications or future transport-specific adapters.
+Those concerns stay in host applications or transport-specific adapter modules.
 
-## Next Adapter Layer
+## Transport Adapters
 
-The next production layer should be a real MCP client adapter for stdio and/or
-HTTP transports. Do not add that inside the current descriptor adapter until the
-project chooses one of these paths:
+The first transport-specific adapter is `github.com/eruca/mcpkit/officialsdk`
+in `mcpkit/officialsdk/`. It uses the official MCP Go SDK to connect to stdio
+MCP servers and exposes the existing `mcpkit.Client` interface.
 
-- adopt a maintained MCP Go SDK and keep `mcpkit` as the `goagent` mapping layer
-- implement a small JSON-RPC client transport locally, with explicit lifecycle,
-  cancellation, timeout, and auth boundaries
-
-Until that decision is made, `mcpkit.Client` remains the stable seam for tests
-and host-owned integrations.
+Streamable HTTP remains a separate adapter decision. Keep it out of this core
+descriptor mapper until its auth, HTTP client, retry, and SSE/session lifecycle
+boundaries are explicitly designed.
 
 ## Verify
 
