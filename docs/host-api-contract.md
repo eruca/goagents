@@ -248,20 +248,77 @@ Response:
 Requeueing `pending`, `running`, `waiting_approval`, or `succeeded` returns
 `400 invalid_request`. Missing workflow response: `404 not_found`.
 
+## POST /workflows/{id}/agent-approve
+
+Resolves a tool call paused by an agent whose task profile requested tools.
+This is distinct from final workflow approval: an allowed tool resumes the
+agent, writes its output, then leaves the workflow in `waiting_approval` for
+the normal `POST /workflows/{id}/approve` decision.
+
+The paused workflow response exposes only safe metadata:
+
+```json
+{
+  "agent_approval": {
+    "checkpoint_id": "opaque-id",
+    "tools": [
+      {"index": 0, "tool_call_id": "call-record-review", "tool": "record_review"}
+    ]
+  }
+}
+```
+
+Checkpoint plaintext, tool JSON input, prompt content, and bearer tokens are
+never returned. The checkpoint is encrypted in `agent-runs.db`; on a real local
+macOS run the data key is lazily created and kept only in Keychain. Tests inject
+a cipher and do not access a machine Keychain.
+
+Authentication is `Authorization: Bearer <OIDC JWT>` and uses the same verified
+`sub` identity rule as final workflow approval. The request accepts only exact
+tool call identities and an allow/deny decision:
+
+```json
+{
+  "resolutions": [
+    {
+      "index": 0,
+      "tool_call_id": "call-record-review",
+      "tool": "record_review",
+      "allowed": true
+    }
+  ]
+}
+```
+
+Callers cannot send checkpoint plaintext, tenant, definition hash, approver
+identity, lease values, or a free-form approval reason. For an allowed batch,
+the host requires an exact match before any tool runs. A mismatched decision is
+terminally failed and returns `400 invalid_request`; the tool does not run. A
+denied decision records the verified operator, never decrypts or executes the
+checkpoint, and cancels the workflow. Missing or invalid tokens return
+`401 unauthorized` without changing the checkpoint.
+
 ## POST /workflows/{id}/approve
 
 Approves and finalizes a waiting workflow.
+
+Authentication: `Authorization: Bearer <OIDC JWT>`. The host verifies the
+issuer, audience, signature, and expiry through OIDC discovery/JWKS, then
+records the verified `sub` claim as the approver. Tokens are never stored.
 
 Request:
 
 ```json
 {
-  "approved_by": "operator",
   "note": "accepted"
 }
 ```
 
 Response status: `200 OK`.
+
+Missing, malformed, expired, wrong-issuer, or wrong-audience tokens return
+`401 unauthorized`. `approved_by` is not an accepted request field, so callers
+cannot supply or override the audited identity.
 
 Response:
 
@@ -474,7 +531,7 @@ diagnostics, not durable metrics.
 
 ## Current Non-Goals
 
-- Authentication and multi-tenant authorization.
+- Fine-grained multi-tenant authorization.
 - Distributed queued worker scheduling.
 - Durable worker metrics.
 - Server-sent events or live workflow updates.

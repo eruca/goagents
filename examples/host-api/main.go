@@ -5,12 +5,20 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 )
 
 func main() {
+	startupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	approvalAuthenticator, err := loadOIDCApprovalAuthenticator(startupCtx, os.Getenv)
+	if err != nil {
+		panic(err)
+	}
 	config := Config{
-		RuntimeHome: os.Getenv("HOST_RUNTIME_HOME"),
-		LLMKitHome:  os.Getenv("LLMKIT_HOME"),
+		RuntimeHome:           os.Getenv("HOST_RUNTIME_HOME"),
+		LLMKitHome:            os.Getenv("LLMKIT_HOME"),
+		ApprovalAuthenticator: approvalAuthenticator,
 	}
 	server, err := NewServer(config)
 	if err != nil {

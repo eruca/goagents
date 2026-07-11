@@ -3,6 +3,7 @@ module github.com/eruca/goagents/examples/host-api
 go 1.26.1
 
 require (
+	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/eruca/artifactkit v0.0.0
 	github.com/eruca/goagent v0.0.0
 	github.com/eruca/llmkit v0.0.0
@@ -13,11 +14,13 @@ require (
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect
+	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/text v0.34.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect

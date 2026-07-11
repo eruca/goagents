@@ -171,6 +171,8 @@ paths:
       operationId: approveWorkflow
       parameters:
         - $ref: '#/components/parameters/WorkflowID'
+      security:
+        - bearerAuth: []
       requestBody:
         required: true
         content:
@@ -180,7 +182,6 @@ paths:
             examples:
               approve:
                 value:
-                  approved_by: operator
                   note: accepted
       responses:
         '200':
@@ -191,7 +192,52 @@ paths:
                 $ref: '#/components/schemas/WorkflowResponse'
         '400':
           $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
         '404':
+          $ref: '#/components/responses/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+  /workflows/{id}/agent-approve:
+    post:
+      tags:
+        - workflows
+      summary: Resolve a paused agent tool approval
+      description: >
+        Resolves the safe tool identities returned in agent_approval. A granted
+        resolution resumes the agent once; a rejected resolution never decrypts
+        or executes the tool. This is separate from final workflow approval.
+      operationId: approveAgentTool
+      parameters:
+        - $ref: '#/components/parameters/WorkflowID'
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentApprovalRequest'
+      responses:
+        '200':
+          description: Agent tool was resumed or rejected. A successful resume remains waiting for final workflow approval.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowResponse'
+        '202':
+          description: Agent paused again and exposes a replacement safe agent approval.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+        '409':
           $ref: '#/components/responses/ErrorResponse'
         '500':
           $ref: '#/components/responses/ErrorResponse'
@@ -268,6 +314,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/QueuedWorkerStatus'
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: OIDC JWT whose verified sub claim is recorded as the approver.
   parameters:
     WorkflowID:
       name: id
@@ -309,9 +361,65 @@ components:
       type: object
       additionalProperties: false
       properties:
-        approved_by:
-          type: string
         note:
+          type: string
+    AgentApprovalRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - resolutions
+      properties:
+        resolutions:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/AgentToolResolution'
+    AgentToolResolution:
+      type: object
+      additionalProperties: false
+      required:
+        - index
+        - tool_call_id
+        - tool
+        - allowed
+      properties:
+        index:
+          type: integer
+          minimum: 0
+        tool_call_id:
+          type: string
+        tool:
+          type: string
+        allowed:
+          type: boolean
+    AgentApproval:
+      type: object
+      additionalProperties: false
+      required:
+        - checkpoint_id
+        - tools
+      properties:
+        checkpoint_id:
+          type: string
+          description: Opaque approval checkpoint identity. It does not contain checkpoint plaintext.
+        tools:
+          type: array
+          items:
+            $ref: '#/components/schemas/PendingAgentTool'
+    PendingAgentTool:
+      type: object
+      additionalProperties: false
+      required:
+        - index
+        - tool_call_id
+        - tool
+      properties:
+        index:
+          type: integer
+          minimum: 0
+        tool_call_id:
+          type: string
+        tool:
           type: string
     WorkflowResponse:
       type: object
@@ -339,6 +447,8 @@ components:
           type: string
         waiting_reason:
           type: string
+        agent_approval:
+          $ref: '#/components/schemas/AgentApproval'
         completed_steps:
           type: array
           items:
@@ -724,6 +834,7 @@ components:
             - llm_audit_error
             - run_error
             - not_found
+            - unauthorized
         message:
           type: string
     ScoreBreakdown:

@@ -20,7 +20,12 @@ import (
 )
 
 func TestHostAPIWorkflowApprovalRunAndModelEndpoints(t *testing.T) {
-	server, err := NewServer(Config{LLMKitHome: t.TempDir()})
+	server, err := NewServer(Config{
+		LLMKitHome: t.TempDir(),
+		ApprovalAuthenticator: testApprovalAuthenticator{
+			identity: ApprovalIdentity{Subject: "operator-api"},
+		},
+	})
 	if err != nil {
 		t.Fatalf("NewServer returned error: %v", err)
 	}
@@ -67,10 +72,7 @@ func TestHostAPIWorkflowApprovalRunAndModelEndpoints(t *testing.T) {
 		t.Fatalf("health snapshot should include selected provider after workflow run: %+v", models.Health)
 	}
 
-	approved := doJSON[workflowResponse](t, handler, http.MethodPost, "/workflows/wf-api-1/approve", map[string]string{
-		"approved_by": "operator-api",
-		"note":        "accepted",
-	})
+	approved := doJSON[workflowResponse](t, handler, http.MethodPost, "/workflows/wf-api-1/approve", map[string]string{"note": "accepted"})
 	if approved.Status != string(workflowkit.StatusSucceeded) {
 		t.Fatalf("approved response = %+v, want succeeded", approved)
 	}
@@ -81,7 +83,12 @@ func TestHostAPIWorkflowApprovalRunAndModelEndpoints(t *testing.T) {
 
 func TestHostAPIDurableRuntimeResumesWorkflowAfterReopen(t *testing.T) {
 	runtimeHome := t.TempDir()
-	server, err := NewServer(Config{RuntimeHome: runtimeHome})
+	server, err := NewServer(Config{
+		RuntimeHome: runtimeHome,
+		ApprovalAuthenticator: testApprovalAuthenticator{
+			identity: ApprovalIdentity{Subject: "operator-durable"},
+		},
+	})
 	if err != nil {
 		t.Fatalf("NewServer returned error: %v", err)
 	}
@@ -94,7 +101,12 @@ func TestHostAPIDurableRuntimeResumesWorkflowAfterReopen(t *testing.T) {
 		t.Fatalf("create status = %q, want waiting_approval", create.Status)
 	}
 
-	reopened, err := NewServer(Config{RuntimeHome: runtimeHome})
+	reopened, err := NewServer(Config{
+		RuntimeHome: runtimeHome,
+		ApprovalAuthenticator: testApprovalAuthenticator{
+			identity: ApprovalIdentity{Subject: "operator-durable"},
+		},
+	})
 	if err != nil {
 		t.Fatalf("reopen NewServer returned error: %v", err)
 	}
@@ -108,10 +120,7 @@ func TestHostAPIDurableRuntimeResumesWorkflowAfterReopen(t *testing.T) {
 		t.Fatalf("agent run after reopen = %+v, want durable run with events", run)
 	}
 
-	approved := doJSON[workflowResponse](t, reopened.Handler(), http.MethodPost, "/workflows/wf-durable-1/approve", map[string]string{
-		"approved_by": "operator-durable",
-		"note":        "resume after reopen",
-	})
+	approved := doJSON[workflowResponse](t, reopened.Handler(), http.MethodPost, "/workflows/wf-durable-1/approve", map[string]string{"note": "resume after reopen"})
 	if approved.Status != string(workflowkit.StatusSucceeded) {
 		t.Fatalf("approved after reopen = %+v, want succeeded", approved)
 	}
@@ -461,7 +470,12 @@ func TestHostAPIListsWorkflowsByRunModeAndDescendingOrder(t *testing.T) {
 }
 
 func TestHostAPIReturnsWorkflowLLMRouteAudit(t *testing.T) {
-	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	server, err := NewServer(Config{
+		RuntimeHome: t.TempDir(),
+		ApprovalAuthenticator: testApprovalAuthenticator{
+			identity: ApprovalIdentity{Subject: "operator-routes"},
+		},
+	})
 	if err != nil {
 		t.Fatalf("NewServer returned error: %v", err)
 	}
@@ -500,10 +514,7 @@ func TestHostAPIReturnsWorkflowLLMRouteAudit(t *testing.T) {
 		t.Fatalf("route outcome = %+v, want successful token outcome", got.Outcome)
 	}
 
-	approved := doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows/wf-routes-1/approve", map[string]string{
-		"approved_by": "operator-routes",
-		"note":        "accepted",
-	})
+	approved := doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows/wf-routes-1/approve", map[string]string{"note": "accepted"})
 	if approved.Status != string(workflowkit.StatusSucceeded) {
 		t.Fatalf("approved response = %+v, want succeeded", approved)
 	}
@@ -883,7 +894,12 @@ func TestHostAPIReturnsJSONErrors(t *testing.T) {
 }
 
 func TestHostAPIRunModeSyncAndQueuedSemantics(t *testing.T) {
-	server, err := NewServer(Config{LLMKitHome: t.TempDir()})
+	server, err := NewServer(Config{
+		LLMKitHome: t.TempDir(),
+		ApprovalAuthenticator: testApprovalAuthenticator{
+			identity: ApprovalIdentity{Subject: "operator-queued"},
+		},
+	})
 	if err != nil {
 		t.Fatalf("NewServer returned error: %v", err)
 	}
@@ -925,10 +941,7 @@ func TestHostAPIRunModeSyncAndQueuedSemantics(t *testing.T) {
 		t.Fatalf("queued selected model = %q, want local-free; routes=%+v", got, routes.Routes)
 	}
 
-	approved := doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows/wf-queued/approve", map[string]string{
-		"approved_by": "operator-queued",
-		"note":        "accepted queued",
-	})
+	approved := doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows/wf-queued/approve", map[string]string{"note": "accepted queued"})
 	if approved.Status != string(workflowkit.StatusSucceeded) {
 		t.Fatalf("queued approval = %+v, want succeeded", approved)
 	}

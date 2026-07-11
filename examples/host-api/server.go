@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -16,36 +17,44 @@ import (
 
 	"github.com/eruca/artifactkit"
 	"github.com/eruca/goagent/agentcore"
+	"github.com/eruca/goagent/policy"
 	"github.com/eruca/goagent/ports"
 	goagentadapter "github.com/eruca/llmkit/adapters/goagent"
 	"github.com/eruca/llmkit/llmkit"
 	"github.com/eruca/runkit"
+	"github.com/eruca/runkit/goagentapproval"
 	runsqlite "github.com/eruca/runkit/sqlitestore"
 	"github.com/eruca/workflowkit"
 	workflowsqlite "github.com/eruca/workflowkit/sqlitestore"
 )
 
 type Config struct {
-	RuntimeHome    string
-	LLMKitHome     string
-	WorkflowDBPath string
-	AgentRunDBPath string
-	ArtifactRoot   string
+	RuntimeHome           string
+	LLMKitHome            string
+	WorkflowDBPath        string
+	AgentRunDBPath        string
+	ArtifactRoot          string
+	ApprovalAuthenticator ApprovalAuthenticator
+	// AgentApprovalCipher is test-only injection for the host's tool-approval
+	// checkpoint encryption boundary. Real local runs lazily use macOS Keychain.
+	AgentApprovalCipher goagentapproval.Cipher
 }
 
 type Server struct {
-	artifacts artifactkit.Store
-	runs      runkit.Store
-	workflows workflowkit.Store
-	queries   workflowkit.WorkflowQueryStore
-	queue     workflowkit.QueueLeaseStore
-	executor  *workflowkit.Executor
-	health    *llmkit.MemoryHealthStore
-	llmHome   string
-	models    []llmkit.Candidate
-	providers map[string]goagentadapter.ProviderClient
-	worker    queuedWorkerStatus
-	workerCfg queuedWorkerConfig
+	artifacts             artifactkit.Store
+	runs                  runkit.Store
+	workflows             workflowkit.Store
+	queries               workflowkit.WorkflowQueryStore
+	queue                 workflowkit.QueueLeaseStore
+	executor              *workflowkit.Executor
+	health                *llmkit.MemoryHealthStore
+	llmHome               string
+	models                []llmkit.Candidate
+	providers             map[string]goagentadapter.ProviderClient
+	approvalAuthenticator ApprovalAuthenticator
+	agentApprovals        *hostAgentApprovalService
+	worker                queuedWorkerStatus
+	workerCfg             queuedWorkerConfig
 }
 
 type createWorkflowRequest struct {
@@ -57,8 +66,7 @@ type createWorkflowRequest struct {
 }
 
 type approveWorkflowRequest struct {
-	ApprovedBy string `json:"approved_by"`
-	Note       string `json:"note"`
+	Note string `json:"note"`
 }
 
 type taskProfileRequest struct {
@@ -75,16 +83,17 @@ type taskProfileRequest struct {
 }
 
 type workflowResponse struct {
-	ID            string   `json:"id"`
-	Status        string   `json:"status"`
-	RunMode       string   `json:"run_mode"`
-	InputRef      string   `json:"input_ref,omitempty"`
-	OutputRef     string   `json:"output_ref,omitempty"`
-	AgentRunID    string   `json:"agent_run_id,omitempty"`
-	AuditRef      string   `json:"audit_ref,omitempty"`
-	ApprovalRef   string   `json:"approval_ref,omitempty"`
-	WaitingReason string   `json:"waiting_reason,omitempty"`
-	Completed     []string `json:"completed_steps,omitempty"`
+	ID            string                 `json:"id"`
+	Status        string                 `json:"status"`
+	RunMode       string                 `json:"run_mode"`
+	InputRef      string                 `json:"input_ref,omitempty"`
+	OutputRef     string                 `json:"output_ref,omitempty"`
+	AgentRunID    string                 `json:"agent_run_id,omitempty"`
+	AuditRef      string                 `json:"audit_ref,omitempty"`
+	ApprovalRef   string                 `json:"approval_ref,omitempty"`
+	WaitingReason string                 `json:"waiting_reason,omitempty"`
+	AgentApproval *agentApprovalResponse `json:"agent_approval,omitempty"`
+	Completed     []string               `json:"completed_steps,omitempty"`
 }
 
 type workflowListResponse struct {
@@ -134,7 +143,11 @@ const (
 	requeueEventsMetadataKey   = "requeue_events"
 )
 
-var errWorkflowNotRequeueable = errors.New("workflow status cannot be requeued")
+var (
+	errWorkflowNotRequeueable    = errors.New("workflow status cannot be requeued")
+	errAgentApprovalNotPending   = errors.New("agent tool approval is not pending")
+	errAgentApprovalResumeFailed = errors.New("agent tool approval resume failed")
+)
 
 type queuedWorkerConfig struct {
 	leaseDuration time.Duration
@@ -391,17 +404,40 @@ func NewServer(config Config) (*Server, error) {
 		_ = runs.Close()
 		return nil, err
 	}
-	server := &Server{
-		artifacts: artifacts,
-		runs:      runs,
-		workflows: workflows,
-		queries:   workflows,
-		queue:     workflows,
-		health:    llmkit.NewMemoryHealthStore(llmkit.HealthPolicy{}),
-		llmHome:   resolved.LLMKitHome,
-		models:    models,
+	health := llmkit.NewMemoryHealthStore(llmkit.HealthPolicy{})
+	runner := routingAgentRunner{
+		llmkitHome: resolved.LLMKitHome,
+		runs:       runs,
+		artifacts:  artifacts,
+		health:     health,
+		candidates: models,
+		statsProvider: func(ctx context.Context) (*llmkit.ModelStats, error) {
+			return llmkit.RefreshModelStats(resolved.LLMKitHome)
+		},
 		providers: providers,
-		workerCfg: workerCfg,
+	}
+	agentApprovals, err := newHostAgentApprovalService(runs, config.AgentApprovalCipher, runner)
+	if err != nil {
+		_ = workflows.Close()
+		_ = runs.Close()
+		return nil, err
+	}
+	server := &Server{
+		artifacts:             artifacts,
+		runs:                  runs,
+		workflows:             workflows,
+		queries:               workflows,
+		queue:                 workflows,
+		health:                health,
+		llmHome:               resolved.LLMKitHome,
+		models:                models,
+		providers:             providers,
+		workerCfg:             workerCfg,
+		approvalAuthenticator: config.ApprovalAuthenticator,
+		agentApprovals:        agentApprovals,
+	}
+	if server.approvalAuthenticator == nil {
+		server.approvalAuthenticator = rejectingApprovalAuthenticator{}
 	}
 	server.executor = workflowkit.NewExecutor(workflows, []workflowkit.Step{
 		ingestStep{artifacts: artifacts},
@@ -477,6 +513,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /workflows/{id}", s.handleGetWorkflow)
 	mux.HandleFunc("GET /workflows/{id}/events", s.handleWorkflowEvents)
 	mux.HandleFunc("POST /workflows/{id}/approve", s.handleApproveWorkflow)
+	mux.HandleFunc("POST /workflows/{id}/agent-approve", s.handleApproveAgentTool)
 	mux.HandleFunc("POST /workflows/{id}/requeue", s.handleRequeueWorkflow)
 	mux.HandleFunc("GET /workflows/{id}/llm-routes", s.handleGetWorkflowLLMRoutes)
 	mux.HandleFunc("GET /agent-runs/{id}", s.handleGetAgentRun)
@@ -704,15 +741,20 @@ func (s *Server) handleRequeueWorkflow(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleApproveWorkflow(w http.ResponseWriter, r *http.Request) {
+	identity, err := s.approvalAuthenticator.AuthenticateApproval(r.Context(), r.Header.Get("Authorization"))
+	if err != nil {
+		writeApprovalUnauthorized(w)
+		return
+	}
 	var req approveWorkflowRequest
-	if !decodeJSON(w, r, &req) {
+	if !decodeJSONStrict(w, r, &req) {
 		return
 	}
 	id := r.PathValue("id")
 	run, err := s.executor.Approve(r.Context(), id, workflowkit.Approval{
 		AuditRef: "audit:" + id + ":approval",
 		Metadata: map[string]any{
-			"approved_by":   req.ApprovedBy,
+			"approved_by":   identity.Subject,
 			"approval_note": req.Note,
 		},
 	})
@@ -725,6 +767,184 @@ func (s *Server) handleApproveWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, workflowToResponse(run, RunModeSync))
+}
+
+func (s *Server) handleApproveAgentTool(w http.ResponseWriter, r *http.Request) {
+	identity, err := s.approvalAuthenticator.AuthenticateApproval(r.Context(), r.Header.Get("Authorization"))
+	if err != nil {
+		writeApprovalUnauthorized(w)
+		return
+	}
+	var req agentApprovalRequest
+	if !decodeJSONStrict(w, r, &req) {
+		return
+	}
+	if len(req.Resolutions) == 0 {
+		writeError(w, http.StatusBadRequest, "invalid_request", "at least one tool resolution is required")
+		return
+	}
+	resolutions := req.coreResolutions()
+	workflowID := r.PathValue("id")
+	run, err := s.workflows.Get(r.Context(), workflowID)
+	if err != nil {
+		writeWorkflowStoreError(w, err)
+		return
+	}
+	approval := agentApprovalFromMetadata(run.Metadata)
+	if run.Status != workflowkit.StatusWaitingApproval || approval == nil || s.agentApprovals == nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", errAgentApprovalNotPending.Error())
+		return
+	}
+	if hasDeniedResolution(resolutions) {
+		if err := s.agentApprovals.Reject(r.Context(), workflowID, *approval, identity.Subject); err != nil {
+			writeError(w, http.StatusConflict, "workflow_error", "agent tool approval could not be rejected")
+			return
+		}
+		updated, err := s.rejectAgentApprovalWorkflow(r.Context(), run, "agent tool approval rejected")
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "workflow_error", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, workflowToResponse(updated, RunModeSync))
+		return
+	}
+
+	next, result, resumeErr := s.agentApprovals.ApproveAndResume(r.Context(), workflowID, *approval, identity.Subject, resolutions)
+	if errors.Is(resumeErr, agentcore.ErrApprovalPending) && result != nil && result.Interruption != nil && len(next.Tools) > 0 {
+		updated, err := s.replacePendingAgentApproval(r.Context(), run, approval.CheckpointID, next)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "workflow_error", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusAccepted, workflowToResponse(updated, RunModeSync))
+		return
+	}
+	if resumeErr != nil || result == nil {
+		_ = s.failAgentApprovalWorkflow(r.Context(), run, approval.CheckpointID, result, errAgentApprovalResumeFailed)
+		if errors.Is(resumeErr, agentcore.ErrInvalidApprovalResolution) {
+			writeError(w, http.StatusBadRequest, "invalid_request", "tool resolutions do not match the pending approval")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "workflow_error", errAgentApprovalResumeFailed.Error())
+		return
+	}
+
+	updated, err := s.persistResumedAgentResult(r.Context(), run, approval.CheckpointID, result)
+	if err != nil {
+		_ = s.failAgentApprovalWorkflow(r.Context(), run, approval.CheckpointID, result, err)
+		writeError(w, http.StatusInternalServerError, "workflow_error", "agent approval result persistence failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, workflowToResponse(updated, RunModeSync))
+}
+
+func hasDeniedResolution(resolutions []agentcore.ToolApprovalResolution) bool {
+	for _, resolution := range resolutions {
+		if !resolution.Allowed {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) persistResumedAgentResult(ctx context.Context, run workflowkit.WorkflowRun, checkpointID string, result *agentcore.RunResult) (workflowkit.WorkflowRun, error) {
+	outputRef := "artifact:" + run.ID + ":agent-output"
+	if err := putTextArtifact(ctx, s.artifacts, outputRef, result.Content); err != nil {
+		return workflowkit.WorkflowRun{}, err
+	}
+	if err := s.runs.Complete(ctx, result.RunID.String(), runkit.TerminalSummary{
+		Status:       runkit.StatusSucceeded,
+		ContentRef:   outputRef,
+		InputTokens:  result.Usage.InputTokens,
+		OutputTokens: result.Usage.OutputTokens,
+		LLMCalls:     result.ExecutionSummary.LLMCalls,
+		ToolCalls:    result.ExecutionSummary.ToolCalls,
+		UsedTools:    result.ExecutionSummary.UsedTools,
+	}); err != nil {
+		return workflowkit.WorkflowRun{}, err
+	}
+	return s.workflows.Update(ctx, run.ID, func(current workflowkit.WorkflowRun) (workflowkit.WorkflowRun, error) {
+		if !workflowHasPendingAgentApproval(current, checkpointID) {
+			return current, errAgentApprovalNotPending
+		}
+		clearAgentApprovalMetadata(current.Metadata)
+		current.OutputRef = outputRef
+		current.AgentRunID = result.RunID.String()
+		current.ApprovalRef = "approval:" + current.ID
+		current.WaitingReason = "operator approval required before finalizing host API output"
+		current.Metadata["agent_output_ref"] = outputRef
+		return current, nil
+	})
+}
+
+func (s *Server) replacePendingAgentApproval(ctx context.Context, run workflowkit.WorkflowRun, previousCheckpointID string, approval agentApprovalResponse) (workflowkit.WorkflowRun, error) {
+	return s.workflows.Update(ctx, run.ID, func(current workflowkit.WorkflowRun) (workflowkit.WorkflowRun, error) {
+		if !workflowHasPendingAgentApproval(current, previousCheckpointID) {
+			return current, errAgentApprovalNotPending
+		}
+		for key, value := range approval.workflowMetadata() {
+			current.Metadata[key] = value
+		}
+		current.ApprovalRef = "agent-approval:" + approval.CheckpointID
+		current.WaitingReason = "operator tool approval required before record_review executes"
+		return current, nil
+	})
+}
+
+func (s *Server) rejectAgentApprovalWorkflow(ctx context.Context, run workflowkit.WorkflowRun, reason string) (workflowkit.WorkflowRun, error) {
+	if err := s.runs.Complete(ctx, run.AgentRunID, runkit.TerminalSummary{
+		Status:      runkit.StatusFailed,
+		AbortReason: reason,
+	}); err != nil {
+		return workflowkit.WorkflowRun{}, err
+	}
+	return s.workflows.Update(ctx, run.ID, func(current workflowkit.WorkflowRun) (workflowkit.WorkflowRun, error) {
+		if current.Status != workflowkit.StatusWaitingApproval || agentApprovalFromMetadata(current.Metadata) == nil {
+			return current, errAgentApprovalNotPending
+		}
+		clearAgentApprovalMetadata(current.Metadata)
+		current.Status = workflowkit.StatusCancelled
+		current.Error = reason
+		current.ApprovalRef = ""
+		current.WaitingReason = ""
+		return current, nil
+	})
+}
+
+func (s *Server) failAgentApprovalWorkflow(ctx context.Context, run workflowkit.WorkflowRun, checkpointID string, result *agentcore.RunResult, cause error) error {
+	if result != nil {
+		_ = s.runs.Complete(ctx, result.RunID.String(), runkit.TerminalSummary{
+			Status:       runkit.StatusFailed,
+			AbortReason:  cause.Error(),
+			InputTokens:  result.Usage.InputTokens,
+			OutputTokens: result.Usage.OutputTokens,
+			LLMCalls:     result.ExecutionSummary.LLMCalls,
+			ToolCalls:    result.ExecutionSummary.ToolCalls,
+			UsedTools:    result.ExecutionSummary.UsedTools,
+		})
+	}
+	_, err := s.workflows.Update(ctx, run.ID, func(current workflowkit.WorkflowRun) (workflowkit.WorkflowRun, error) {
+		if !workflowHasPendingAgentApproval(current, checkpointID) {
+			return current, errAgentApprovalNotPending
+		}
+		clearAgentApprovalMetadata(current.Metadata)
+		current.Status = workflowkit.StatusFailed
+		current.Error = "agent tool approval processing failed"
+		current.ApprovalRef = ""
+		current.WaitingReason = ""
+		return current, nil
+	})
+	return err
+}
+
+func clearAgentApprovalMetadata(metadata map[string]any) {
+	delete(metadata, agentApprovalMetadataID)
+	delete(metadata, agentApprovalMetadataTools)
+}
+
+func workflowHasPendingAgentApproval(run workflowkit.WorkflowRun, checkpointID string) bool {
+	approval := agentApprovalFromMetadata(run.Metadata)
+	return run.Status == workflowkit.StatusWaitingApproval && approval != nil && approval.CheckpointID == checkpointID
 }
 
 func (s *Server) handleGetWorkflowLLMRoutes(w http.ResponseWriter, r *http.Request) {
@@ -838,6 +1058,7 @@ func (s *Server) agentStep() workflowkit.Step {
 	runner := routingAgentRunner{
 		llmkitHome: s.llmHome,
 		runs:       s.runs,
+		artifacts:  s.artifacts,
 		health:     s.health,
 		candidates: s.models,
 		statsProvider: func(ctx context.Context) (*llmkit.ModelStats, error) {
@@ -849,6 +1070,7 @@ func (s *Server) agentStep() workflowkit.Step {
 		runner:    runner,
 		artifacts: s.artifacts,
 		runs:      s.runs,
+		approvals: s.agentApprovals,
 	}
 }
 
@@ -856,6 +1078,7 @@ type hostAgentStep struct {
 	runner    routingAgentRunner
 	artifacts artifactkit.Store
 	runs      runkit.Store
+	approvals *hostAgentApprovalService
 }
 
 func (s hostAgentStep) Name() string {
@@ -864,14 +1087,31 @@ func (s hostAgentStep) Name() string {
 
 func (s hostAgentStep) Run(ctx context.Context, run workflowkit.WorkflowRun) (workflowkit.StepResult, error) {
 	profile := taskProfileFromMetadata(run.Metadata["task_profile"])
-	result, err := s.runner.RunDetailed(ctx, agentcore.RunRequest{
+	request := agentcore.RunRequest{
 		Input: "Review input artifact " + run.InputRef,
 		Metadata: map[string]any{
 			"workflow_id":  run.ID,
 			"task_profile": profile,
 		},
-	})
+	}
+	if profile.NeedsTools {
+		request.AllowedPermissions = []policy.Permission{policy.PermissionWrite}
+	}
+	result, err := s.runner.RunDetailed(ctx, request)
 	if err != nil {
+		if errors.Is(err, agentcore.ErrApprovalPending) && result != nil && result.Interruption != nil && s.approvals != nil {
+			approval, saveErr := s.approvals.SavePending(ctx, run.ID, result.Interruption.Checkpoint)
+			if saveErr != nil {
+				return failedAgentStepResult(result, saveErr), saveErr
+			}
+			return workflowkit.StepResult{
+				Status:        workflowkit.StatusWaitingApproval,
+				AgentRunID:    result.RunID.String(),
+				ApprovalRef:   "agent-approval:" + approval.CheckpointID,
+				WaitingReason: "operator tool approval required before record_review executes",
+				Metadata:      approval.workflowMetadata(),
+			}, nil
+		}
 		return failedAgentStepResult(result, err), err
 	}
 	if result == nil {
@@ -924,6 +1164,7 @@ func failedAgentStepResult(result *agentcore.RunResult, err error) workflowkit.S
 type routingAgentRunner struct {
 	llmkitHome    string
 	runs          runkit.Store
+	artifacts     artifactkit.Store
 	health        llmkit.HealthStore
 	candidates    []llmkit.Candidate
 	statsProvider goagentadapter.ModelStatsProvider
@@ -936,6 +1177,29 @@ func (r routingAgentRunner) RunDetailed(ctx context.Context, req agentcore.RunRe
 		return nil, fmt.Errorf("workflow_id metadata is required")
 	}
 	profile := taskProfileFromMetadata(req.Metadata["task_profile"])
+	agent, err := r.newAgent(workflowID, profile)
+	if err != nil {
+		return nil, err
+	}
+	return agent.RunDetailed(ctx, req)
+}
+
+// ResumeDetailed rebuilds the host-owned tool registry from checkpoint request
+// metadata before goagent validates and resumes the exact pending tool batch.
+func (r routingAgentRunner) ResumeDetailed(ctx context.Context, checkpoint agentcore.RunCheckpoint, resolutions []agentcore.ToolApprovalResolution) (*agentcore.RunResult, error) {
+	workflowID, _ := checkpoint.Request.Metadata["workflow_id"].(string)
+	if workflowID == "" {
+		return nil, fmt.Errorf("workflow_id metadata is required in checkpoint")
+	}
+	profile := taskProfileFromMetadata(checkpoint.Request.Metadata["task_profile"])
+	agent, err := r.newAgent(workflowID, profile)
+	if err != nil {
+		return nil, err
+	}
+	return agent.ResumeDetailed(ctx, checkpoint, resolutions)
+}
+
+func (r routingAgentRunner) newAgent(workflowID string, profile llmkit.TaskProfile) (*agentcore.Agent, error) {
 	recorder, err := llmkit.NewJSONLRecorder(r.llmkitHome)
 	if err != nil {
 		return nil, err
@@ -958,7 +1222,7 @@ func (r routingAgentRunner) RunDetailed(ctx context.Context, req agentcore.RunRe
 		ModelStatsProvider: r.statsProvider,
 		HealthStore:        r.health,
 	})
-	agent, err := agentcore.NewAgent(
+	options := []agentcore.Option{
 		agentcore.WithLLM(client),
 		agentcore.WithEventSink(runkit.NewGoagentEventSink(r.runs, func(event agentcore.Event) runkit.RunRecord {
 			return runkit.RunRecord{
@@ -968,11 +1232,9 @@ func (r routingAgentRunner) RunDetailed(ctx context.Context, req agentcore.RunRe
 				Status:     runkit.StatusRunning,
 			}
 		})),
-	)
-	if err != nil {
-		return nil, err
 	}
-	return agent.RunDetailed(ctx, req)
+	options = append(options, r.toolOptions(profile)...)
+	return agentcore.NewAgent(options...)
 }
 
 type ingestStep struct {
@@ -1029,7 +1291,17 @@ type staticProvider struct {
 	content string
 }
 
-func (p staticProvider) Chat(context.Context, ports.ChatRequest) (*ports.ChatResponse, error) {
+func (p staticProvider) Chat(_ context.Context, req ports.ChatRequest) (*ports.ChatResponse, error) {
+	if len(req.Tools) > 0 && !hasToolObservation(req.Messages) {
+		return &ports.ChatResponse{
+			ToolCalls: []ports.ToolCall{{
+				ID:    "call-record-review",
+				Name:  recordReviewToolName,
+				Input: json.RawMessage(`{}`),
+			}},
+			Usage: ports.Usage{InputTokens: 5, OutputTokens: 7},
+		}, nil
+	}
 	return &ports.ChatResponse{
 		Content: p.content,
 		Usage: ports.Usage{
@@ -1037,6 +1309,15 @@ func (p staticProvider) Chat(context.Context, ports.ChatRequest) (*ports.ChatRes
 			OutputTokens: 7,
 		},
 	}, nil
+}
+
+func hasToolObservation(messages []ports.ChatMessage) bool {
+	for _, message := range messages {
+		if message.Role == "tool" {
+			return true
+		}
+	}
+	return false
 }
 
 func loadLLMKitComposition(home string) ([]llmkit.Candidate, map[string]goagentadapter.ProviderClient, *llmkit.ModelStats, error) {
@@ -1112,6 +1393,7 @@ func defaultCandidates() []llmkit.Candidate {
 				Provider:           "local",
 				IsLocal:            true,
 				CapabilityLevel:    llmkit.CapabilitySimple,
+				SupportsTools:      true,
 				ContextWindowClass: llmkit.ContextMedium,
 				PriceClass:         llmkit.PriceFree,
 				LatencyClass:       llmkit.LatencyFastClass,
@@ -1123,6 +1405,7 @@ func defaultCandidates() []llmkit.Candidate {
 				Alias:              "cloud-advanced",
 				Provider:           "openai",
 				CapabilityLevel:    llmkit.CapabilityAdvanced,
+				SupportsTools:      true,
 				ContextWindowClass: llmkit.ContextLong,
 				PriceClass:         llmkit.PriceHigh,
 				LatencyClass:       llmkit.LatencyNormalClass,
@@ -1144,6 +1427,7 @@ func workflowToResponse(run workflowkit.WorkflowRun, runMode RunMode) workflowRe
 		AuditRef:      run.AuditRef,
 		ApprovalRef:   run.ApprovalRef,
 		WaitingReason: run.WaitingReason,
+		AgentApproval: agentApprovalFromMetadata(run.Metadata),
 		Completed:     append([]string(nil), run.CompletedSteps...),
 	}
 }
@@ -1633,6 +1917,25 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, out any) bool {
 		return false
 	}
 	return true
+}
+
+func decodeJSONStrict(w http.ResponseWriter, r *http.Request, out any) bool {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(out); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return false
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		writeError(w, http.StatusBadRequest, "invalid_json", "request body must contain one JSON value")
+		return false
+	}
+	return true
+}
+
+func writeApprovalUnauthorized(w http.ResponseWriter) {
+	w.Header().Set("WWW-Authenticate", "Bearer")
+	writeError(w, http.StatusUnauthorized, "unauthorized", "approval authentication required")
 }
 
 func writeWorkflowStoreError(w http.ResponseWriter, err error) {

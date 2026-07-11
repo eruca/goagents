@@ -74,6 +74,23 @@ Host-api refreshes `model-stats.json` from llmkit audit files before route
 decisions and when serving `/llmkit/models`. That makes new outcomes from a
 long-running process visible without waiting for restart.
 
+## Approval Authentication
+
+Workflow approval requires an OIDC bearer token. The CLI refuses to start
+unless both variables are configured:
+
+```bash
+export HOST_API_OIDC_ISSUER=https://id.example.com
+export HOST_API_OIDC_AUDIENCE=goagents-host-api
+```
+
+At startup host-api discovers the issuer and verifies approval tokens through
+its JWKS. Both `POST /workflows/{id}/agent-approve` and
+`POST /workflows/{id}/approve` accept `Authorization: Bearer <OIDC JWT>` and
+record the verified `sub` claim as the approver. They never accept an approver
+identity from the request body or persist the bearer token. Missing or invalid
+tokens return `401 unauthorized`.
+
 ## Endpoints
 
 Endpoints:
@@ -83,6 +100,7 @@ Endpoints:
 - `GET /workflows/{id}`
 - `GET /workflows/{id}/events`
 - `POST /workflows/{id}/requeue`
+- `POST /workflows/{id}/agent-approve`
 - `POST /workflows/{id}/approve`
 - `GET /workflows/{id}/llm-routes`
 - `GET /agent-runs/{id}`
@@ -157,6 +175,23 @@ return `invalid_task_profile`; for example, `local_only` plus `complexity: hard`
 fails when no local advanced model exists. The routing decision is visible
 through `GET /workflows/{id}/llm-routes`.
 
+Set `task_profile.needs_tools=true` only when the selected model declares tool
+support. The built-in deterministic demonstration models do so and request one
+local `record_review` write tool. It only writes
+`artifact:<workflow-id>:review-action`; it never publishes or performs network
+side effects. Before that write, the agent returns `agent_approval` with an
+opaque checkpoint ID plus tool call identity. Resolve it through
+`POST /workflows/{id}/agent-approve` using the exact `index`, `tool_call_id`,
+`tool`, and `allowed` fields. The endpoint rejects unknown request fields,
+including free-form reasons. An allowed decision resumes the agent once but
+still requires the existing `POST /workflows/{id}/approve` final-output step.
+A denied decision decrypts nothing, runs no tool, and cancels the workflow.
+
+For a real local macOS tool pause, the host lazily creates a 32-byte data key in
+Keychain service `goagents.host-api.approvals` and persists only a versioned
+AES-GCM envelope in `agent-runs.db`. There is no environment-variable or file
+fallback. Tests inject a cipher and never access the machine Keychain.
+
 `GET /llmkit/models` returns:
 
 - `models`: current routable model aliases and coarse capability metadata.
@@ -166,8 +201,9 @@ through `GET /workflows/{id}/llm-routes`.
 
 `POST /workflows/{id}/approve` records a business outcome signal on the
 selected LLM route: `business_outcome=success` and
-`success_signal=human_accepted`. Provider-level success remains available in the
-same route outcome.
+`success_signal=human_accepted`. Its JSON body accepts only an optional `note`;
+the approver identity comes from the verified OIDC bearer token. Provider-level
+success remains available in the same route outcome.
 
 The agent review step uses strict host-owned persistence for the critical audit
 path. If writing the agent output artifact or terminal run summary fails, the
