@@ -96,6 +96,7 @@ tokens return `401 unauthorized`.
 Endpoints:
 
 - `POST /workflows`
+- `GET /skills`
 - `GET /workflows`
 - `GET /workflows/{id}`
 - `GET /workflows/{id}/events`
@@ -106,6 +107,54 @@ Endpoints:
 - `GET /agent-runs/{id}`
 - `GET /llmkit/models`
 - `GET /workers/queued`
+
+## Host-owned skills
+
+`GET /skills` exposes a safe catalog view for a host-provided skill snapshot.
+Each item contains only its `name`, `description`, immutable `digest`, `scope`,
+availability state, and stable availability reason codes/subjects. It never
+returns skill manifests, instruction or resource bodies, package/root paths, or
+other host-local catalog details.
+
+The default CLI does not discover or configure a skill catalog. In that mode,
+`GET /skills` returns an empty `skills` array, and a `POST /workflows` request
+that includes `skill_refs` returns `400 invalid_skill_refs`. An embedding host
+may opt in by constructing a catalog and its host-owned gate facts itself, then
+passing the prebuilt `SkillCatalog` and `SkillGateContext` through `Config`.
+The HTTP server never scans roots or accepts catalog/gate configuration from a
+request.
+
+`POST /workflows` accepts an optional `skill_refs` array. Each element supplies
+`name` and may also supply `digest`:
+
+```json
+{
+  "id": "wf-review-1",
+  "input": "Review this high-risk policy.",
+  "skill_refs": [
+    {"name": "workflow-review"},
+    {"name": "checklist", "digest": "sha256:..."}
+  ]
+}
+```
+
+The host resolves every requested name against that fixed catalog, evaluates it
+with the fixed gate context, and persists only complete `name`/`digest` pairs
+in workflow metadata. Workflow creation and workflow responses therefore always
+return the complete resolved digest, even if the request omitted it. The digest
+is the immutable selection: startup recovery, process restart, requeue, and
+agent-approval resume reactivate the same `name@digest` from stored metadata;
+they never silently reselect the current skill by name.
+
+This boundary is fail-closed. Catalog absence, an unknown skill, a missing or
+changed digest, malformed stored references, or a gate failure rejects workflow
+creation or prevents the resumed agent from running. In particular, a workflow
+with persisted skill references cannot resume against a newer same-named skill.
+
+This slice activates only skill instructions through the existing agent skill
+provider. It does not execute skill scripts, automatically grant permissions,
+or project skill-declared tools into the agent tool registry. Tool projection is
+an explicit later host-policy decision.
 
 `GET /workflows/{id}/llm-routes` returns the sanitized llmkit routing audit for
 that workflow: effective task profile, selected model/account aliases, provider,
