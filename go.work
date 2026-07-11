@@ -11,6 +11,7 @@ use (
 	./mcpkit/officialsdk
 	./ocrs
 	./runkit
+	./skillkit
 	./examples/host-api
 	./examples/host-runtime
 	./workflowkit

@@ -15,6 +15,7 @@ Core modules:
 - `github.com/eruca/evalkit` in `evalkit/`
 - `github.com/eruca/ocrs` in `ocrs/`
 - `github.com/eruca/runkit` in `runkit/`
+- `github.com/eruca/skillkit` in `skillkit/`
 - `github.com/eruca/workflowkit` in `workflowkit/`
 
 Optional adapter/capability modules:
@@ -53,6 +54,7 @@ ocrs          must not import goagent, workflowkit, or contextkit
 llmkit        must not import goagent from its core routing package
 artifactkit   must not import goagent, workflowkit, llmkit, contextkit, or ocrs
 runkit        must not import workflowkit, llmkit, contextkit, ocrs, or artifactkit
+skillkit      must not import other workspace modules; a future optional adapter may import goagent
 ```
 
 Adapter and composition modules may depend on multiple core modules:
@@ -88,6 +90,7 @@ contextkit/v0.1.0
 evalkit/v0.1.0
 ocrs/v0.1.0
 runkit/v0.1.0
+skillkit/v0.1.0
 workflowkit/v0.1.0
 workflowkit/agentstep/v0.1.0
 llmkit/v0.1.0
@@ -117,6 +120,7 @@ Module-specific checks:
 (cd artifactkit && go test ./...)
 (cd ocrs && go test ./...)
 (cd runkit && go test ./...)
+(cd skillkit && go test ./...)
 (cd llmkit && go test ./...)
 (cd mcpkit && go test ./...)
 (cd mcpkit/officialsdk && go test ./...)
