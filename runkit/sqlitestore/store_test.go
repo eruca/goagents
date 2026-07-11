@@ -2,7 +2,9 @@ package sqlitestore
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -123,5 +125,122 @@ func TestStoreMigratesSchemaVersion(t *testing.T) {
 	}
 	if version != SchemaVersion {
 		t.Fatalf("schema version = %d, want %d", version, SchemaVersion)
+	}
+}
+
+func TestCheckpointPersistsFailedLeaseAcrossReopen(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "runkit.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	now := time.Now().UTC()
+	checkpoint := runkit.ApprovalCheckpoint{
+		ID:             "checkpoint-sqlite",
+		RunID:          "run-sqlite",
+		TenantID:       "tenant-sqlite",
+		DefinitionHash: "agent-v1",
+		Ciphertext:     []byte("ciphertext"),
+		ExpiresAt:      now.Add(time.Hour),
+	}
+	if err := store.CreateCheckpoint(ctx, checkpoint); err != nil {
+		t.Fatalf("CreateCheckpoint: %v", err)
+	}
+	if _, err := store.ApproveAndLease(ctx, runkit.ApprovalLeaseRequest{
+		CheckpointID:   checkpoint.ID,
+		TenantID:       checkpoint.TenantID,
+		DefinitionHash: checkpoint.DefinitionHash,
+		ApproverID:     "operator-1",
+		AuditRef:       "audit-1",
+		LeaseOwner:     "worker-1",
+		LeaseDuration:  time.Minute,
+		Now:            now,
+	}); err != nil {
+		t.Fatalf("ApproveAndLease: %v", err)
+	}
+	if err := store.FailLease(ctx, runkit.CheckpointLeaseCompletion{
+		CheckpointID: checkpoint.ID,
+		TenantID:     checkpoint.TenantID,
+		LeaseOwner:   "worker-1",
+		FailureCode:  "checkpoint_decode_failed",
+		Now:          now.Add(time.Second),
+	}); err != nil {
+		t.Fatalf("FailLease: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.Close()
+	stored, err := reopened.GetCheckpoint(ctx, checkpoint.ID, checkpoint.TenantID)
+	if err != nil {
+		t.Fatalf("GetCheckpoint: %v", err)
+	}
+	if stored.Status != runkit.CheckpointFailed || stored.FailureCode != "checkpoint_decode_failed" || string(stored.Ciphertext) != "ciphertext" {
+		t.Fatalf("stored checkpoint = %#v", stored)
+	}
+	if stored.Approval == nil || stored.Approval.ApproverID != "operator-1" || !stored.Approval.Approved {
+		t.Fatalf("stored approval = %#v", stored.Approval)
+	}
+}
+
+func TestCheckpointAllowsOnlyOneConcurrentLease(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "runkit.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	checkpoint := runkit.ApprovalCheckpoint{
+		ID:             "checkpoint-concurrent",
+		RunID:          "run-concurrent",
+		TenantID:       "tenant-concurrent",
+		DefinitionHash: "agent-v1",
+		Ciphertext:     []byte("ciphertext"),
+		ExpiresAt:      now.Add(time.Hour),
+	}
+	if err := store.CreateCheckpoint(context.Background(), checkpoint); err != nil {
+		t.Fatalf("CreateCheckpoint: %v", err)
+	}
+
+	results := make(chan error, 2)
+	var workers sync.WaitGroup
+	for _, worker := range []string{"worker-1", "worker-2"} {
+		workers.Add(1)
+		go func(worker string) {
+			defer workers.Done()
+			_, err := store.ApproveAndLease(context.Background(), runkit.ApprovalLeaseRequest{
+				CheckpointID:   checkpoint.ID,
+				TenantID:       checkpoint.TenantID,
+				DefinitionHash: checkpoint.DefinitionHash,
+				ApproverID:     "operator-" + worker,
+				AuditRef:       "audit-" + worker,
+				LeaseOwner:     worker,
+				LeaseDuration:  time.Minute,
+				Now:            now,
+			})
+			results <- err
+		}(worker)
+	}
+	workers.Wait()
+	close(results)
+
+	succeeded := 0
+	for err := range results {
+		if err == nil {
+			succeeded++
+			continue
+		}
+		if !errors.Is(err, runkit.ErrCheckpointNotClaimable) {
+			t.Fatalf("lease error = %v", err)
+		}
+	}
+	if succeeded != 1 {
+		t.Fatalf("successful leases = %d, want 1", succeeded)
 	}
 }

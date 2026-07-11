@@ -17,7 +17,7 @@ type Store struct {
 	db *sql.DB
 }
 
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
@@ -326,6 +326,33 @@ CREATE TABLE IF NOT EXISTS run_events (
 
 CREATE INDEX IF NOT EXISTS idx_run_events_run_id_sequence
 ON run_events(run_id, sequence);
+
+CREATE TABLE IF NOT EXISTS approval_checkpoints (
+ checkpoint_id TEXT PRIMARY KEY,
+ run_id TEXT NOT NULL,
+ tenant_id TEXT NOT NULL,
+ definition_hash TEXT NOT NULL,
+ ciphertext BLOB NOT NULL,
+ status TEXT NOT NULL CHECK (status IN ('pending', 'leased', 'consumed', 'rejected', 'failed', 'expired')),
+ failure_code TEXT NOT NULL DEFAULT '',
+ lease_owner TEXT NOT NULL DEFAULT '',
+ lease_until TIMESTAMP,
+ expires_at TIMESTAMP NOT NULL,
+ created_at TIMESTAMP NOT NULL,
+ updated_at TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_approval_checkpoints_tenant_status_expiry
+ON approval_checkpoints(tenant_id, status, expires_at);
+
+CREATE TABLE IF NOT EXISTS approval_decisions (
+ checkpoint_id TEXT PRIMARY KEY REFERENCES approval_checkpoints(checkpoint_id) ON DELETE CASCADE,
+ approver_id TEXT NOT NULL,
+ approved INTEGER NOT NULL CHECK (approved IN (0, 1)),
+ audit_ref TEXT NOT NULL,
+ reason_code TEXT NOT NULL DEFAULT '',
+ decided_at TIMESTAMP NOT NULL
+);
 `, SchemaVersion)
 	return err
 }
