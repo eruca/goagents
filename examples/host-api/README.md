@@ -192,6 +192,22 @@ Keychain service `goagents.host-api.approvals` and persists only a versioned
 AES-GCM envelope in `agent-runs.db`. There is no environment-variable or file
 fallback. Tests inject a cipher and never access the machine Keychain.
 
+On an interactive macOS login session, run the optional real-process smoke to
+exercise the actual binary, local OIDC discovery/JWKS verification, SQLite
+restart recovery, and Keychain-backed tool approval:
+
+```bash
+go test -tags hostapisystemsmoke -run TestHostAPIProcessToolApprovalSurvivesRestart -count=1 -v
+```
+
+It starts a loopback-only OIDC issuer and uses a temporary runtime directory.
+The first tool pause creates or reuses the local
+`goagents.host-api.approvals/local-v1` Keychain item; the test never prints,
+exports, or deletes that key. It skips when the current process cannot access
+an unlocked login Keychain, and therefore a skip is not evidence of a passed
+smoke. Default `go test ./...` and `bash ../../scripts/verify-all.sh` do not
+run it.
+
 An agent tool approval expires one hour after the pause. The host process starts
 an in-process janitor that defaults to a one-minute sweep interval; set
 `HOST_API_AGENT_APPROVAL_SWEEP_INTERVAL` to another positive Go duration such
