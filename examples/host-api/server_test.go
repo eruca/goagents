@@ -16,8 +16,126 @@ import (
 	"github.com/eruca/artifactkit"
 	"github.com/eruca/llmkit/llmkit"
 	"github.com/eruca/runkit"
+	"github.com/eruca/skillkit"
 	"github.com/eruca/workflowkit"
 )
+
+type skillListPayload struct {
+	Skills []skillPayload `json:"skills"`
+}
+
+type skillPayload struct {
+	Name         string        `json:"name"`
+	Description  string        `json:"description"`
+	Digest       string        `json:"digest"`
+	Scope        string        `json:"scope"`
+	Availability string        `json:"availability"`
+	Reasons      []skillReason `json:"reasons"`
+}
+
+type skillReason struct {
+	Code    string `json:"code"`
+	Subject string `json:"subject"`
+}
+
+func TestListSkillsReturnsSafeAvailability(t *testing.T) {
+	eligibleRoot := t.TempDir()
+	writeHostAPISkill(t, eligibleRoot, "eligible-skill", "---\nname: eligible-skill\ndescription: A safe eligible skill.\nmetadata:\n  goagents:\n    requires:\n      os: [darwin]\n      host_features: [artifacts.v1]\n      tools:\n        required: [artifact.read]\n    resources:\n      allow: [references/private.md]\n---\n# Instructions\nPRIVATE SKILL BODY\n", map[string]string{
+		"references/private.md": "PRIVATE RESOURCE BODY",
+	})
+
+	unavailableRoot := t.TempDir()
+	writeHostAPISkill(t, unavailableRoot, "unavailable-skill", "---\nname: unavailable-skill\ndescription: An unavailable skill.\n---\n# Instructions\nUNAVAILABLE PRIVATE BODY\n", nil)
+
+	invalidRoot := t.TempDir()
+	writeHostAPISkill(t, invalidRoot, "invalid-skill", "---\nname: invalid-skill\ndescription: \n---\n# Instructions\nINVALID PRIVATE BODY\n", nil)
+
+	catalog, err := skillkit.Discover([]skillkit.Root{
+		{ID: "builtin-catalog", Dir: eligibleRoot, Scope: skillkit.ScopeBuiltin, Trusted: true, Enabled: true},
+		{ID: "untrusted-catalog", Dir: unavailableRoot, Scope: skillkit.ScopeWorkspace, Trusted: false, Enabled: true},
+		{ID: "invalid-catalog", Dir: invalidRoot, Scope: skillkit.ScopeUser, Trusted: true, Enabled: true},
+	})
+	if err != nil {
+		t.Fatalf("Discover returned error: %v", err)
+	}
+
+	server, err := NewServer(Config{
+		LLMKitHome:   t.TempDir(),
+		SkillCatalog: catalog,
+		SkillGateContext: skillkit.GateContext{
+			OS:             "darwin",
+			HostFeatures:   map[string]bool{"artifacts.v1": true},
+			AllowedToolIDs: map[string]bool{"artifact.read": true},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+
+	resp := httptest.NewRecorder()
+	server.Handler().ServeHTTP(resp, httptest.NewRequest(http.MethodGet, "/skills", nil))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("GET /skills status = %d; body=%s", resp.Code, resp.Body.String())
+	}
+
+	var payload skillListPayload
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode GET /skills response: %v; body=%s", err, resp.Body.String())
+	}
+	if len(payload.Skills) != 3 {
+		t.Fatalf("GET /skills returned %d skills, want 3: %+v", len(payload.Skills), payload.Skills)
+	}
+
+	byName := make(map[string]skillPayload, len(payload.Skills))
+	for _, skill := range payload.Skills {
+		byName[skill.Name] = skill
+	}
+
+	if skill := byName["eligible-skill"]; skill.Description != "A safe eligible skill." || skill.Digest == "" || skill.Scope != string(skillkit.ScopeBuiltin) || skill.Availability != string(skillkit.AvailabilityEligible) || len(skill.Reasons) != 0 {
+		t.Fatalf("eligible skill = %+v, want an eligible builtin skill without reasons", skill)
+	}
+	if skill := byName["unavailable-skill"]; skill.Scope != string(skillkit.ScopeWorkspace) || skill.Availability != string(skillkit.AvailabilityUnavailable) || !containsSkillReason(skill.Reasons, "untrusted_root", "untrusted-catalog") {
+		t.Fatalf("unavailable skill = %+v, want untrusted root reason", skill)
+	}
+	if skill := byName["invalid-skill"]; skill.Scope != string(skillkit.ScopeUser) || skill.Availability != string(skillkit.AvailabilityInvalid) || len(skill.Reasons) == 0 {
+		t.Fatalf("invalid skill = %+v, want invalid availability with reasons", skill)
+	}
+
+	for _, secret := range []string{eligibleRoot, unavailableRoot, invalidRoot, "PRIVATE SKILL BODY", "PRIVATE RESOURCE BODY", "UNAVAILABLE PRIVATE BODY", "INVALID PRIVATE BODY", "references/private.md"} {
+		if strings.Contains(resp.Body.String(), secret) {
+			t.Fatalf("GET /skills leaked %q: %s", secret, resp.Body.String())
+		}
+	}
+}
+
+func writeHostAPISkill(t *testing.T, root, name, source string, resources map[string]string) {
+	t.Helper()
+	skillDir := filepath.Join(root, name)
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("create skill directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(source), 0o600); err != nil {
+		t.Fatalf("write SKILL.md: %v", err)
+	}
+	for path, content := range resources {
+		resourcePath := filepath.Join(skillDir, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(resourcePath), 0o755); err != nil {
+			t.Fatalf("create resource directory: %v", err)
+		}
+		if err := os.WriteFile(resourcePath, []byte(content), 0o600); err != nil {
+			t.Fatalf("write resource: %v", err)
+		}
+	}
+}
+
+func containsSkillReason(reasons []skillReason, code, subject string) bool {
+	for _, reason := range reasons {
+		if reason.Code == code && reason.Subject == subject {
+			return true
+		}
+	}
+	return false
+}
 
 func TestHostAPIWorkflowApprovalRunAndModelEndpoints(t *testing.T) {
 	server, err := NewServer(Config{

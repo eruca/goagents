@@ -8,11 +8,13 @@ require (
 	github.com/eruca/goagent v0.0.0
 	github.com/eruca/llmkit v0.0.0
 	github.com/eruca/runkit v0.0.0
+	github.com/eruca/skillkit v0.0.0
 	github.com/eruca/workflowkit v0.0.0
 	github.com/eruca/workflowkit/agentstep v0.0.0
 )
 
 require (
+	github.com/99designs/go-keychain v0.0.0-20191008050251-8e49817e8af4 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/google/uuid v1.6.0 // indirect
@@ -37,6 +39,8 @@ replace github.com/eruca/goagent => ../../goagent
 replace github.com/eruca/llmkit => ../../llmkit
 
 replace github.com/eruca/runkit => ../../runkit
+
+replace github.com/eruca/skillkit => ../../skillkit
 
 replace github.com/eruca/workflowkit => ../../workflowkit
 

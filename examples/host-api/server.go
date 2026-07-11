@@ -24,6 +24,7 @@ import (
 	"github.com/eruca/runkit"
 	"github.com/eruca/runkit/goagentapproval"
 	runsqlite "github.com/eruca/runkit/sqlitestore"
+	"github.com/eruca/skillkit"
 	"github.com/eruca/workflowkit"
 	workflowsqlite "github.com/eruca/workflowkit/sqlitestore"
 )
@@ -38,6 +39,11 @@ type Config struct {
 	// AgentApprovalCipher is test-only injection for the host's tool-approval
 	// checkpoint encryption boundary. Real local runs lazily use macOS Keychain.
 	AgentApprovalCipher goagentapproval.Cipher
+	// SkillCatalog is a prebuilt, host-owned snapshot. The HTTP server never
+	// discovers roots itself.
+	SkillCatalog *skillkit.Catalog
+	// SkillGateContext supplies host-owned facts used only to report availability.
+	SkillGateContext skillkit.GateContext
 }
 
 type Server struct {
@@ -53,6 +59,8 @@ type Server struct {
 	providers               map[string]goagentadapter.ProviderClient
 	approvalAuthenticator   ApprovalAuthenticator
 	agentApprovals          *hostAgentApprovalService
+	skillCatalog            *skillkit.Catalog
+	skillGateContext        skillkit.GateContext
 	worker                  queuedWorkerStatus
 	workerCfg               queuedWorkerConfig
 	agentApprovalJanitorCfg agentApprovalJanitorConfig
@@ -99,6 +107,26 @@ type workflowResponse struct {
 
 type workflowListResponse struct {
 	Workflows []workflowResponse `json:"workflows"`
+}
+
+// skillListResponse deliberately exposes only catalog-safe fields. In
+// particular, it omits the manifest, instructions, resources, and root paths.
+type skillListResponse struct {
+	Skills []skillResponse `json:"skills"`
+}
+
+type skillResponse struct {
+	Name         string                `json:"name"`
+	Description  string                `json:"description"`
+	Digest       string                `json:"digest"`
+	Scope        skillkit.Scope        `json:"scope"`
+	Availability skillkit.Availability `json:"availability"`
+	Reasons      []skillReasonResponse `json:"reasons"`
+}
+
+type skillReasonResponse struct {
+	Code    string `json:"code"`
+	Subject string `json:"subject"`
 }
 
 type workflowEventsResponse struct {
@@ -447,6 +475,8 @@ func NewServer(config Config) (*Server, error) {
 		agentApprovalJanitorCfg: agentApprovalJanitorCfg,
 		approvalAuthenticator:   config.ApprovalAuthenticator,
 		agentApprovals:          agentApprovals,
+		skillCatalog:            config.SkillCatalog,
+		skillGateContext:        config.SkillGateContext,
 	}
 	if server.approvalAuthenticator == nil {
 		server.approvalAuthenticator = rejectingApprovalAuthenticator{}
@@ -537,6 +567,7 @@ func (s *Server) queuedLeaseDuration() time.Duration {
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /skills", s.handleListSkills)
 	mux.HandleFunc("POST /workflows", s.handleCreateWorkflow)
 	mux.HandleFunc("GET /workflows", s.handleListWorkflows)
 	mux.HandleFunc("GET /workflows/{id}", s.handleGetWorkflow)
@@ -549,6 +580,27 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /llmkit/models", s.handleModels)
 	mux.HandleFunc("GET /workers/queued", s.handleQueuedWorker)
 	return mux
+}
+
+func (s *Server) handleListSkills(w http.ResponseWriter, _ *http.Request) {
+	entries := s.skillCatalog.List()
+	skills := make([]skillResponse, 0, len(entries))
+	for _, entry := range entries {
+		report := skillkit.Evaluate(entry, s.skillGateContext)
+		reasons := make([]skillReasonResponse, 0, len(report.Reasons))
+		for _, reason := range report.Reasons {
+			reasons = append(reasons, skillReasonResponse{Code: reason.Code, Subject: reason.Subject})
+		}
+		skills = append(skills, skillResponse{
+			Name:         entry.Ref.Name,
+			Description:  entry.Manifest.Description,
+			Digest:       entry.Ref.Digest,
+			Scope:        entry.Scope,
+			Availability: report.State,
+			Reasons:      reasons,
+		})
+	}
+	writeJSON(w, http.StatusOK, skillListResponse{Skills: skills})
 }
 
 func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
