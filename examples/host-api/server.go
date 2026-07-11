@@ -820,6 +820,12 @@ func (s *Server) handleApproveAgentTool(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	approval := agentApprovalFromMetadata(run.Metadata)
+	if run.Status == workflowkit.StatusWaitingApproval && approval == nil && run.ApprovalRef == "approval:"+run.ID && run.OutputRef != "" {
+		if completed := completedAgentApprovalFromMetadata(run.Metadata); completed != nil && resolutionsMatchCompletedApproval(resolutions, completed.Tools) {
+			writeJSON(w, http.StatusOK, workflowToResponse(run, RunModeSync))
+			return
+		}
+	}
 	if run.Status != workflowkit.StatusWaitingApproval || approval == nil || s.agentApprovals == nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", errAgentApprovalNotPending.Error())
 		return
@@ -897,9 +903,11 @@ func (s *Server) persistResumedAgentResult(ctx context.Context, run workflowkit.
 		return workflowkit.WorkflowRun{}, err
 	}
 	return s.workflows.Update(ctx, run.ID, func(current workflowkit.WorkflowRun) (workflowkit.WorkflowRun, error) {
-		if !workflowHasPendingAgentApproval(current, checkpointID) {
+		pending := agentApprovalFromMetadata(current.Metadata)
+		if current.Status != workflowkit.StatusWaitingApproval || pending == nil || pending.CheckpointID != checkpointID {
 			return current, errAgentApprovalNotPending
 		}
+		rememberCompletedAgentApprovalMetadata(current.Metadata, *pending)
 		clearAgentApprovalMetadata(current.Metadata)
 		current.OutputRef = outputRef
 		current.AgentRunID = result.RunID.String()

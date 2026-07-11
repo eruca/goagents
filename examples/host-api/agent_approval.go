@@ -26,6 +26,8 @@ const (
 	localApprovalKeyID           = "local-v1"
 	agentApprovalMetadataID      = "agent_approval_checkpoint_id"
 	agentApprovalMetadataTools   = "agent_approval_tools_json"
+	agentApprovalCompletedID     = "agent_approval_completed_checkpoint_id"
+	agentApprovalCompletedTools  = "agent_approval_completed_tools_json"
 	recordReviewToolName         = "record_review"
 	agentApprovalLifetime        = time.Hour
 )
@@ -199,8 +201,16 @@ func (a agentApprovalResponse) workflowMetadata() map[string]any {
 }
 
 func agentApprovalFromMetadata(metadata map[string]any) *agentApprovalResponse {
-	checkpointID, _ := metadata[agentApprovalMetadataID].(string)
-	rawTools, _ := metadata[agentApprovalMetadataTools].(string)
+	return agentApprovalFromMetadataKeys(metadata, agentApprovalMetadataID, agentApprovalMetadataTools)
+}
+
+func completedAgentApprovalFromMetadata(metadata map[string]any) *agentApprovalResponse {
+	return agentApprovalFromMetadataKeys(metadata, agentApprovalCompletedID, agentApprovalCompletedTools)
+}
+
+func agentApprovalFromMetadataKeys(metadata map[string]any, checkpointKey, toolsKey string) *agentApprovalResponse {
+	checkpointID, _ := metadata[checkpointKey].(string)
+	rawTools, _ := metadata[toolsKey].(string)
 	if strings.TrimSpace(checkpointID) == "" || strings.TrimSpace(rawTools) == "" {
 		return nil
 	}
@@ -214,6 +224,36 @@ func agentApprovalFromMetadata(metadata map[string]any) *agentApprovalResponse {
 		}
 	}
 	return &agentApprovalResponse{CheckpointID: checkpointID, Tools: tools}
+}
+
+func rememberCompletedAgentApprovalMetadata(metadata map[string]any, approval agentApprovalResponse) {
+	if metadata == nil || approval.CheckpointID == "" || len(approval.Tools) == 0 {
+		return
+	}
+	encoded, _ := json.Marshal(approval.Tools)
+	metadata[agentApprovalCompletedID] = approval.CheckpointID
+	metadata[agentApprovalCompletedTools] = string(encoded)
+}
+
+func resolutionsMatchCompletedApproval(resolutions []agentcore.ToolApprovalResolution, tools []agentApprovalPendingTool) bool {
+	if len(resolutions) != len(tools) || len(tools) == 0 {
+		return false
+	}
+	expected := make(map[int]agentApprovalPendingTool, len(tools))
+	for _, tool := range tools {
+		if _, exists := expected[tool.Index]; exists {
+			return false
+		}
+		expected[tool.Index] = tool
+	}
+	for _, resolution := range resolutions {
+		tool, ok := expected[resolution.Index]
+		if !ok || !resolution.Allowed || resolution.ToolCallID != tool.ToolCallID || resolution.Tool != tool.Tool {
+			return false
+		}
+		delete(expected, resolution.Index)
+	}
+	return len(expected) == 0
 }
 
 func safePendingTools(checkpoint agentcore.RunCheckpoint) []agentApprovalPendingTool {

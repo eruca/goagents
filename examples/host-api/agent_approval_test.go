@@ -345,6 +345,76 @@ func TestHostAPIAgentToolApprovalLeaseConflictDoesNotFailWinner(t *testing.T) {
 	}
 }
 
+func TestHostAPIAgentToolApprovalExactRetryReturnsExistingWorkflow(t *testing.T) {
+	server, err := NewServer(Config{
+		LLMKitHome:            t.TempDir(),
+		AgentApprovalCipher:   &testApprovalCipher{},
+		ApprovalAuthenticator: testApprovalAuthenticator{identity: ApprovalIdentity{Subject: "operator-retry"}},
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	created := createToolApprovalWorkflow(t, server, "wf-agent-tool-retry")
+	pending := created.AgentApproval.Tools[0]
+	requestBody := map[string]any{
+		"resolutions": []map[string]any{{
+			"index":        pending.Index,
+			"tool_call_id": pending.ToolCallID,
+			"tool":         pending.Tool,
+			"allowed":      true,
+		}},
+	}
+	first := agentApprovalRequestForTest(t, server.Handler(), created.ID, requestBody, "Bearer test-operator")
+	if first.Code != http.StatusOK {
+		t.Fatalf("first approval status=%d body=%s", first.Code, first.Body.String())
+	}
+
+	retry := agentApprovalRequestForTest(t, server.Handler(), created.ID, requestBody, "Bearer test-operator")
+	if retry.Code != http.StatusOK {
+		t.Fatalf("exact retry status=%d body=%s, want 200 existing workflow", retry.Code, retry.Body.String())
+	}
+	var retried workflowResponse
+	if err := json.NewDecoder(retry.Body).Decode(&retried); err != nil {
+		t.Fatalf("decode retry response: %v", err)
+	}
+	if retried.Status != string(workflowkit.StatusWaitingApproval) || retried.AgentApproval != nil || retried.ApprovalRef != "approval:"+created.ID {
+		t.Fatalf("retry workflow=%#v, want existing final approval wait", retried)
+	}
+	run, err := server.runs.Get(t.Context(), created.AgentRunID)
+	if err != nil {
+		t.Fatalf("Get agent run after retry: %v", err)
+	}
+	if run.Summary.Status != runkit.StatusSucceeded || run.Summary.ToolCalls != 1 {
+		t.Fatalf("agent run after retry=%#v, want one successful tool call", run.Summary)
+	}
+	workflow, err := server.workflows.Get(t.Context(), created.ID)
+	if err != nil {
+		t.Fatalf("Get workflow after retry: %v", err)
+	}
+	if agentApprovalFromMetadata(workflow.Metadata) != nil || completedAgentApprovalFromMetadata(workflow.Metadata) == nil {
+		t.Fatalf("workflow metadata after retry=%#v, want only completed safe approval metadata", workflow.Metadata)
+	}
+
+	altered := agentApprovalRequestForTest(t, server.Handler(), created.ID, map[string]any{
+		"resolutions": []map[string]any{{
+			"index":        pending.Index,
+			"tool_call_id": "caller-substituted-call",
+			"tool":         pending.Tool,
+			"allowed":      true,
+		}},
+	}, "Bearer test-operator")
+	if altered.Code != http.StatusBadRequest {
+		t.Fatalf("altered retry status=%d body=%s, want 400", altered.Code, altered.Body.String())
+	}
+	run, err = server.runs.Get(t.Context(), created.AgentRunID)
+	if err != nil {
+		t.Fatalf("Get agent run after altered retry: %v", err)
+	}
+	if run.Summary.Status != runkit.StatusSucceeded || run.Summary.ToolCalls != 1 {
+		t.Fatalf("agent run after altered retry=%#v, want unchanged one successful tool call", run.Summary)
+	}
+}
+
 func TestHostAPIAgentToolApprovalRejectsMismatchedResolutionBeforeWrite(t *testing.T) {
 	server, err := NewServer(Config{
 		LLMKitHome:            t.TempDir(),

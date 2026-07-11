@@ -303,6 +303,13 @@ request returns `409 approval_conflict`. It neither executes a tool nor changes
 the workflow or agent run; the request that owns the lease continues processing
 the approval.
 
+If an allowed approval succeeded but its response was lost, retrying the exact
+same safe tool identities with a valid bearer token returns the existing
+`waiting_approval` workflow response and does not execute the tool again.
+Changed, missing, denied, or otherwise mismatched resolutions remain
+`400 invalid_request`; completed approval metadata is never exposed in the
+workflow response.
+
 Agent tool approvals expire one hour after their pause. The local host janitor
 calls the checkpoint expiry operation every minute by default; set
 `HOST_API_AGENT_APPROVAL_SWEEP_INTERVAL` to a positive Go duration to change

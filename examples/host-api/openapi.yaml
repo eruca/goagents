@@ -206,7 +206,9 @@ paths:
       description: >
         Resolves the safe tool identities returned in agent_approval. A granted
         resolution resumes the agent once; a rejected resolution never decrypts
-        or executes the tool. This is separate from final workflow approval.
+        or executes the tool. Repeating an exact allowed resolution after a
+        completed tool approval returns the existing workflow response without
+        executing the tool again. This is separate from final workflow approval.
       operationId: approveAgentTool
       parameters:
         - $ref: '#/components/parameters/WorkflowID'
