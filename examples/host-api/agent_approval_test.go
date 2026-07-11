@@ -7,7 +7,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/eruca/artifactkit"
 	"github.com/eruca/runkit"
@@ -264,6 +266,85 @@ func TestHostAPIAgentToolApprovalIgnoresStaleFailureAfterResume(t *testing.T) {
 	}
 }
 
+func TestHostAPIAgentToolApprovalLeaseConflictDoesNotFailWinner(t *testing.T) {
+	server, err := NewServer(Config{
+		LLMKitHome:            t.TempDir(),
+		AgentApprovalCipher:   &testApprovalCipher{},
+		ApprovalAuthenticator: testApprovalAuthenticator{identity: ApprovalIdentity{Subject: "operator-conflict"}},
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	created := createToolApprovalWorkflow(t, server, "wf-agent-tool-lease-conflict")
+	pending := created.AgentApproval.Tools[0]
+	checkpoints := &blockingFirstLeaseCheckpointStore{
+		CheckpointStore: server.agentApprovals.checkpoints,
+		acquired:        make(chan struct{}),
+		release:         make(chan struct{}),
+	}
+	server.agentApprovals.checkpoints = checkpoints
+	requestBody := map[string]any{
+		"resolutions": []map[string]any{{
+			"index":        pending.Index,
+			"tool_call_id": pending.ToolCallID,
+			"tool":         pending.Tool,
+			"allowed":      true,
+		}},
+	}
+	firstResponse := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		firstResponse <- agentApprovalRequestForTest(t, server.Handler(), created.ID, requestBody, "Bearer test-operator")
+	}()
+	select {
+	case <-checkpoints.acquired:
+	case <-time.After(time.Second):
+		close(checkpoints.release)
+		t.Fatal("first approval did not acquire checkpoint lease")
+	}
+
+	second := agentApprovalRequestForTest(t, server.Handler(), created.ID, requestBody, "Bearer test-operator")
+	duringConflict, err := server.workflows.Get(t.Context(), created.ID)
+	if err != nil {
+		close(checkpoints.release)
+		t.Fatalf("Get workflow during conflict: %v", err)
+	}
+	close(checkpoints.release)
+	var first *httptest.ResponseRecorder
+	select {
+	case first = <-firstResponse:
+	case <-time.After(time.Second):
+		t.Fatal("first approval did not finish after lease release")
+	}
+
+	var conflict errorResponse
+	if err := json.NewDecoder(second.Body).Decode(&conflict); err != nil {
+		t.Fatalf("decode conflict response: %v", err)
+	}
+	if second.Code != http.StatusConflict || conflict.Error != "approval_conflict" {
+		t.Fatalf("conflicting approval status=%d body=%#v, want 409 approval_conflict", second.Code, conflict)
+	}
+	if duringConflict.Status != workflowkit.StatusWaitingApproval || agentApprovalFromMetadata(duringConflict.Metadata) == nil {
+		t.Fatalf("workflow during conflict=%#v, want unchanged pending approval", duringConflict)
+	}
+	if first.Code != http.StatusOK {
+		t.Fatalf("lease winner status=%d body=%s", first.Code, first.Body.String())
+	}
+	updated, err := server.workflows.Get(t.Context(), created.ID)
+	if err != nil {
+		t.Fatalf("Get workflow after winner: %v", err)
+	}
+	if updated.Status != workflowkit.StatusWaitingApproval || agentApprovalFromMetadata(updated.Metadata) != nil || updated.ApprovalRef != "approval:"+created.ID {
+		t.Fatalf("workflow after winner=%#v, want final approval wait", updated)
+	}
+	run, err := server.runs.Get(t.Context(), created.AgentRunID)
+	if err != nil {
+		t.Fatalf("Get agent run after winner: %v", err)
+	}
+	if run.Summary.Status != runkit.StatusSucceeded || run.Summary.ToolCalls != 1 {
+		t.Fatalf("agent run after winner=%#v, want one successful tool call", run.Summary)
+	}
+}
+
 func TestHostAPIAgentToolApprovalRejectsMismatchedResolutionBeforeWrite(t *testing.T) {
 	server, err := NewServer(Config{
 		LLMKitHome:            t.TempDir(),
@@ -368,6 +449,25 @@ func agentApprovalRequestForTest(t *testing.T, handler http.Handler, workflowID 
 
 type testApprovalCipher struct {
 	encryptAAD [][]byte
+}
+
+type blockingFirstLeaseCheckpointStore struct {
+	runkit.CheckpointStore
+	acquired chan struct{}
+	release  chan struct{}
+	once     sync.Once
+}
+
+func (s *blockingFirstLeaseCheckpointStore) ApproveAndLease(ctx context.Context, request runkit.ApprovalLeaseRequest) (runkit.ApprovalCheckpoint, error) {
+	checkpoint, err := s.CheckpointStore.ApproveAndLease(ctx, request)
+	if err != nil {
+		return runkit.ApprovalCheckpoint{}, err
+	}
+	s.once.Do(func() {
+		close(s.acquired)
+		<-s.release
+	})
+	return checkpoint, nil
 }
 
 func (c *testApprovalCipher) Encrypt(_ context.Context, plaintext, aad []byte) ([]byte, error) {

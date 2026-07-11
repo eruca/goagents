@@ -238,7 +238,11 @@ paths:
         '404':
           $ref: '#/components/responses/ErrorResponse'
         '409':
-          $ref: '#/components/responses/ErrorResponse'
+          description: The same agent approval checkpoint is already being processed by another request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           $ref: '#/components/responses/ErrorResponse'
   /workflows/{id}/llm-routes:
@@ -835,6 +839,7 @@ components:
             - run_error
             - not_found
             - unauthorized
+            - approval_conflict
         message:
           type: string
     ScoreBreakdown:

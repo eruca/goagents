@@ -298,6 +298,11 @@ denied decision records the verified operator, never decrypts or executes the
 checkpoint, and cancels the workflow. Missing or invalid tokens return
 `401 unauthorized` without changing the checkpoint.
 
+If another request has already leased the same checkpoint, the competing
+request returns `409 approval_conflict`. It neither executes a tool nor changes
+the workflow or agent run; the request that owns the lease continues processing
+the approval.
+
 Agent tool approvals expire one hour after their pause. The local host janitor
 calls the checkpoint expiry operation every minute by default; set
 `HOST_API_AGENT_APPROVAL_SWEEP_INTERVAL` to a positive Go duration to change

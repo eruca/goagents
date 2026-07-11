@@ -839,6 +839,10 @@ func (s *Server) handleApproveAgentTool(w http.ResponseWriter, r *http.Request) 
 	}
 
 	next, result, resumeErr := s.agentApprovals.ApproveAndResume(r.Context(), workflowID, *approval, identity.Subject, resolutions)
+	if errors.Is(resumeErr, runkit.ErrCheckpointNotClaimable) {
+		writeError(w, http.StatusConflict, "approval_conflict", "agent tool approval is already being processed")
+		return
+	}
 	if errors.Is(resumeErr, agentcore.ErrApprovalPending) && result != nil && result.Interruption != nil && len(next.Tools) > 0 {
 		updated, err := s.replacePendingAgentApproval(r.Context(), run, approval.CheckpointID, next)
 		if err != nil {
