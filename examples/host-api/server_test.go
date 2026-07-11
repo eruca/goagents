@@ -38,6 +38,14 @@ type skillReason struct {
 	Subject string `json:"subject"`
 }
 
+type workflowSkillRefsResponse struct {
+	ID        string `json:"id"`
+	SkillRefs []struct {
+		Name   string `json:"name"`
+		Digest string `json:"digest"`
+	} `json:"skill_refs"`
+}
+
 func TestListSkillsReturnsSafeAvailability(t *testing.T) {
 	eligibleRoot := t.TempDir()
 	writeHostAPISkill(t, eligibleRoot, "eligible-skill", "---\nname: eligible-skill\ndescription: A safe eligible skill.\nmetadata:\n  goagents:\n    requires:\n      os: [darwin]\n      host_features: [artifacts.v1]\n      tools:\n        required: [artifact.read]\n    resources:\n      allow: [references/private.md]\n---\n# Instructions\nPRIVATE SKILL BODY\n", map[string]string{
@@ -105,6 +113,122 @@ func TestListSkillsReturnsSafeAvailability(t *testing.T) {
 		if strings.Contains(resp.Body.String(), secret) {
 			t.Fatalf("GET /skills leaked %q: %s", secret, resp.Body.String())
 		}
+	}
+}
+
+func TestCreateWorkflowPersistsResolvedSkillRefs(t *testing.T) {
+	skillRoot := t.TempDir()
+	writeHostAPISkill(t, skillRoot, "workflow-review", "---\nname: workflow-review\ndescription: Review a workflow safely.\nmetadata:\n  goagents:\n    requires:\n      tools:\n        required: [artifact.read]\n---\n# Instructions\nReview the workflow.\n", nil)
+	catalog, err := skillkit.Discover([]skillkit.Root{{
+		ID:      "workflow-skills",
+		Dir:     skillRoot,
+		Scope:   skillkit.ScopeBuiltin,
+		Trusted: true,
+		Enabled: true,
+	}})
+	if err != nil {
+		t.Fatalf("Discover returned error: %v", err)
+	}
+
+	eligibleGate := skillkit.GateContext{AllowedToolIDs: map[string]bool{"artifact.read": true}}
+	runtimeHome := t.TempDir()
+	server, err := NewServer(Config{
+		RuntimeHome:      runtimeHome,
+		SkillCatalog:     catalog,
+		SkillGateContext: eligibleGate,
+	})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+
+	created := doJSON[workflowSkillRefsResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]any{
+		"id":    "wf-skill-refs",
+		"input": "Review this workflow.",
+		"skill_refs": []map[string]string{{
+			"name": "workflow-review",
+		}},
+	})
+	if len(created.SkillRefs) != 1 || created.SkillRefs[0].Name != "workflow-review" || created.SkillRefs[0].Digest == "" {
+		t.Fatalf("create skill refs = %+v, want resolved workflow-review digest", created.SkillRefs)
+	}
+	stored, err := server.workflows.Get(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("Get persisted workflow: %v", err)
+	}
+	persistedJSON, err := json.Marshal(stored.Metadata["skill_refs"])
+	if err != nil {
+		t.Fatalf("marshal persisted skill_refs: %v", err)
+	}
+	var persistedRefs []map[string]string
+	if err := json.Unmarshal(persistedJSON, &persistedRefs); err != nil {
+		t.Fatalf("decode persisted skill_refs: %v", err)
+	}
+	if len(persistedRefs) != 1 || len(persistedRefs[0]) != 2 || persistedRefs[0]["name"] != created.SkillRefs[0].Name || persistedRefs[0]["digest"] != created.SkillRefs[0].Digest {
+		t.Fatalf("persisted skill_refs = %#v, want only complete name/digest maps", stored.Metadata["skill_refs"])
+	}
+
+	closeStoreIfPossible(t, server.workflows)
+	closeStoreIfPossible(t, server.runs)
+	reopened, err := NewServer(Config{
+		RuntimeHome:      runtimeHome,
+		SkillCatalog:     catalog,
+		SkillGateContext: eligibleGate,
+	})
+	if err != nil {
+		t.Fatalf("reopen NewServer returned error: %v", err)
+	}
+	loaded := doJSON[workflowSkillRefsResponse](t, reopened.Handler(), http.MethodGet, "/workflows/wf-skill-refs", nil)
+	if len(loaded.SkillRefs) != 1 || loaded.SkillRefs[0] != created.SkillRefs[0] {
+		t.Fatalf("skill refs after reopen = %+v, want %+v", loaded.SkillRefs, created.SkillRefs)
+	}
+
+	for _, test := range []struct {
+		name   string
+		config Config
+		ref    map[string]string
+	}{
+		{
+			name:   "missing catalog",
+			config: Config{RuntimeHome: t.TempDir()},
+			ref:    map[string]string{"name": "workflow-review"},
+		},
+		{
+			name: "unknown skill",
+			config: Config{
+				RuntimeHome:      t.TempDir(),
+				SkillCatalog:     catalog,
+				SkillGateContext: eligibleGate,
+			},
+			ref: map[string]string{"name": "unknown-skill"},
+		},
+		{
+			name: "required tool unavailable",
+			config: Config{
+				RuntimeHome:  t.TempDir(),
+				SkillCatalog: catalog,
+			},
+			ref: map[string]string{"name": "workflow-review"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			invalidServer, err := NewServer(test.config)
+			if err != nil {
+				t.Fatalf("NewServer returned error: %v", err)
+			}
+			body, err := json.Marshal(map[string]any{
+				"id":         "wf-invalid-" + strings.ReplaceAll(test.name, " ", "-"),
+				"input":      "Reject unavailable skills before workflow creation.",
+				"skill_refs": []map[string]string{test.ref},
+			})
+			if err != nil {
+				t.Fatalf("marshal create request: %v", err)
+			}
+			response := httptest.NewRecorder()
+			invalidServer.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/workflows", bytes.NewReader(body)))
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("POST /workflows status = %d; body=%s, want 400", response.Code, response.Body.String())
+			}
+		})
 	}
 }
 

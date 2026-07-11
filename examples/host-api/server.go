@@ -72,6 +72,14 @@ type createWorkflowRequest struct {
 	RunMode           string              `json:"run_mode,omitempty"`
 	TaskProfilePreset string              `json:"task_profile_preset,omitempty"`
 	TaskProfile       *taskProfileRequest `json:"task_profile,omitempty"`
+	SkillRefs         []workflowSkillRef  `json:"skill_refs,omitempty"`
+}
+
+// workflowSkillRef is the JSON-safe identity of a skill selected for one
+// workflow. Digest is optional in a request, but always present after resolve.
+type workflowSkillRef struct {
+	Name   string `json:"name"`
+	Digest string `json:"digest,omitempty"`
 }
 
 type approveWorkflowRequest struct {
@@ -95,6 +103,7 @@ type workflowResponse struct {
 	ID            string                 `json:"id"`
 	Status        string                 `json:"status"`
 	RunMode       string                 `json:"run_mode"`
+	SkillRefs     []workflowSkillRef     `json:"skill_refs,omitempty"`
 	InputRef      string                 `json:"input_ref,omitempty"`
 	OutputRef     string                 `json:"output_ref,omitempty"`
 	AgentRunID    string                 `json:"agent_run_id,omitempty"`
@@ -622,19 +631,28 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_task_profile", err.Error())
 		return
 	}
+	skillRefs, err := s.resolveSkillRefs(req.SkillRefs)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_skill_refs", err.Error())
+		return
+	}
 	inputRef := "artifact:" + req.ID + ":input"
 	if err := putTextArtifact(r.Context(), s.artifacts, inputRef, req.Input); err != nil {
 		writeError(w, http.StatusInternalServerError, "artifact_error", err.Error())
 		return
 	}
+	metadata := map[string]any{
+		"input_ref":    inputRef,
+		"run_mode":     string(runMode),
+		"task_profile": profile,
+	}
+	if len(skillRefs) > 0 {
+		metadata["skill_refs"] = skillRefs
+	}
 	run := workflowkit.WorkflowRun{
 		ID:       req.ID,
 		InputRef: inputRef,
-		Metadata: map[string]any{
-			"input_ref":    inputRef,
-			"run_mode":     string(runMode),
-			"task_profile": profile,
-		},
+		Metadata: metadata,
 	}
 	if runMode == RunModeQueued {
 		run.Status = workflowkit.StatusPending
@@ -652,6 +670,37 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, workflowToResponse(run, runMode))
+}
+
+// resolveSkillRefs accepts caller-supplied names only as lookup inputs. The
+// host reuses its immutable catalog and GateContext, then persists the catalog
+// digest so a future workflow run cannot silently select a newer skill.
+func (s *Server) resolveSkillRefs(requested []workflowSkillRef) ([]map[string]string, error) {
+	if len(requested) == 0 {
+		return nil, nil
+	}
+	if s.skillCatalog == nil {
+		return nil, errors.New("skill catalog is unavailable")
+	}
+
+	resolved := make([]map[string]string, 0, len(requested))
+	for _, ref := range requested {
+		if strings.TrimSpace(ref.Name) == "" {
+			return nil, errors.New("skill reference name is required")
+		}
+		entry, err := s.skillCatalog.Resolve(skillkit.Ref{Name: ref.Name, Digest: ref.Digest})
+		if err != nil {
+			return nil, fmt.Errorf("resolve skill %q: %w", ref.Name, err)
+		}
+		if report := skillkit.Evaluate(entry, s.skillGateContext); report.State != skillkit.AvailabilityEligible {
+			return nil, fmt.Errorf("skill %q is unavailable", entry.Ref.Name)
+		}
+		resolved = append(resolved, map[string]string{
+			"name":   entry.Ref.Name,
+			"digest": entry.Ref.Digest,
+		})
+	}
+	return resolved, nil
 }
 
 func (s *Server) runQueuedWorkflow(run workflowkit.WorkflowRun) {
@@ -1514,6 +1563,7 @@ func workflowToResponse(run workflowkit.WorkflowRun, runMode RunMode) workflowRe
 		ID:            run.ID,
 		Status:        string(run.Status),
 		RunMode:       string(runMode),
+		SkillRefs:     workflowSkillRefsFromMetadata(run.Metadata),
 		InputRef:      run.InputRef,
 		OutputRef:     run.OutputRef,
 		AgentRunID:    run.AgentRunID,
@@ -1522,6 +1572,37 @@ func workflowToResponse(run workflowkit.WorkflowRun, runMode RunMode) workflowRe
 		WaitingReason: run.WaitingReason,
 		AgentApproval: agentApprovalFromMetadata(run.Metadata),
 		Completed:     append([]string(nil), run.CompletedSteps...),
+	}
+}
+
+func workflowSkillRefsFromMetadata(metadata map[string]any) []workflowSkillRef {
+	switch refs := metadata["skill_refs"].(type) {
+	case []map[string]string:
+		response := make([]workflowSkillRef, 0, len(refs))
+		for _, ref := range refs {
+			if ref["name"] == "" || ref["digest"] == "" {
+				return nil
+			}
+			response = append(response, workflowSkillRef{Name: ref["name"], Digest: ref["digest"]})
+		}
+		return response
+	case []any:
+		response := make([]workflowSkillRef, 0, len(refs))
+		for _, value := range refs {
+			ref, ok := value.(map[string]any)
+			if !ok {
+				return nil
+			}
+			name, nameOK := ref["name"].(string)
+			digest, digestOK := ref["digest"].(string)
+			if !nameOK || !digestOK || name == "" || digest == "" {
+				return nil
+			}
+			response = append(response, workflowSkillRef{Name: name, Digest: digest})
+		}
+		return response
+	default:
+		return nil
 	}
 }
 
