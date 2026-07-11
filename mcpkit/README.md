@@ -28,10 +28,14 @@ agent, err := agentcore.NewAgent(
 )
 ```
 
-If `RegisterOptions.Permission` is empty, `mcpkit` uses MCP-style annotations:
-`readOnlyHint` maps to `read`, `destructiveHint` maps to `write`, and tools
-without either hint keep an empty permission so the default `goagent` policy
-denies execution until the host explicitly allows it.
+`RegisterOptions.Permission` always takes precedence. Without an explicit
+permission, annotations from an MCP server are ignored by default and tools keep
+an empty permission, so the default `goagent` policy denies execution.
+
+Set `TrustServerAnnotations: true` only after the host has explicitly verified
+the MCP server identity and configuration. In that trusted case, `readOnlyHint`
+maps to `read` and `destructiveHint` maps to `write`. Annotations are hints for
+host policy; they are not an authorization boundary.
 
 ## Boundary
 

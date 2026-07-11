@@ -47,7 +47,10 @@ func run(out *os.File) error {
 	defer client.Close()
 
 	registry := tools.NewRegistry()
-	specs, err := mcpkit.RegisterTools(ctx, registry, client, mcpkit.RegisterOptions{MaxLLMChars: 200})
+	specs, err := mcpkit.RegisterTools(ctx, registry, client, mcpkit.RegisterOptions{
+		MaxLLMChars:            200,
+		TrustServerAnnotations: true,
+	})
 	if err != nil {
 		return err
 	}

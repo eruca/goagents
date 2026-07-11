@@ -61,6 +61,9 @@ type RegisterOptions struct {
 	ExecutionMode ports.ExecutionMode
 	Timeout       time.Duration
 	MaxLLMChars   int
+	// TrustServerAnnotations must be set only after host-side server verification.
+	// Untrusted MCP annotations are hints, never an authorization source.
+	TrustServerAnnotations bool
 }
 
 type Registry interface {
@@ -140,6 +143,9 @@ func (t Tool) Execute(ctx context.Context, input json.RawMessage, env tools.Env)
 func (t Tool) permission() policy.Permission {
 	if t.Options.Permission != "" {
 		return t.Options.Permission
+	}
+	if !t.Options.TrustServerAnnotations {
+		return ""
 	}
 	if t.Descriptor.Annotations.ReadOnlyHint {
 		return policy.PermissionRead

@@ -28,7 +28,10 @@ func TestRegisterToolsMapsDescriptorsToGoagentTools(t *testing.T) {
 	}
 	registry := tools.NewRegistry()
 
-	specs, err := RegisterTools(context.Background(), registry, client, RegisterOptions{MaxLLMChars: 80})
+	specs, err := RegisterTools(context.Background(), registry, client, RegisterOptions{
+		MaxLLMChars:            80,
+		TrustServerAnnotations: true,
+	})
 	if err != nil {
 		t.Fatalf("RegisterTools returned error: %v", err)
 	}
@@ -75,6 +78,38 @@ func TestRegisterToolsDefaultsUnknownPermissionToPolicyDenied(t *testing.T) {
 	}
 	if specs[0].Permission != "" {
 		t.Fatalf("permission = %q, want empty denied-by-default permission", specs[0].Permission)
+	}
+}
+
+func TestRegisterToolsIgnoresAnnotationsFromUntrustedServer(t *testing.T) {
+	client := &fakeMCPClient{descriptors: []ToolDescriptor{{
+		Name:        "delete_everything",
+		Annotations: ToolAnnotations{ReadOnlyHint: true},
+	}}}
+	registry := tools.NewRegistry()
+
+	specs, err := RegisterTools(context.Background(), registry, client, RegisterOptions{})
+	if err != nil {
+		t.Fatalf("RegisterTools returned error: %v", err)
+	}
+	if specs[0].Permission != "" {
+		t.Fatalf("permission = %q, want empty denied-by-default permission", specs[0].Permission)
+	}
+}
+
+func TestRegisterToolsUsesExplicitPermissionForUntrustedServer(t *testing.T) {
+	client := &fakeMCPClient{descriptors: []ToolDescriptor{{
+		Name:        "lookup_docs",
+		Annotations: ToolAnnotations{DestructiveHint: true},
+	}}}
+	registry := tools.NewRegistry()
+
+	specs, err := RegisterTools(context.Background(), registry, client, RegisterOptions{Permission: policy.PermissionRead})
+	if err != nil {
+		t.Fatalf("RegisterTools returned error: %v", err)
+	}
+	if specs[0].Permission != policy.PermissionRead {
+		t.Fatalf("permission = %q, want explicit read permission", specs[0].Permission)
 	}
 }
 

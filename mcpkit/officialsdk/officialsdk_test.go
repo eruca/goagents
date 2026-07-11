@@ -58,7 +58,10 @@ func TestStdioClientListsCallsAndRegistersTools(t *testing.T) {
 	}
 
 	registry := tools.NewRegistry()
-	specs, err := mcpkit.RegisterTools(context.Background(), registry, client, mcpkit.RegisterOptions{MaxLLMChars: 100})
+	specs, err := mcpkit.RegisterTools(context.Background(), registry, client, mcpkit.RegisterOptions{
+		MaxLLMChars:            100,
+		TrustServerAnnotations: true,
+	})
 	if err != nil {
 		t.Fatalf("RegisterTools returned error: %v", err)
 	}
@@ -117,7 +120,10 @@ func TestStreamableHTTPClientListsCallsAndRegistersTools(t *testing.T) {
 	}
 
 	registry := tools.NewRegistry()
-	specs, err := mcpkit.RegisterTools(context.Background(), registry, client, mcpkit.RegisterOptions{MaxLLMChars: 100})
+	specs, err := mcpkit.RegisterTools(context.Background(), registry, client, mcpkit.RegisterOptions{
+		MaxLLMChars:            100,
+		TrustServerAnnotations: true,
+	})
 	if err != nil {
 		t.Fatalf("RegisterTools returned error: %v", err)
 	}

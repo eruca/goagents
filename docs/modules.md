@@ -122,6 +122,7 @@ Module-specific checks:
 (cd mcpkit/officialsdk && go test ./...)
 (cd mcpkit/officialsdk && go run ./examples/stdio-smoke)
 (cd mcpkit/officialsdk && go run ./examples/http-smoke)
+(cd mcpkit/officialsdk && go run ./examples/goagent-mcp-http)
 (cd examples/host-api && go test ./...)
 (cd examples/host-runtime && go test ./...)
 (cd goagent && make verify)

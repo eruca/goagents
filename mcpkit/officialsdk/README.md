@@ -23,7 +23,8 @@ if err != nil {
 defer client.Close()
 
 _, err = mcpkit.RegisterTools(ctx, registry, client, mcpkit.RegisterOptions{
-    MaxLLMChars: 2000,
+    MaxLLMChars:            2000,
+    TrustServerAnnotations: true, // Only after host-side server verification.
 })
 ```
 
@@ -47,4 +48,5 @@ defer client.Close()
 go test ./...
 go run ./examples/stdio-smoke
 go run ./examples/http-smoke
+go run ./examples/goagent-mcp-http
 ```
