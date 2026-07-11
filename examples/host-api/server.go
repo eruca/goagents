@@ -25,6 +25,7 @@ import (
 	"github.com/eruca/runkit/goagentapproval"
 	runsqlite "github.com/eruca/runkit/sqlitestore"
 	"github.com/eruca/skillkit"
+	skillagentadapter "github.com/eruca/skillkit/agentadapter"
 	"github.com/eruca/workflowkit"
 	workflowsqlite "github.com/eruca/workflowkit/sqlitestore"
 )
@@ -462,7 +463,9 @@ func NewServer(config Config) (*Server, error) {
 		statsProvider: func(ctx context.Context) (*llmkit.ModelStats, error) {
 			return llmkit.RefreshModelStats(resolved.LLMKitHome)
 		},
-		providers: providers,
+		providers:        providers,
+		skillCatalog:     config.SkillCatalog,
+		skillGateContext: config.SkillGateContext,
 	}
 	agentApprovals, err := newHostAgentApprovalService(runs, config.AgentApprovalCipher, runner)
 	if err != nil {
@@ -1206,7 +1209,9 @@ func (s *Server) agentStep() workflowkit.Step {
 		statsProvider: func(ctx context.Context) (*llmkit.ModelStats, error) {
 			return llmkit.RefreshModelStats(s.llmHome)
 		},
-		providers: s.providers,
+		providers:        s.providers,
+		skillCatalog:     s.skillCatalog,
+		skillGateContext: s.skillGateContext,
 	}
 	return hostAgentStep{
 		runner:    runner,
@@ -1235,6 +1240,11 @@ func (s hostAgentStep) Run(ctx context.Context, run workflowkit.WorkflowRun) (wo
 			"workflow_id":  run.ID,
 			"task_profile": profile,
 		},
+	}
+	// Preserve the resolved name@digest refs in the checkpoint request. Resume
+	// must reactivate this exact immutable selection, never rediscover by name.
+	if skillRefs, exists := run.Metadata["skill_refs"]; exists {
+		request.Metadata["skill_refs"] = skillRefs
 	}
 	if profile.NeedsTools {
 		request.AllowedPermissions = []policy.Permission{policy.PermissionWrite}
@@ -1304,13 +1314,15 @@ func failedAgentStepResult(result *agentcore.RunResult, err error) workflowkit.S
 }
 
 type routingAgentRunner struct {
-	llmkitHome    string
-	runs          runkit.Store
-	artifacts     artifactkit.Store
-	health        llmkit.HealthStore
-	candidates    []llmkit.Candidate
-	statsProvider goagentadapter.ModelStatsProvider
-	providers     map[string]goagentadapter.ProviderClient
+	llmkitHome       string
+	runs             runkit.Store
+	artifacts        artifactkit.Store
+	health           llmkit.HealthStore
+	candidates       []llmkit.Candidate
+	statsProvider    goagentadapter.ModelStatsProvider
+	providers        map[string]goagentadapter.ProviderClient
+	skillCatalog     *skillkit.Catalog
+	skillGateContext skillkit.GateContext
 }
 
 func (r routingAgentRunner) RunDetailed(ctx context.Context, req agentcore.RunRequest) (*agentcore.RunResult, error) {
@@ -1319,29 +1331,37 @@ func (r routingAgentRunner) RunDetailed(ctx context.Context, req agentcore.RunRe
 		return nil, fmt.Errorf("workflow_id metadata is required")
 	}
 	profile := taskProfileFromMetadata(req.Metadata["task_profile"])
-	agent, err := r.newAgent(workflowID, profile)
+	activation, err := r.activateSkillRefs(req.Metadata)
+	if err != nil {
+		return nil, err
+	}
+	agent, err := r.newAgent(workflowID, profile, activation)
 	if err != nil {
 		return nil, err
 	}
 	return agent.RunDetailed(ctx, req)
 }
 
-// ResumeDetailed rebuilds the host-owned tool registry from checkpoint request
-// metadata before goagent validates and resumes the exact pending tool batch.
+// ResumeDetailed rebuilds host-owned skills and the tool registry from
+// checkpoint request metadata before validating the exact pending tool batch.
 func (r routingAgentRunner) ResumeDetailed(ctx context.Context, checkpoint agentcore.RunCheckpoint, resolutions []agentcore.ToolApprovalResolution) (*agentcore.RunResult, error) {
 	workflowID, _ := checkpoint.Request.Metadata["workflow_id"].(string)
 	if workflowID == "" {
 		return nil, fmt.Errorf("workflow_id metadata is required in checkpoint")
 	}
 	profile := taskProfileFromMetadata(checkpoint.Request.Metadata["task_profile"])
-	agent, err := r.newAgent(workflowID, profile)
+	activation, err := r.activateSkillRefs(checkpoint.Request.Metadata)
+	if err != nil {
+		return nil, err
+	}
+	agent, err := r.newAgent(workflowID, profile, activation)
 	if err != nil {
 		return nil, err
 	}
 	return agent.ResumeDetailed(ctx, checkpoint, resolutions)
 }
 
-func (r routingAgentRunner) newAgent(workflowID string, profile llmkit.TaskProfile) (*agentcore.Agent, error) {
+func (r routingAgentRunner) newAgent(workflowID string, profile llmkit.TaskProfile, activation *skillkit.Activation) (*agentcore.Agent, error) {
 	recorder, err := llmkit.NewJSONLRecorder(r.llmkitHome)
 	if err != nil {
 		return nil, err
@@ -1375,8 +1395,89 @@ func (r routingAgentRunner) newAgent(workflowID string, profile llmkit.TaskProfi
 			}
 		})),
 	}
+	if activation != nil {
+		options = append(options, agentcore.WithSkillProvider(skillagentadapter.Provider{
+			Resolve: func(context.Context, agentcore.RunRequest) (*skillkit.Activation, error) {
+				return activation, nil
+			},
+		}))
+	}
 	options = append(options, r.toolOptions(profile)...)
 	return agentcore.NewAgent(options...)
+}
+
+// activateSkillRefs only accepts the host's complete, persisted name@digest
+// maps. A malformed present value is never treated as an empty selection.
+func (r routingAgentRunner) activateSkillRefs(metadata map[string]any) (*skillkit.Activation, error) {
+	refs, present, err := persistedSkillRefs(metadata)
+	if err != nil {
+		return nil, fmt.Errorf("invalid persisted skill_refs: %w", err)
+	}
+	if !present {
+		return nil, nil
+	}
+	if r.skillCatalog == nil {
+		return nil, errors.New("skill catalog is unavailable for persisted skill_refs")
+	}
+	activation, err := r.skillCatalog.Activate(skillkit.ActivationRequest{
+		Skills:      refs,
+		GateContext: r.skillGateContext,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("activate persisted skill_refs: %w", err)
+	}
+	return activation, nil
+}
+
+func persistedSkillRefs(metadata map[string]any) ([]skillkit.Ref, bool, error) {
+	raw, present := metadata["skill_refs"]
+	if !present {
+		return nil, false, nil
+	}
+
+	refs := make([]skillkit.Ref, 0)
+	switch values := raw.(type) {
+	case []map[string]string:
+		for _, value := range values {
+			ref, err := persistedSkillRef(value)
+			if err != nil {
+				return nil, true, err
+			}
+			refs = append(refs, ref)
+		}
+	case []any:
+		for _, rawValue := range values {
+			value, ok := rawValue.(map[string]any)
+			if !ok {
+				return nil, true, errors.New("each skill reference must be a name/digest object")
+			}
+			name, nameOK := value["name"].(string)
+			digest, digestOK := value["digest"].(string)
+			if len(value) != 2 || !nameOK || !digestOK {
+				return nil, true, errors.New("each skill reference must contain only string name and digest")
+			}
+			ref, err := persistedSkillRef(map[string]string{"name": name, "digest": digest})
+			if err != nil {
+				return nil, true, err
+			}
+			refs = append(refs, ref)
+		}
+	default:
+		return nil, true, errors.New("skill_refs must be an array of name/digest objects")
+	}
+	if len(refs) == 0 {
+		return nil, true, errors.New("skill_refs must contain at least one complete reference")
+	}
+	return refs, true, nil
+}
+
+func persistedSkillRef(value map[string]string) (skillkit.Ref, error) {
+	name, nameOK := value["name"]
+	digest, digestOK := value["digest"]
+	if len(value) != 2 || !nameOK || !digestOK || strings.TrimSpace(name) == "" || strings.TrimSpace(digest) == "" {
+		return skillkit.Ref{}, errors.New("each skill reference must contain only non-empty name and digest")
+	}
+	return skillkit.Ref{Name: name, Digest: digest}, nil
 }
 
 type ingestStep struct {

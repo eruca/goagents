@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/eruca/artifactkit"
+	"github.com/eruca/goagent/agentcore"
+	"github.com/eruca/goagent/ports"
 	"github.com/eruca/llmkit/llmkit"
 	"github.com/eruca/runkit"
 	"github.com/eruca/skillkit"
@@ -230,6 +232,136 @@ func TestCreateWorkflowPersistsResolvedSkillRefs(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWorkflowSkillRefsActivateSameDigestAfterRestart(t *testing.T) {
+	skillRoot := t.TempDir()
+	const skillBody = "PERSISTED SKILL BODY: preserve the exact approved workflow review policy."
+	writeHostAPISkill(t, skillRoot, "resumable-review", "---\nname: resumable-review\ndescription: Resume the approved workflow review safely.\n---\n# Instructions\n"+skillBody+"\n", nil)
+	catalog, err := skillkit.Discover([]skillkit.Root{{
+		ID:      "resumable-skills",
+		Dir:     skillRoot,
+		Scope:   skillkit.ScopeBuiltin,
+		Trusted: true,
+		Enabled: true,
+	}})
+	if err != nil {
+		t.Fatalf("Discover returned error: %v", err)
+	}
+
+	runtimeHome := t.TempDir()
+	cipher := &testApprovalCipher{}
+	config := Config{
+		RuntimeHome:           runtimeHome,
+		SkillCatalog:          catalog,
+		SkillGateContext:      skillkit.GateContext{},
+		AgentApprovalCipher:   cipher,
+		ApprovalAuthenticator: testApprovalAuthenticator{identity: ApprovalIdentity{Subject: "operator-skill-restart"}},
+	}
+	server, err := NewServer(config)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	provider := &recordingSkillProvider{}
+	server.providers["local-free"] = provider
+
+	created := doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]any{
+		"id":    "wf-skill-restart",
+		"input": "Review this persisted-skill workflow.",
+		"skill_refs": []map[string]string{{
+			"name": "resumable-review",
+		}},
+		"task_profile": map[string]any{"needs_tools": true},
+	})
+	if created.AgentApproval == nil || len(created.AgentApproval.Tools) != 1 {
+		t.Fatalf("created workflow = %#v, want one pending tool approval", created)
+	}
+	if len(provider.requests) != 1 || !chatRequestContains(provider.requests[0], skillBody) {
+		t.Fatalf("first model request = %#v, want persisted skill body", provider.requests)
+	}
+
+	storedCheckpoint, err := server.runs.(runkit.CheckpointStore).GetCheckpoint(t.Context(), created.AgentApproval.CheckpointID, localApprovalTenant)
+	if err != nil {
+		t.Fatalf("GetCheckpoint: %v", err)
+	}
+	// The test cipher checks only that checkpoint AAD is present; production
+	// decryption additionally binds the exact checkpoint identity.
+	payload, err := cipher.Decrypt(t.Context(), storedCheckpoint.Ciphertext, []byte("checkpoint"))
+	if err != nil {
+		t.Fatalf("decrypt checkpoint: %v", err)
+	}
+	var checkpoint agentcore.RunCheckpoint
+	if err := json.Unmarshal(payload, &checkpoint); err != nil {
+		t.Fatalf("decode checkpoint: %v", err)
+	}
+	refs, ok := checkpoint.Request.Metadata["skill_refs"].([]any)
+	if !ok || len(refs) != 1 {
+		t.Fatalf("checkpoint skill_refs = %#v, want one persisted ref", checkpoint.Request.Metadata["skill_refs"])
+	}
+	checkpointRef, ok := refs[0].(map[string]any)
+	if !ok || checkpointRef["name"] != "resumable-review" || checkpointRef["digest"] != created.SkillRefs[0].Digest {
+		t.Fatalf("checkpoint skill_refs = %#v, want resolved resumable-review digest", refs)
+	}
+
+	closeStoreIfPossible(t, server.workflows)
+	closeStoreIfPossible(t, server.runs)
+	reopened, err := NewServer(config)
+	if err != nil {
+		t.Fatalf("reopen NewServer: %v", err)
+	}
+	reopened.providers["local-free"] = provider
+
+	checkpoint.Request.Metadata["skill_refs"] = []any{map[string]any{"name": "resumable-review"}}
+	requestsBeforeInvalidResume := len(provider.requests)
+	if _, err := reopened.agentApprovals.runner.ResumeDetailed(t.Context(), checkpoint, nil); err == nil || !strings.Contains(err.Error(), "digest") {
+		t.Fatalf("ResumeDetailed with missing persisted digest error = %v, want digest validation failure", err)
+	}
+	if len(provider.requests) != requestsBeforeInvalidResume {
+		t.Fatalf("invalid persisted digest called model: requests=%d, want %d", len(provider.requests), requestsBeforeInvalidResume)
+	}
+
+	pending := created.AgentApproval.Tools[0]
+	response := agentApprovalRequestForTest(t, reopened.Handler(), created.ID, map[string]any{
+		"resolutions": []map[string]any{{
+			"index":        pending.Index,
+			"tool_call_id": pending.ToolCallID,
+			"tool":         pending.Tool,
+			"allowed":      true,
+		}},
+	}, "Bearer test-operator")
+	if response.Code != http.StatusOK {
+		t.Fatalf("approval after restart status = %d; body=%s", response.Code, response.Body.String())
+	}
+	if len(provider.requests) != 2 || !chatRequestContains(provider.requests[1], skillBody) {
+		t.Fatalf("resumed model requests = %#v, want persisted skill body after restart", provider.requests)
+	}
+}
+
+type recordingSkillProvider struct {
+	requests []ports.ChatRequest
+}
+
+func (p *recordingSkillProvider) Chat(_ context.Context, request ports.ChatRequest) (*ports.ChatResponse, error) {
+	p.requests = append(p.requests, request)
+	if len(request.Tools) > 0 && !hasToolObservation(request.Messages) {
+		return &ports.ChatResponse{
+			ToolCalls: []ports.ToolCall{{
+				ID:    "call-record-review",
+				Name:  recordReviewToolName,
+				Input: json.RawMessage(`{}`),
+			}},
+		}, nil
+	}
+	return &ports.ChatResponse{Content: "skill-aware workflow response"}, nil
+}
+
+func chatRequestContains(request ports.ChatRequest, text string) bool {
+	for _, message := range request.Messages {
+		if strings.Contains(message.Content, text) {
+			return true
+		}
+	}
+	return false
 }
 
 func writeHostAPISkill(t *testing.T, root, name, source string, resources map[string]string) {
