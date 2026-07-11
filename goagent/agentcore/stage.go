@@ -8,6 +8,7 @@ const (
 	StageContinue StageResult = iota
 	StageBreak
 	StageAbort
+	StageInterrupt
 )
 
 type Stage interface {

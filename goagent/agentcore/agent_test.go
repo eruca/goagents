@@ -583,6 +583,83 @@ func TestAgentToolCompletedEventIncludesResultReference(t *testing.T) {
 	}
 }
 
+func TestAgentToolEventsExcludeRawToolInputAndResult(t *testing.T) {
+	const secretInput = `{"account":"secret-account"}`
+	const secretResult = "secret-account balance"
+
+	sink := &recordingEventSink{}
+	llm := &mockLLM{responses: []*ports.ChatResponse{
+		{ToolCalls: []ports.ToolCall{{Name: "lookup", Input: json.RawMessage(secretInput)}}},
+		{Content: "agent answer"},
+	}}
+	registry := tools.NewRegistry()
+	registry.Register(testAgentTool{
+		spec: tools.Spec{Name: "lookup", Permission: policy.PermissionRead},
+		run: func(ctx context.Context, input json.RawMessage, env tools.Env) (*tools.Result, error) {
+			return &tools.Result{ForLLM: secretResult, ForUser: secretResult, Ref: "artifact:lookup-1"}, nil
+		},
+	})
+	agent, err := NewAgent(WithLLM(llm), WithToolRegistry(registry), WithEventSink(sink))
+	if err != nil {
+		t.Fatalf("NewAgent returned error: %v", err)
+	}
+
+	if _, err := agent.Run(context.Background(), RunRequest{Input: "hello"}); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	for _, event := range sink.events {
+		if event.Type != EventToolStarted && event.Type != EventToolCompleted {
+			continue
+		}
+		if event.Message == secretInput || event.Message == secretResult {
+			t.Fatalf("event message leaked tool data: %#v", event)
+		}
+		for _, value := range event.Metadata {
+			if value == secretInput || value == secretResult {
+				t.Fatalf("event metadata leaked tool data: %#v", event)
+			}
+		}
+	}
+}
+
+func TestAgentFailedEventsExcludeRawToolInputAndError(t *testing.T) {
+	const secretInput = `{"account":"secret-account"}`
+	const secretError = "secret-account backend failure"
+
+	sink := &recordingEventSink{}
+	llm := &mockLLM{responses: []*ports.ChatResponse{{
+		ToolCalls: []ports.ToolCall{{Name: "lookup", Input: json.RawMessage(secretInput)}},
+	}}}
+	registry := tools.NewRegistry()
+	registry.Register(testAgentTool{
+		spec: tools.Spec{Name: "lookup", Permission: policy.PermissionRead},
+		run: func(ctx context.Context, input json.RawMessage, env tools.Env) (*tools.Result, error) {
+			return nil, errors.New(secretError)
+		},
+	})
+	agent, err := NewAgent(WithLLM(llm), WithToolRegistry(registry), WithEventSink(sink))
+	if err != nil {
+		t.Fatalf("NewAgent returned error: %v", err)
+	}
+
+	if _, err := agent.Run(context.Background(), RunRequest{Input: "hello"}); err == nil {
+		t.Fatal("Run returned nil error")
+	}
+	for _, event := range sink.events {
+		if event.Type != EventToolFailed && event.Type != EventStageFailed {
+			continue
+		}
+		if event.Message == secretError || event.Message == secretInput {
+			t.Fatalf("event message leaked tool data: %#v", event)
+		}
+		for _, value := range event.Metadata {
+			if value == secretInput || value == secretError {
+				t.Fatalf("event metadata leaked tool data: %#v", event)
+			}
+		}
+	}
+}
+
 func TestAgentEmitsToolFailedEvent(t *testing.T) {
 	sink := &recordingEventSink{}
 	llm := &mockLLM{responses: []*ports.ChatResponse{

@@ -60,6 +60,7 @@ type ReActConfig struct {
 	SystemPromptProvider SystemPromptProvider
 	ToolProvider         ToolProvider
 	ContextProjector     ContextProjector
+	InputGuard           InputGuard
 	ToolApprover         ToolApprover
 	OutputFormat         OutputFormat
 	OutputValidator      OutputValidator
@@ -86,6 +87,7 @@ func NewReActRunner(config ReActConfig) *ReActRunner {
 		maxIterations:  maxIterations,
 		memoryProvider: config.MemoryProvider,
 		pipeline: NewPipeline(
+			InputGuardStage{Guard: config.InputGuard},
 			MemoryLoadStage{Provider: config.MemoryProvider},
 			ContextStage{},
 			SystemPromptStage{Provider: config.SystemPromptProvider},
@@ -106,7 +108,7 @@ func NewReActRunner(config ReActConfig) *ReActRunner {
 }
 
 func (r *ReActRunner) Run(ctx context.Context, state *RunState) (StageResult, error) {
-	for i := 0; i < r.maxIterations; i++ {
+	for i := state.Iteration; i < r.maxIterations; i++ {
 		result, err := r.pipeline.Run(ctx, state)
 		if err != nil {
 			return result, err

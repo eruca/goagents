@@ -15,7 +15,7 @@ func (p *Pipeline) Run(ctx context.Context, state *RunState) (StageResult, error
 		state.Emit(ctx, Event{Type: EventStageStarted, Stage: stage.Name()})
 		result, err := stage.Run(ctx, state)
 		if err != nil {
-			state.Emit(ctx, Event{Type: EventStageFailed, Stage: stage.Name(), Message: err.Error()})
+			state.Emit(ctx, Event{Type: EventStageFailed, Stage: stage.Name()})
 			return StageAbort, err
 		}
 		state.Emit(ctx, Event{Type: EventStageCompleted, Stage: stage.Name()})

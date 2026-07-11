@@ -22,8 +22,11 @@ type ToolApprovalRequest struct {
 	Metadata  map[string]any
 }
 
+// ToolApprovalDecision is a synchronous allow, deny, or pending decision for one tool call.
 type ToolApprovalDecision struct {
 	Allowed bool
+	// Pending takes precedence over Allowed so an ambiguous decision cannot execute a tool.
+	Pending bool
 	Reason  string
 }
 
@@ -56,6 +59,17 @@ func (s ApprovalStage) Run(ctx context.Context, state *RunState) (StageResult, e
 			Input:     call.Input,
 			Metadata:  state.Metadata,
 		})
+		if decision.Pending {
+			pendingMetadata := cloneApprovalMetadata(metadata)
+			if decision.Reason != "" {
+				pendingMetadata["reason"] = decision.Reason
+			}
+			state.Emit(ctx, Event{
+				Type:     EventApprovalPending,
+				Metadata: pendingMetadata,
+			})
+			return StageInterrupt, nil
+		}
 		if !decision.Allowed {
 			deniedMetadata := cloneApprovalMetadata(metadata)
 			if decision.Reason != "" {

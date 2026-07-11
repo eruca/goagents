@@ -25,6 +25,7 @@ type RunResult struct {
 	OutputMetadata   map[string]any
 	Usage            Usage
 	ExecutionSummary ExecutionSummary
+	Interruption     *ToolApprovalInterruption
 }
 
 type Usage struct {

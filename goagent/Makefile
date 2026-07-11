@@ -17,6 +17,7 @@ smoke:
 	go run ./examples/audit-log --once
 	go run ./examples/approval
 	go run ./examples/approval-deny
+	go run ./examples/approval-resume
 	go run ./examples/structured-output
 	go run ./examples/openai-compatible
 

@@ -22,8 +22,7 @@ func (s ActStage) Run(ctx context.Context, state *RunState) (StageResult, error)
 		state.Emit(ctx, Event{
 			Type: EventToolStarted,
 			Metadata: map[string]any{
-				"tool":  call.Name,
-				"input": string(call.Input),
+				"tool": call.Name,
 			},
 		})
 	}
@@ -35,11 +34,9 @@ func (s ActStage) Run(ctx context.Context, state *RunState) (StageResult, error)
 	if err != nil {
 		for _, call := range state.PendingCalls {
 			state.Emit(ctx, Event{
-				Type:    EventToolFailed,
-				Message: err.Error(),
+				Type: EventToolFailed,
 				Metadata: map[string]any{
-					"tool":  call.Name,
-					"input": string(call.Input),
+					"tool": call.Name,
 				},
 			})
 		}
@@ -53,17 +50,8 @@ func (s ActStage) Run(ctx context.Context, state *RunState) (StageResult, error)
 		if result.Result != nil && result.Result.Ref != "" {
 			metadata["ref"] = result.Result.Ref
 		}
-		if len(result.Call.Input) > 0 {
-			metadata["input"] = string(result.Call.Input)
-		}
 		if result.Result != nil {
 			metadata["is_error"] = result.Result.IsError
-			if result.Result.ForLLM != "" {
-				metadata["for_llm"] = result.Result.ForLLM
-			}
-			if result.Result.ForUser != "" {
-				metadata["for_user"] = result.Result.ForUser
-			}
 		}
 		state.Emit(ctx, Event{
 			Type:     EventToolCompleted,

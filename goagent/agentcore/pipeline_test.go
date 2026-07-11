@@ -103,7 +103,7 @@ func TestPipelineEmitsStageFailedEvent(t *testing.T) {
 	if sink.events[0].Type != EventStageStarted || sink.events[1].Type != EventStageFailed {
 		t.Fatalf("events = %#v", sink.events)
 	}
-	if sink.events[1].Stage != "broken" || sink.events[1].Message != "stage failed" {
+	if sink.events[1].Stage != "broken" || sink.events[1].Message != "" {
 		t.Fatalf("failed event = %#v", sink.events[1])
 	}
 }

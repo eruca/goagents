@@ -15,10 +15,13 @@ const (
 	EventMemorySaved     EventType = "memory.saved"
 	EventFinalized       EventType = "finalized"
 	EventOutputValidated EventType = "output.validated"
+	EventInputValidated  EventType = "input.validated"
+	EventInputRejected   EventType = "input.rejected"
 
 	EventApprovalRequested EventType = "approval.requested"
 	EventApprovalCompleted EventType = "approval.completed"
 	EventApprovalDenied    EventType = "approval.denied"
+	EventApprovalPending   EventType = "approval.pending"
 )
 
 type Event struct {

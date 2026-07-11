@@ -31,6 +31,7 @@ go run ./examples/basic
 - `examples/audit-log` shows a host-owned JSONL audit adapter around `Agent.Stream`.
 - `examples/approval` shows host-controlled tool approval with stream events.
 - `examples/approval-deny` shows approval denial with partial stream summaries.
+- `examples/approval-resume` shows JSON checkpoint persistence and host-side Agent reconstruction before approved tool execution.
 - `examples/structured-output` shows JSON Schema output validation success and failure.
 
 ## What The Core Owns
@@ -47,8 +48,8 @@ The broader `goagents` workspace can contain sibling capability modules such as 
 
 The stable host-facing API is the surface applications should build around:
 
-- `agentcore.NewAgent`, `Agent.Run`, `Agent.RunDetailed`, `RunRequest`, `RunResult`, and `RunID`
-- `agentcore.Option` values such as `WithLLM`, `WithToolRegistry`, `WithPolicyEngine`, `WithMemoryProvider`, `WithContextProjector`, `WithBudget`, and `WithEventSink`
+- `agentcore.NewAgent`, `Agent.Run`, `Agent.RunDetailed`, `Agent.Resume`, `Agent.ResumeDetailed`, `RunRequest`, `RunResult`, and `RunID`
+- `agentcore.Option` values such as `WithLLM`, `WithToolRegistry`, `WithInputGuard`, `WithPolicyEngine`, `WithMemoryProvider`, `WithContextProjector`, `WithBudget`, and `WithEventSink`
 - `agentcore.WithOutputFormat` and `WithOutputValidator` for final-output format instructions and validation
 - `agentcore.Event`, `EventSink`, `Skill`, `SkillProvider`, `SystemPromptProvider`, `ToolProvider`, and `Module`
 - `ports` interfaces and DTOs for LLM, prompt, tools, policy, and memory
@@ -62,7 +63,11 @@ Common framework-owned abort reasons are classifiable with `errors.Is`:
 - `agentcore.ErrMaxIterations`
 - `agentcore.ErrBudgetExceeded`
 - `agentcore.ErrPolicyDenied`
+- `agentcore.ErrInputRejected`
 - `agentcore.ErrApprovalDenied`
+- `agentcore.ErrApprovalPending`
+- `agentcore.ErrInvalidRunCheckpoint`
+- `agentcore.ErrInvalidApprovalResolution`
 - `tools.ErrToolNotFound`
 - `tools.ErrToolInputInvalid`
 - `tools.ErrToolSchemaInvalid`
@@ -115,7 +120,7 @@ Use `Agent.Run` for normal execution. Use `Agent.RunDetailed` when the host need
 - `Duration`: wall-clock run duration measured by the framework.
 - `AbortReason`: empty on success, or the framework/provider error message on abort.
 
-On success, `Run` and `RunDetailed` both return the final `RunResult`. On error, `Run` returns a nil result, while `RunDetailed` returns a partial `RunResult` with `RunID`, accumulated `Usage`, and `ExecutionSummary`.
+On success, `Run` and `RunDetailed` both return the final `RunResult`. On error, `Run` returns a nil result, while `RunDetailed` returns a partial `RunResult` with `RunID`, accumulated `Usage`, and `ExecutionSummary`. A pending tool approval is a classifiable interruption: `RunDetailed` also returns `RunResult.Interruption.Checkpoint`, while `Run` returns a nil result and `ErrApprovalPending`.
 
 ```go
 result, err := agent.RunDetailed(ctx, agentcore.RunRequest{
@@ -168,6 +173,30 @@ Do not put secrets or raw sensitive data into prompt blocks unless the host inte
 
 See `examples/prompt` for a compact prompt assembly example.
 
+## Guardrails And Policy
+
+`agentcore` keeps three guardrail boundaries separate:
+
+- `WithInputGuard` screens a raw request before memory load, context assembly, the LLM, and tools.
+- `WithOutputValidator` validates the final model answer before it is finalized or saved to memory.
+- Policy and approval decide whether a concrete tool call can execute.
+
+An input guard implements `InputGuard`. Return a non-nil error to reject the request; the framework returns `ErrInputRejected` without embedding that diagnostic in events or `ExecutionSummary.AbortReason`. Hosts that need a detailed reason should retain it in their own access-controlled audit path.
+
+```go
+agent, err := agentcore.NewAgent(
+	agentcore.WithLLM(llm),
+	agentcore.WithInputGuard(agentcore.InputGuardFunc(func(ctx context.Context, req agentcore.InputGuardRequest) error {
+		if strings.Contains(req.Input, "restricted source") {
+			return errors.New("source is not allowed")
+		}
+		return nil
+	})),
+)
+```
+
+`input.validated` and `input.rejected` events intentionally contain no raw input, guard diagnostic, or request metadata. Successful validation runs once for the request, including when a paused approval checkpoint is later resumed.
+
 ## Policy
 
 Policy is the host-side safety gate between model-requested tool calls and tool execution.
@@ -202,7 +231,42 @@ Use `WithToolApprover` when a host needs to approve model-requested tool calls a
 
 Approval denial aborts the run before the tool body executes. `RunDetailed` and `Agent.Stream` return partial results with the approval denial reason in `ExecutionSummary.AbortReason`.
 
-Approval requested, completed, and denied events flow through `WithEventSink` and `Agent.Stream` with bounded metadata such as tool name, index, and reason.
+An approver can return `ToolApprovalDecision{Pending: true}` to stop before execution. `Pending` takes precedence over `Allowed`, so ambiguous decisions fail closed. `RunDetailed` then returns an error matching `ErrApprovalPending` and a `RunCheckpoint`; serialize that checkpoint with `encoding/json`, store it in host-controlled sensitive storage, obtain host authorization, and call `ResumeDetailed` with exactly one matching resolution for every pending tool call.
+
+```go
+result, err := agent.RunDetailed(ctx, agentcore.RunRequest{
+	Input: "publish the approved draft",
+})
+if errors.Is(err, agentcore.ErrApprovalPending) {
+	checkpointBytes, err := json.Marshal(result.Interruption.Checkpoint)
+	if err != nil {
+		return err
+	}
+	// Store checkpointBytes with host access control, encryption, and expiration.
+	var checkpoint agentcore.RunCheckpoint
+	if err := json.Unmarshal(checkpointBytes, &checkpoint); err != nil {
+		return err
+	}
+
+	result, err = agent.ResumeDetailed(ctx, checkpoint, []agentcore.ToolApprovalResolution{
+		{
+			Index:      0,
+			ToolCallID: checkpoint.PendingCalls[0].ID,
+			Tool:       checkpoint.PendingCalls[0].Name,
+			Allowed:    true,
+		},
+	})
+}
+if err != nil {
+	return err
+}
+```
+
+`RunCheckpoint` contains raw user content and tool inputs. It is not an event payload and must not be sent to ordinary logs, telemetry, or untrusted clients. A resumed batch is atomic: duplicate, missing, swapped, or mismatched resolutions fail before any tool or new LLM call; if any resolution denies, no call in that batch executes. Policy is evaluated again immediately before resumed execution, and `ExecutionSummary.Duration` remains wall-clock time, including an approval wait.
+
+Request-scoped tools are recreated through `ToolProvider` before a resume. Providers must therefore return the same valid tools for the checkpoint request while that checkpoint remains resumable.
+
+Approval requested, completed, denied, and pending events flow through `WithEventSink` and `Agent.Stream` with bounded metadata such as tool name, index, and reason. They never contain raw tool input or a checkpoint.
 
 ## Budgets
 
