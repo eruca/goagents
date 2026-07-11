@@ -62,7 +62,7 @@ func TestListSkillsReturnsSafeAvailability(t *testing.T) {
 
 	catalog, err := skillkit.Discover([]skillkit.Root{
 		{ID: "builtin-catalog", Dir: eligibleRoot, Scope: skillkit.ScopeBuiltin, Trusted: true, Enabled: true},
-		{ID: "untrusted-catalog", Dir: unavailableRoot, Scope: skillkit.ScopeWorkspace, Trusted: false, Enabled: true},
+		{ID: unavailableRoot, Dir: unavailableRoot, Scope: skillkit.ScopeWorkspace, Trusted: false, Enabled: true},
 		{ID: "invalid-catalog", Dir: invalidRoot, Scope: skillkit.ScopeUser, Trusted: true, Enabled: true},
 	})
 	if err != nil {
@@ -104,7 +104,7 @@ func TestListSkillsReturnsSafeAvailability(t *testing.T) {
 	if skill := byName["eligible-skill"]; skill.Description != "A safe eligible skill." || skill.Digest == "" || skill.Scope != string(skillkit.ScopeBuiltin) || skill.Availability != string(skillkit.AvailabilityEligible) || len(skill.Reasons) != 0 {
 		t.Fatalf("eligible skill = %+v, want an eligible builtin skill without reasons", skill)
 	}
-	if skill := byName["unavailable-skill"]; skill.Scope != string(skillkit.ScopeWorkspace) || skill.Availability != string(skillkit.AvailabilityUnavailable) || !containsSkillReason(skill.Reasons, "untrusted_root", "untrusted-catalog") {
+	if skill := byName["unavailable-skill"]; skill.Scope != string(skillkit.ScopeWorkspace) || skill.Availability != string(skillkit.AvailabilityUnavailable) || !containsSkillReason(skill.Reasons, "untrusted_root", "configured_root") {
 		t.Fatalf("unavailable skill = %+v, want untrusted root reason", skill)
 	}
 	if skill := byName["invalid-skill"]; skill.Scope != string(skillkit.ScopeUser) || skill.Availability != string(skillkit.AvailabilityInvalid) || len(skill.Reasons) == 0 {
@@ -183,6 +183,25 @@ func TestCreateWorkflowPersistsResolvedSkillRefs(t *testing.T) {
 	if len(loaded.SkillRefs) != 1 || loaded.SkillRefs[0] != created.SkillRefs[0] {
 		t.Fatalf("skill refs after reopen = %+v, want %+v", loaded.SkillRefs, created.SkillRefs)
 	}
+
+	t.Run("duplicate resolved reference", func(t *testing.T) {
+		body, err := json.Marshal(map[string]any{
+			"id":    "wf-duplicate-skill-refs",
+			"input": "Reject duplicate workflow skills before creation.",
+			"skill_refs": []map[string]string{
+				{"name": "workflow-review"},
+				{"name": "workflow-review"},
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal duplicate create request: %v", err)
+		}
+		response := httptest.NewRecorder()
+		reopened.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/workflows", bytes.NewReader(body)))
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("POST /workflows with duplicate skill refs status = %d; body=%s, want 400", response.Code, response.Body.String())
+		}
+	})
 
 	for _, test := range []struct {
 		name   string

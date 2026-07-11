@@ -601,7 +601,7 @@ func (s *Server) handleListSkills(w http.ResponseWriter, _ *http.Request) {
 		report := skillkit.Evaluate(entry, s.skillGateContext)
 		reasons := make([]skillReasonResponse, 0, len(report.Reasons))
 		for _, reason := range report.Reasons {
-			reasons = append(reasons, skillReasonResponse{Code: reason.Code, Subject: reason.Subject})
+			reasons = append(reasons, safeSkillReason(reason))
 		}
 		skills = append(skills, skillResponse{
 			Name:         entry.Ref.Name,
@@ -613,6 +613,15 @@ func (s *Server) handleListSkills(w http.ResponseWriter, _ *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, skillListResponse{Skills: skills})
+}
+
+// safeSkillReason keeps Root.ID out of the public API because host
+// configuration may use an absolute path as its identifier.
+func safeSkillReason(reason skillkit.Reason) skillReasonResponse {
+	if reason.Code == "untrusted_root" {
+		return skillReasonResponse{Code: reason.Code, Subject: "configured_root"}
+	}
+	return skillReasonResponse{Code: reason.Code, Subject: reason.Subject}
 }
 
 func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -687,6 +696,7 @@ func (s *Server) resolveSkillRefs(requested []workflowSkillRef) ([]map[string]st
 	}
 
 	resolved := make([]map[string]string, 0, len(requested))
+	seen := make(map[skillkit.Ref]struct{}, len(requested))
 	for _, ref := range requested {
 		if strings.TrimSpace(ref.Name) == "" {
 			return nil, errors.New("skill reference name is required")
@@ -698,6 +708,10 @@ func (s *Server) resolveSkillRefs(requested []workflowSkillRef) ([]map[string]st
 		if report := skillkit.Evaluate(entry, s.skillGateContext); report.State != skillkit.AvailabilityEligible {
 			return nil, fmt.Errorf("skill %q is unavailable", entry.Ref.Name)
 		}
+		if _, exists := seen[entry.Ref]; exists {
+			return nil, fmt.Errorf("duplicate skill reference %q", entry.Ref.Name)
+		}
+		seen[entry.Ref] = struct{}{}
 		resolved = append(resolved, map[string]string{
 			"name":   entry.Ref.Name,
 			"digest": entry.Ref.Digest,
