@@ -25,6 +25,7 @@ func main() {
 		panic(err)
 	}
 	server.StartQueuedWorker(context.Background())
+	server.StartAgentApprovalJanitor(context.Background())
 	addr := os.Getenv("HOST_API_ADDR")
 	if addr == "" {
 		addr = "127.0.0.1:8080"

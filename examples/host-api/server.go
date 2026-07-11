@@ -41,20 +41,21 @@ type Config struct {
 }
 
 type Server struct {
-	artifacts             artifactkit.Store
-	runs                  runkit.Store
-	workflows             workflowkit.Store
-	queries               workflowkit.WorkflowQueryStore
-	queue                 workflowkit.QueueLeaseStore
-	executor              *workflowkit.Executor
-	health                *llmkit.MemoryHealthStore
-	llmHome               string
-	models                []llmkit.Candidate
-	providers             map[string]goagentadapter.ProviderClient
-	approvalAuthenticator ApprovalAuthenticator
-	agentApprovals        *hostAgentApprovalService
-	worker                queuedWorkerStatus
-	workerCfg             queuedWorkerConfig
+	artifacts               artifactkit.Store
+	runs                    runkit.Store
+	workflows               workflowkit.Store
+	queries                 workflowkit.WorkflowQueryStore
+	queue                   workflowkit.QueueLeaseStore
+	executor                *workflowkit.Executor
+	health                  *llmkit.MemoryHealthStore
+	llmHome                 string
+	models                  []llmkit.Candidate
+	providers               map[string]goagentadapter.ProviderClient
+	approvalAuthenticator   ApprovalAuthenticator
+	agentApprovals          *hostAgentApprovalService
+	worker                  queuedWorkerStatus
+	workerCfg               queuedWorkerConfig
+	agentApprovalJanitorCfg agentApprovalJanitorConfig
 }
 
 type createWorkflowRequest struct {
@@ -135,12 +136,14 @@ const (
 )
 
 const (
-	queuedWorkerID             = "host-api-inprocess-worker"
-	defaultQueuedLeaseDuration = time.Minute
-	queuedLeaseDurationEnv     = "HOST_API_QUEUED_LEASE_DURATION"
-	queuedPollInterval         = 100 * time.Millisecond
-	minQueuedHeartbeatInterval = time.Millisecond
-	requeueEventsMetadataKey   = "requeue_events"
+	queuedWorkerID                    = "host-api-inprocess-worker"
+	defaultQueuedLeaseDuration        = time.Minute
+	queuedLeaseDurationEnv            = "HOST_API_QUEUED_LEASE_DURATION"
+	defaultAgentApprovalSweepInterval = time.Minute
+	agentApprovalSweepIntervalEnv     = "HOST_API_AGENT_APPROVAL_SWEEP_INTERVAL"
+	queuedPollInterval                = 100 * time.Millisecond
+	minQueuedHeartbeatInterval        = time.Millisecond
+	requeueEventsMetadataKey          = "requeue_events"
 )
 
 var (
@@ -151,6 +154,10 @@ var (
 
 type queuedWorkerConfig struct {
 	leaseDuration time.Duration
+}
+
+type agentApprovalJanitorConfig struct {
+	interval time.Duration
 }
 
 type agentRunResponse struct {
@@ -387,6 +394,10 @@ func NewServer(config Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	agentApprovalJanitorCfg, err := loadAgentApprovalJanitorConfig(os.Getenv)
+	if err != nil {
+		return nil, err
+	}
 	models, providers, _, err := loadLLMKitComposition(resolved.LLMKitHome)
 	if err != nil {
 		return nil, err
@@ -423,18 +434,19 @@ func NewServer(config Config) (*Server, error) {
 		return nil, err
 	}
 	server := &Server{
-		artifacts:             artifacts,
-		runs:                  runs,
-		workflows:             workflows,
-		queries:               workflows,
-		queue:                 workflows,
-		health:                health,
-		llmHome:               resolved.LLMKitHome,
-		models:                models,
-		providers:             providers,
-		workerCfg:             workerCfg,
-		approvalAuthenticator: config.ApprovalAuthenticator,
-		agentApprovals:        agentApprovals,
+		artifacts:               artifacts,
+		runs:                    runs,
+		workflows:               workflows,
+		queries:                 workflows,
+		queue:                   workflows,
+		health:                  health,
+		llmHome:                 resolved.LLMKitHome,
+		models:                  models,
+		providers:               providers,
+		workerCfg:               workerCfg,
+		agentApprovalJanitorCfg: agentApprovalJanitorCfg,
+		approvalAuthenticator:   config.ApprovalAuthenticator,
+		agentApprovals:          agentApprovals,
 	}
 	if server.approvalAuthenticator == nil {
 		server.approvalAuthenticator = rejectingApprovalAuthenticator{}
@@ -488,6 +500,23 @@ func loadQueuedWorkerConfig(getenv func(string) string) (queuedWorkerConfig, err
 		return queuedWorkerConfig{}, fmt.Errorf("%s must be greater than zero", queuedLeaseDurationEnv)
 	}
 	config.leaseDuration = lease
+	return config, nil
+}
+
+func loadAgentApprovalJanitorConfig(getenv func(string) string) (agentApprovalJanitorConfig, error) {
+	config := agentApprovalJanitorConfig{interval: defaultAgentApprovalSweepInterval}
+	rawInterval := strings.TrimSpace(getenv(agentApprovalSweepIntervalEnv))
+	if rawInterval == "" {
+		return config, nil
+	}
+	interval, err := time.ParseDuration(rawInterval)
+	if err != nil {
+		return agentApprovalJanitorConfig{}, fmt.Errorf("%s must be a Go duration such as 1m or 500ms: %w", agentApprovalSweepIntervalEnv, err)
+	}
+	if interval <= 0 {
+		return agentApprovalJanitorConfig{}, fmt.Errorf("%s must be greater than zero", agentApprovalSweepIntervalEnv)
+	}
+	config.interval = interval
 	return config, nil
 }
 

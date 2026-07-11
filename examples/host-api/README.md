@@ -192,6 +192,14 @@ Keychain service `goagents.host-api.approvals` and persists only a versioned
 AES-GCM envelope in `agent-runs.db`. There is no environment-variable or file
 fallback. Tests inject a cipher and never access the machine Keychain.
 
+An agent tool approval expires one hour after the pause. The host process starts
+an in-process janitor that defaults to a one-minute sweep interval; set
+`HOST_API_AGENT_APPROVAL_SWEEP_INTERVAL` to another positive Go duration such
+as `30s`. On expiry the checkpoint remains fail-closed, the correlated agent
+run and workflow become `failed` with `agent tool approval expired`, and the
+tool is never replayed. A temporary local persistence failure leaves the
+workflow waiting so the next sweep retries reconciliation.
+
 `GET /llmkit/models` returns:
 
 - `models`: current routable model aliases and coarse capability metadata.

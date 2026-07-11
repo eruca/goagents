@@ -298,6 +298,15 @@ denied decision records the verified operator, never decrypts or executes the
 checkpoint, and cancels the workflow. Missing or invalid tokens return
 `401 unauthorized` without changing the checkpoint.
 
+Agent tool approvals expire one hour after their pause. The local host janitor
+calls the checkpoint expiry operation every minute by default; set
+`HOST_API_AGENT_APPROVAL_SWEEP_INTERVAL` to a positive Go duration to change
+that cadence. Once expired, a checkpoint cannot be leased or replayed. The
+matching agent run and workflow are marked `failed` with
+`agent tool approval expired`; no tool executes. If writing either terminal
+record temporarily fails, the workflow retains its safe pending metadata and a
+later sweep retries reconciliation.
+
 ## POST /workflows/{id}/approve
 
 Approves and finalizes a waiting workflow.
