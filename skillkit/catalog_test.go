@@ -188,6 +188,20 @@ func TestDiscoverDoesNotExposeRootPathInConfigurationError(t *testing.T) {
 	}
 }
 
+func TestDiscoverRejectsOversizedSkillBody(t *testing.T) {
+	root := t.TempDir()
+	writeSkill(t, root, "clinical-summary", validSkillSource("clinical-summary", nil)+strings.Repeat("a", 128*1024+1), nil)
+
+	catalog, err := Discover([]Root{{ID: "builtin", Dir: root, Scope: ScopeBuiltin, Trusted: true, Enabled: true}})
+	if err != nil {
+		t.Fatalf("Discover returned error: %v", err)
+	}
+	entries := catalog.List()
+	if len(entries) != 1 || entries[0].State != EntryInvalid {
+		t.Fatalf("entries = %#v, want one invalid oversized skill", entries)
+	}
+}
+
 func writeSkill(t *testing.T, root string, name string, source string, resources map[string]string) string {
 	t.Helper()
 	skillDir := filepath.Join(root, name)

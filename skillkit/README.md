@@ -14,6 +14,10 @@ SkillKit can:
 - reject duplicate-name conflicts, invalid manifests, escaping resources, and
   untrusted roots;
 - evaluate a skill against host OS, features, and already-authorized tools.
+- activate an explicit, gated `name@digest` selection at run start and
+  recheck package content before loading its instruction body;
+- read an activated allowlisted resource through a path-free
+  `skill://name@digest/path` URI.
 
 SkillKit never executes `scripts/`, installs dependencies, performs network
 requests, grants tools, or exposes local filesystem paths through catalog
@@ -25,7 +29,6 @@ entries.
 package main
 
 import (
-	"fmt"
 	"runtime"
 
 	"github.com/eruca/skillkit"
@@ -43,17 +46,26 @@ func activateWorkspaceSkill() error {
 		return err
 	}
 
-	entry, err := catalog.Resolve(skillkit.Ref{Name: "clinical-summary"})
+	activation, err := catalog.Activate(skillkit.ActivationRequest{
+		Skills: []skillkit.Ref{{Name: "clinical-summary"}},
+		GateContext: skillkit.GateContext{
+			OS:             runtime.GOOS,
+			HostFeatures:   map[string]bool{"artifacts.v1": true},
+			AllowedToolIDs: map[string]bool{"artifact.read": true},
+		},
+	})
 	if err != nil {
 		return err
 	}
-	report := skillkit.Evaluate(entry, skillkit.GateContext{
-		OS:             runtime.GOOS,
-		HostFeatures:   map[string]bool{"artifacts.v1": true},
-		AllowedToolIDs: map[string]bool{"artifact.read": true},
-	})
-	if report.State != skillkit.AvailabilityEligible {
-		return fmt.Errorf("skill unavailable: %#v", report.Reasons)
+
+	skill := activation.Skills()[0] // Ref always includes its resolved digest.
+	uri, err := activation.ResourceURI(skill.Ref, "references/output-schema.md")
+	if err != nil {
+		return err
+	}
+	_, err = activation.ReadResource(uri)
+	if err != nil {
+		return err
 	}
 	return nil
 }
@@ -62,6 +74,28 @@ func activateWorkspaceSkill() error {
 The host chooses roots and marks each root as trusted. A declaration such as
 `required: [artifact.read]` is only a prerequisite: it does not make the tool
 available unless the host has already registered and authorized it for the run.
+The host should construct its request-scoped tool registry from the same
+authorization decision; SkillKit does not register or remove tools.
+
+## Agent adapter
+
+The optional `agentadapter.Provider` maps a host-resolved activation to
+`agentcore.SkillProvider`. Its resolver receives each `RunRequest`, so the
+host can keep activation selection request-scoped:
+
+```go
+provider := agentadapter.Provider{Resolve: func(ctx context.Context, req agentcore.RunRequest) (*skillkit.Activation, error) {
+	return activation, nil
+}}
+agent, err := agentcore.NewAgent(
+	agentcore.WithLLM(llm),
+	agentcore.WithSkillProvider(provider),
+)
+```
+
+The adapter only injects already activated instruction bodies. It does not
+implement `ToolProvider`, inspect `RunRequest.Metadata`, or change the
+agent tool registry.
 
 ## `SKILL.md` extension
 
@@ -89,12 +123,18 @@ Unknown metadata is preserved. Resource references are forward-slash relative
 paths; absolute paths, `..`, duplicate entries, and links escaping the skill
 directory are rejected.
 
+Instruction bodies are limited to 128 KiB at discovery. Resource reads return
+at most 1 MiB; larger packages must be split into explicit, separately
+allowlisted references. A changed package digest fails activation and resource
+reads rather than silently loading a newer file.
+
 ## Current scope
 
-This first slice intentionally stops after catalog discovery and availability
-evaluation. Resource resolution, `agentcore.SkillProvider` wiring, durable
-workflow `skill_refs`, remote registries, dependency installation, dynamic
-activation, and script sandboxing are separate future slices.
+SkillKit now includes catalog discovery, availability evaluation, run-start
+activation, bounded resource reads, and `agentcore.SkillProvider` wiring.
+Host API exposure, durable workflow `skill_refs`, request-scoped tool
+projection, remote registries, dependency installation, dynamic activation,
+and script sandboxing remain separate future slices.
 
 ## Verify
 

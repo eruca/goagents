@@ -13,6 +13,7 @@
 - 不修改 `goagent/agentcore`；既有 `ToolProvider` 只可追加 tool，不能安全收缩 base registry，工具投影留给后续 host slice。
 - Activation 只能使用 `Catalog` 已发现的 `Ref`；每次激活和资源读取必须重新校验 package digest。
 - 所有失败关闭错误只返回稳定 sentinel/reason，不泄露绝对路径、资源内容或环境值。
+- `SKILL.md` 正文最多 128 KiB；发现超限正文时标记为 invalid。
 - 资源 URI 固定为 `skill://<name>@<digest>/<allowlisted-relative-path>`；只返回最多 1 MiB 的字节流。
 - 不执行 `scripts/`、不安装依赖、不发网络请求、不修改环境。
 - 每个生产行为先写测试并观察预期 RED，再写最小实现。
@@ -80,21 +81,21 @@ func (p Provider) Skills(context.Context, agentcore.RunRequest) ([]agentcore.Ski
 - Consumes: `Root`、`Entry`、`packageDigest`、现有 conflict collapse。
 - Produces: `Catalog` 内可按完整 `Ref` 查询的私有 canonical root；`List` 与 `Resolve` 的公开行为不变。
 
-- [ ] **Step 1: 写失败测试，锁定私有 root 记录**
+- [x] **Step 1: 写失败测试，锁定私有 root 记录**
 
 在 `catalog_test.go` 增加 `TestCatalogRetainsPrivateRecordWithoutExposingPath`：发现一个临时 skill，确认 `catalog.Resolve` 的格式化输出不包含临时 root；再由下一 task 的 `Activate` 使用相同 catalog 成功读取正文。测试应只依赖公开 API。
 
-- [ ] **Step 2: 运行测试确认 RED**
+- [x] **Step 2: 运行测试确认 RED**
 
 Run: `(cd skillkit && go test ./... -run TestCatalogRetainsPrivateRecordWithoutExposingPath -count=1)`
 
 Expected: FAIL，原因是 `Catalog.Activate` 未定义。
 
-- [ ] **Step 3: 最小重构 catalog 内部表示**
+- [x] **Step 3: 最小重构 catalog 内部表示**
 
 在 `catalog.go` 增加未导出的 `catalogRecord{entry Entry, skillPath string}`；`Discover` 以 record 聚合与去重，选择已存在的“trusted 优先、root ID 次序”规则对应路径。公开 `Catalog.List`、`Resolve` 继续从 cloned `Entry` 返回，任何 public DTO 和 error 都不出现 `skillPath`。
 
-- [ ] **Step 4: 运行既有 catalog 测试**
+- [x] **Step 4: 运行既有 catalog 测试**
 
 Run: `(cd skillkit && go test ./... -run TestDiscover -count=1)`
 
@@ -111,7 +112,7 @@ Expected: PASS。
 - Consumes: Task 1 的私有 record、`Evaluate`、`readContainedFile` 与 `packageDigest`。
 - Produces: 不含路径的 `Activation` 和 `ActivatedSkill`；`ResourceURI`、`ReadResource`。
 
-- [ ] **Step 1: 写 activation 的失败测试**
+- [x] **Step 1: 写 activation 的失败测试**
 
 在 `activation_test.go` 创建真实临时 root，并覆盖：
 
@@ -137,14 +138,15 @@ func TestActivateLoadsOnlyRequestedSkillBody(t *testing.T) {
 - `TestActivationReadsOnlyAllowedResource`：由 `ResourceURI` 生成 URI，可读 allowlisted 内容；未激活 ref、`../`、绝对路径与未允许资源均失败；
 - `TestActivationRejectsChangedResourceAndOversizedRead`：激活后修改资源或写入超过 1 MiB 的文件，失败关闭；
 - `TestActivationErrorsDoNotLeakRootPath`：所有上述 error 文本不含临时目录。
+- `TestDiscoverRejectsOversizedSkillBody`：正文超过 128 KiB 时 catalog 保留 invalid entry。
 
-- [ ] **Step 2: 运行 activation 测试确认 RED**
+- [x] **Step 2: 运行 activation 测试确认 RED**
 
 Run: `(cd skillkit && go test ./... -run 'TestActivate|TestActivation' -count=1)`
 
 Expected: FAIL，原因是 activation API 和 errors 未定义。
 
-- [ ] **Step 3: 实现最小 activation**
+- [x] **Step 3: 实现最小 activation**
 
 在 `errors.go` 添加：
 
@@ -161,7 +163,7 @@ ErrSkillDigestMismatch = errors.New("skill content changed")
 4. 从 frontmatter closing delimiter 后提取正文，拒绝空正文，按 name/digest 稳定排序；
 5. `ResourceURI` 只接受当前 activation 的完整 ref 和 manifest allowlist path；`ReadResource` 严格 parse `skill://name@digest/path`，重新校验 digest、allowlist、regular file 与 1 MiB 上限，再返回内容副本。
 
-- [ ] **Step 4: 运行 activation 测试确认 GREEN**
+- [x] **Step 4: 运行 activation 测试确认 GREEN**
 
 Run: `(cd skillkit && go test ./... -run 'TestActivate|TestActivation' -count=1)`
 
@@ -179,7 +181,7 @@ Expected: PASS。
 - Consumes: `Activation.Skills` 与 `agentcore.SkillProvider`。
 - Produces: 由 host 提供 request-scoped `ActivationResolver` 的薄 `Provider`；无 tool registry API。
 
-- [ ] **Step 1: 写 adapter 失败测试**
+- [x] **Step 1: 写 adapter 失败测试**
 
 在 `agentadapter/provider_test.go` 写入：
 
@@ -199,17 +201,17 @@ func TestProviderMapsActivatedSkillToAgentcoreSkill(t *testing.T) {
 
 另写 `TestProviderPropagatesResolverError` 与 compile-time `var _ agentcore.SkillProvider = Provider{}`。测试不得注册或执行 tool。
 
-- [ ] **Step 2: 运行 adapter 测试确认 RED**
+- [x] **Step 2: 运行 adapter 测试确认 RED**
 
 Run: `(cd skillkit && go test ./agentadapter -count=1)`
 
 Expected: FAIL，原因是 package/`Provider` 未定义。
 
-- [ ] **Step 3: 写最小 adapter 与 module 接线**
+- [x] **Step 3: 写最小 adapter 与 module 接线**
 
 在 `skillkit/go.mod` 加入与其他 sibling module 相同的 `goagent` require/replace。实现 `Provider.Skills`：nil resolver 返回稳定 error；调用 resolver；把 `ActivatedSkill` 映射为 `agentcore.Skill{Name, Description, Content, Cacheable: true}`。不得实现 `ToolProvider`，不得读取 `RunRequest.Metadata`，不得修改 tool registry。
 
-- [ ] **Step 4: 运行 adapter 测试确认 GREEN**
+- [x] **Step 4: 运行 adapter 测试确认 GREEN**
 
 Run: `(cd skillkit && go test ./agentadapter -count=1)`
 
@@ -221,11 +223,11 @@ Expected: PASS。
 - Modify: `skillkit/README.md`
 - Modify: `docs/superpowers/plans/2026-07-12-skillkit-activation-implementation.md`
 
-- [ ] **Step 1: 更新 README**
+- [x] **Step 1: 更新 README**
 
 将 current scope 改为已支持 catalog、gate、run-start activation、受限资源 URI 与 `agentadapter.Provider`；明确仍未实现 host API、workflow 持久化、动态激活、工具投影和脚本执行。
 
-- [ ] **Step 2: 整理与模块验证**
+- [x] **Step 2: 整理与模块验证**
 
 Run:
 
@@ -237,7 +239,7 @@ Run:
 
 Expected: PASS。
 
-- [ ] **Step 3: 全 workspace 验证**
+- [x] **Step 3: 全 workspace 验证**
 
 Run:
 
@@ -249,7 +251,7 @@ rg -n 'os/exec|exec\.Command|net/http|http\.Get' skillkit
 
 Expected: 前两项 exit 0；最后一项无 production hit。
 
-- [ ] **Step 4: 仅提交 activation 切片**
+- [x] **Step 4: 仅提交 activation 切片**
 
 ```bash
 git add skillkit docs/superpowers/plans/2026-07-12-skillkit-activation-implementation.md

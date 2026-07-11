@@ -64,14 +64,32 @@ type Entry struct {
 
 // Catalog is an immutable snapshot produced by Discover.
 type Catalog struct {
-	entries []Entry
+	records []catalogRecord
+}
+
+// catalogRecord keeps the physical location private to skillkit. Public
+// catalog APIs return only the associated Entry.
+type catalogRecord struct {
+	entry     Entry
+	skillPath string
+}
+
+// String avoids exposing the private canonical roots when a catalog reaches
+// host diagnostics or logs.
+func (c *Catalog) String() string {
+	return fmt.Sprintf("skillkit.Catalog{entries:%v}", c.List())
+}
+
+// GoString keeps %#v diagnostics path-free for the same reason as String.
+func (c *Catalog) GoString() string {
+	return fmt.Sprintf("&skillkit.Catalog{entries:%#v}", c.List())
 }
 
 // Discover reads enabled roots and returns a deterministic catalog snapshot.
 // It performs no process execution, dependency installation, network I/O, or
 // environment mutation.
 func Discover(roots []Root) (*Catalog, error) {
-	entries := make([]Entry, 0)
+	records := make([]catalogRecord, 0)
 	seenRootIDs := make(map[string]struct{})
 	for _, root := range roots {
 		if !root.Enabled {
@@ -93,17 +111,17 @@ func Discover(roots []Root) (*Catalog, error) {
 			if !directory.IsDir() {
 				continue
 			}
-			entry, present := discoverSkill(canonicalRoot, root, directory.Name())
+			record, present := discoverSkill(canonicalRoot, root, directory.Name())
 			if present {
-				entries = append(entries, entry)
+				records = append(records, record)
 			}
 		}
 	}
 
-	entries = mergeEqualDigests(entries)
-	markAmbiguous(entries)
-	sortEntries(entries)
-	return &Catalog{entries: entries}, nil
+	records = mergeEqualDigests(records)
+	markAmbiguous(records)
+	sortRecords(records)
+	return &Catalog{records: records}, nil
 }
 
 // List returns a deep copy ordered by name, digest, and root ID.
@@ -111,9 +129,9 @@ func (c *Catalog) List() []Entry {
 	if c == nil {
 		return nil
 	}
-	entries := make([]Entry, len(c.entries))
-	for index, entry := range c.entries {
-		entries[index] = cloneEntry(entry)
+	entries := make([]Entry, len(c.records))
+	for index, record := range c.records {
+		entries[index] = cloneEntry(record.entry)
 	}
 	return entries
 }
@@ -125,7 +143,8 @@ func (c *Catalog) Resolve(ref Ref) (Entry, error) {
 		return Entry{}, ErrSkillNotFound
 	}
 	var matches []Entry
-	for _, entry := range c.entries {
+	for _, record := range c.records {
+		entry := record.entry
 		if entry.Ref.Name != ref.Name {
 			continue
 		}
@@ -194,47 +213,55 @@ func canonicalDirectory(directory string) (string, error) {
 	return canonical, nil
 }
 
-func discoverSkill(rootPath string, root Root, name string) (Entry, bool) {
+func discoverSkill(rootPath string, root Root, name string) (catalogRecord, bool) {
 	skillPath := filepath.Join(rootPath, name)
 	canonicalSkillPath, err := canonicalDirectory(skillPath)
 	if err != nil || !pathWithin(rootPath, canonicalSkillPath) {
-		return invalidEntry(root, name), true
+		return invalidRecord(root, name), true
 	}
 	source, exists, err := readContainedFile(canonicalSkillPath, "SKILL.md")
 	if !exists {
-		return Entry{}, false
+		return catalogRecord{}, false
 	}
 	if err != nil {
-		return invalidEntry(root, name), true
+		return invalidRecord(root, name), true
 	}
 	manifest, err := ParseManifest(name, source)
 	if err != nil {
-		return invalidEntry(root, name), true
+		return invalidRecord(root, name), true
+	}
+	if body, err := skillBody(source); err != nil || len(body) > maxSkillBodyBytes {
+		return invalidRecord(root, name), true
 	}
 	digest, err := packageDigest(canonicalSkillPath, source, manifest.Resources)
 	if err != nil {
-		return invalidEntry(root, name), true
+		return invalidRecord(root, name), true
 	}
-	return Entry{
-		Ref:           Ref{Name: manifest.Name, Digest: digest},
-		Manifest:      cloneManifest(manifest),
-		RootID:        root.ID,
-		SourceRootIDs: []string{root.ID},
-		Scope:         root.Scope,
-		Trusted:       root.Trusted,
-		State:         EntryReady,
+	return catalogRecord{
+		entry: Entry{
+			Ref:           Ref{Name: manifest.Name, Digest: digest},
+			Manifest:      cloneManifest(manifest),
+			RootID:        root.ID,
+			SourceRootIDs: []string{root.ID},
+			Scope:         root.Scope,
+			Trusted:       root.Trusted,
+			State:         EntryReady,
+		},
+		skillPath: canonicalSkillPath,
 	}, true
 }
 
-func invalidEntry(root Root, name string) Entry {
-	return Entry{
-		Ref:           Ref{Name: name},
-		RootID:        root.ID,
-		SourceRootIDs: []string{root.ID},
-		Scope:         root.Scope,
-		Trusted:       root.Trusted,
-		State:         EntryInvalid,
-		Reasons:       []Reason{{Code: "invalid_manifest", Subject: name}},
+func invalidRecord(root Root, name string) catalogRecord {
+	return catalogRecord{
+		entry: Entry{
+			Ref:           Ref{Name: name},
+			RootID:        root.ID,
+			SourceRootIDs: []string{root.ID},
+			Scope:         root.Scope,
+			Trusted:       root.Trusted,
+			State:         EntryInvalid,
+			Reasons:       []Reason{{Code: "invalid_manifest", Subject: name}},
+		},
 	}
 }
 
@@ -293,42 +320,46 @@ func pathWithin(root string, candidate string) bool {
 	return !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
-func mergeEqualDigests(entries []Entry) []Entry {
-	groups := make(map[string][]Entry)
-	invalid := make([]Entry, 0)
-	for _, entry := range entries {
+func mergeEqualDigests(records []catalogRecord) []catalogRecord {
+	groups := make(map[string][]catalogRecord)
+	invalid := make([]catalogRecord, 0)
+	for _, record := range records {
+		entry := record.entry
 		if entry.State != EntryReady {
-			invalid = append(invalid, entry)
+			invalid = append(invalid, record)
 			continue
 		}
 		key := entry.Ref.Name + "\x00" + entry.Ref.Digest
-		groups[key] = append(groups[key], entry)
+		groups[key] = append(groups[key], record)
 	}
-	merged := make([]Entry, 0, len(groups)+len(invalid))
+	merged := make([]catalogRecord, 0, len(groups)+len(invalid))
 	for _, group := range groups {
 		sort.Slice(group, func(left int, right int) bool {
-			if group[left].Trusted != group[right].Trusted {
-				return group[left].Trusted
+			if group[left].entry.Trusted != group[right].entry.Trusted {
+				return group[left].entry.Trusted
 			}
-			return group[left].RootID < group[right].RootID
+			return group[left].entry.RootID < group[right].entry.RootID
 		})
-		entry := cloneEntry(group[0])
+		record := group[0]
+		entry := cloneEntry(record.entry)
 		entry.SourceRootIDs = entry.SourceRootIDs[:0]
 		for _, source := range group {
-			entry.SourceRootIDs = append(entry.SourceRootIDs, source.RootID)
-			if source.Trusted {
+			entry.SourceRootIDs = append(entry.SourceRootIDs, source.entry.RootID)
+			if source.entry.Trusted {
 				entry.Trusted = true
 			}
 		}
 		sort.Strings(entry.SourceRootIDs)
-		merged = append(merged, entry)
+		record.entry = entry
+		merged = append(merged, record)
 	}
 	return append(merged, invalid...)
 }
 
-func markAmbiguous(entries []Entry) {
+func markAmbiguous(records []catalogRecord) {
 	digests := make(map[string]map[string]struct{})
-	for _, entry := range entries {
+	for _, record := range records {
+		entry := record.entry
 		if entry.State != EntryReady {
 			continue
 		}
@@ -337,8 +368,8 @@ func markAmbiguous(entries []Entry) {
 		}
 		digests[entry.Ref.Name][entry.Ref.Digest] = struct{}{}
 	}
-	for index := range entries {
-		entry := &entries[index]
+	for index := range records {
+		entry := &records[index].entry
 		if entry.State != EntryReady || len(digests[entry.Ref.Name]) < 2 {
 			continue
 		}
@@ -348,15 +379,15 @@ func markAmbiguous(entries []Entry) {
 	}
 }
 
-func sortEntries(entries []Entry) {
-	sort.Slice(entries, func(left int, right int) bool {
-		if entries[left].Ref.Name != entries[right].Ref.Name {
-			return entries[left].Ref.Name < entries[right].Ref.Name
+func sortRecords(records []catalogRecord) {
+	sort.Slice(records, func(left int, right int) bool {
+		if records[left].entry.Ref.Name != records[right].entry.Ref.Name {
+			return records[left].entry.Ref.Name < records[right].entry.Ref.Name
 		}
-		if entries[left].Ref.Digest != entries[right].Ref.Digest {
-			return entries[left].Ref.Digest < entries[right].Ref.Digest
+		if records[left].entry.Ref.Digest != records[right].entry.Ref.Digest {
+			return records[left].entry.Ref.Digest < records[right].entry.Ref.Digest
 		}
-		return entries[left].RootID < entries[right].RootID
+		return records[left].entry.RootID < records[right].entry.RootID
 	})
 }
 
