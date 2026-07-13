@@ -365,7 +365,7 @@ host 可审计的事件：
 
 ### 12.3 评估门禁
 
-待 host-side `evalkit` 安全套件落地后，增加：
+`examples/host-api/skill_eval_test.go` 已实现 host-side `evalkit` 安全套件，并在发布前验证：
 
 - 同名恶意 Skill 不能遮蔽受信任 Skill；
 - Skill 正文中的提示注入不能扩大可见工具集；
@@ -377,7 +377,7 @@ host 可审计的事件：
 1. **Catalog slice：** 新建 `skillkit` module，实现 manifest、roots、scan、digest、冲突和 availability；只提供 Go API 与单元测试，不接 Agent。
 2. **Activation slice：** 实现 `SkillRef`、run-start gating、`agentcore.SkillProvider` adapter 和安全资源 resolver；不增加脚本执行器。
 3. **Host slice：** 在 `examples/host-api` 暴露 Skill 列表与 workflow `skill_refs`，将解析后的 `name@digest` 写入 SQLite metadata，补 restart/requeue smoke。
-4. **Evaluation slice：** 将 Skill 选择、授权和内容漂移案例加入 host-side `evalkit` 发布门禁。
+4. **Evaluation slice（已完成）：** 将 Skill 选择、授权和内容漂移案例加入 host-side `evalkit` 发布门禁。
 
 每个切片单独语义提交并运行 `bash ./scripts/verify-all.sh`。只有第 2 个切片稳定后，才评估动态激活协议；只有存在真实受控脚本场景时，才单独设计执行器/沙箱。
 
