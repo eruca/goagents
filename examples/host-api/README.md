@@ -116,13 +116,18 @@ availability state, and stable availability reason codes/subjects. It never
 returns skill manifests, instruction or resource bodies, package/root paths, or
 other host-local catalog details.
 
-The default CLI does not discover or configure a skill catalog. In that mode,
-`GET /skills` returns an empty `skills` array, and a `POST /workflows` request
-that includes `skill_refs` returns `400 invalid_skill_refs`. An embedding host
-may opt in by constructing a catalog and its host-owned gate facts itself, then
-passing the prebuilt `SkillCatalog` and `SkillGateContext` through `Config`.
-The HTTP server never scans roots or accepts catalog/gate configuration from a
-request.
+The default CLI discovers no Skills unless `HOST_API_SKILL_ROOT` names one
+absolute local directory. Setting the variable explicitly trusts that directory
+as the `user`-scope root for the lifetime of the process:
+
+```bash
+export HOST_API_SKILL_ROOT="$PWD/skills"
+```
+
+The catalog is rebuilt only at process startup. The default CLI gate supplies
+the current OS but no host features or allowed tools, so instruction-only Skills
+can activate while capability-requiring Skills remain unavailable. HTTP callers
+cannot add roots, change trust, or refresh the catalog.
 
 `POST /workflows` accepts an optional `skill_refs` array. Each element supplies
 `name` and may also supply `digest`:

@@ -130,11 +130,12 @@ reads rather than silently loading a newer file.
 
 ## Current scope
 
-SkillKit now includes catalog discovery, availability evaluation, run-start
-activation, bounded resource reads, and `agentcore.SkillProvider` wiring.
-Host API exposure, durable workflow `skill_refs`, request-scoped tool
-projection, remote registries, dependency installation, dynamic activation,
-and script sandboxing remain separate future slices.
+SkillKit includes catalog discovery, availability evaluation, run-start
+activation, bounded resource reads, and `agentcore.SkillProvider` wiring. The
+host-api example adds safe catalog exposure, durable workflow `skill_refs`, a
+single explicit local-root bootstrap, and a host-side evaluation gate. Remote
+registries, dependency installation, request-scoped tool projection, dynamic
+activation, and script sandboxing remain separate future slices.
 
 ## Verify
 

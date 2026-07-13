@@ -15,6 +15,10 @@ Environment:
   `main.go`: `127.0.0.1:8080`.
 - `HOST_RUNTIME_HOME`: durable runtime directory. If unset, host-api creates a
   temporary directory.
+- `HOST_API_SKILL_ROOT`: optional absolute path to one explicitly trusted local
+  Skill root. Empty disables CLI Skill discovery. Invalid paths fail startup;
+  the value is never returned by the API. The default CLI supplies only the
+  current OS to Skill gating and does not grant tools or host features.
 - `LLMKIT_HOME`: llmkit config and audit directory. If unset, it defaults to
   `$HOST_RUNTIME_HOME/.llmkit`.
 - `HOST_API_QUEUED_LEASE_DURATION`: optional Go duration for the in-process

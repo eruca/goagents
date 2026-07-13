@@ -1,7 +1,7 @@
 # Skillkit 设计：可移植 Skill 的宿主受控运行契约
 
 **日期：** 2026-07-12
-**状态：** 已确认，待实现计划
+**状态：** 首版已实现
 **范围：** 为 `goagents` 增加独立的 `skillkit` sibling module；不把动态 Skill 平台塞入 `goagent/agentcore`。
 
 ## 1. 决策摘要
@@ -374,9 +374,9 @@ host 可审计的事件：
 
 ## 13. 实施切片
 
-1. **Catalog slice：** 新建 `skillkit` module，实现 manifest、roots、scan、digest、冲突和 availability；只提供 Go API 与单元测试，不接 Agent。
-2. **Activation slice：** 实现 `SkillRef`、run-start gating、`agentcore.SkillProvider` adapter 和安全资源 resolver；不增加脚本执行器。
-3. **Host slice：** 在 `examples/host-api` 暴露 Skill 列表与 workflow `skill_refs`，将解析后的 `name@digest` 写入 SQLite metadata，补 restart/requeue smoke。
+1. **Catalog slice（已完成）：** 新建 `skillkit` module，实现 manifest、roots、scan、digest、冲突和 availability；只提供 Go API 与单元测试，不接 Agent。
+2. **Activation slice（已完成）：** 实现 `SkillRef`、run-start gating、`agentcore.SkillProvider` adapter 和安全资源 resolver；不增加脚本执行器。
+3. **Host slice（已完成）：** 在 `examples/host-api` 暴露 Skill 列表与 workflow `skill_refs`，将解析后的 `name@digest` 写入 SQLite metadata，补 restart/requeue smoke。
 4. **Evaluation slice（已完成）：** 将 Skill 选择、授权和内容漂移案例加入 host-side `evalkit` 发布门禁。
 
 每个切片单独语义提交并运行 `bash ./scripts/verify-all.sh`。只有第 2 个切片稳定后，才评估动态激活协议；只有存在真实受控脚本场景时，才单独设计执行器/沙箱。
