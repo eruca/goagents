@@ -169,13 +169,22 @@ func requireInteractiveLoginKeychain(t *testing.T) {
 
 func startHostProcess(t *testing.T, binary, runtimeHome, issuer, keychainService, keyID string) *hostProcess {
 	t.Helper()
+	return startHostProcessWithEnv(t, binary, runtimeHome, issuer, keychainService, keyID, nil)
+}
+
+func startHostProcessWithEnv(t *testing.T, binary, runtimeHome, issuer, keychainService, keyID string, extraEnvironment map[string]string) *hostProcess {
+	t.Helper()
 	address := freeLoopbackAddress(t)
 	process := &hostProcess{
 		baseURL: "http://" + address,
 		client:  &http.Client{Timeout: time.Second},
 		cmd:     exec.Command(binary),
 	}
-	process.cmd.Env = overrideEnvironment(map[string]string{
+	environment := make(map[string]string, len(extraEnvironment)+9)
+	for name, value := range extraEnvironment {
+		environment[name] = value
+	}
+	for name, value := range map[string]string{
 		"HOST_API_ADDR":                          address,
 		"HOST_RUNTIME_HOME":                      runtimeHome,
 		"HOST_API_OIDC_ISSUER":                   issuer,
@@ -185,7 +194,10 @@ func startHostProcess(t *testing.T, binary, runtimeHome, issuer, keychainService
 		agentApprovalKeychainServiceEnv:          keychainService,
 		agentApprovalKeyIDEnv:                    keyID,
 		"LLMKIT_HOME":                            filepath.Join(runtimeHome, ".llmkit"),
-	})
+	} {
+		environment[name] = value
+	}
+	process.cmd.Env = overrideEnvironment(environment)
 	process.cmd.Stdout = &process.output
 	process.cmd.Stderr = &process.output
 	if err := process.cmd.Start(); err != nil {
