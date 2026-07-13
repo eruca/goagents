@@ -27,6 +27,7 @@ import (
 
 func TestHostAPIProcessToolApprovalSurvivesRestart(t *testing.T) {
 	requireInteractiveLoginKeychain(t)
+	t.Setenv(hostAPISkillRootEnv, "relative/ambient-skills")
 	provider := newOIDCTestProvider(t)
 	binary := buildHostBinary(t)
 	runtimeHome := t.TempDir()
@@ -169,7 +170,7 @@ func requireInteractiveLoginKeychain(t *testing.T) {
 
 func startHostProcess(t *testing.T, binary, runtimeHome, issuer, keychainService, keyID string) *hostProcess {
 	t.Helper()
-	return startHostProcessWithEnv(t, binary, runtimeHome, issuer, keychainService, keyID, nil)
+	return startHostProcessWithEnv(t, binary, runtimeHome, issuer, keychainService, keyID, map[string]string{hostAPISkillRootEnv: ""})
 }
 
 func startHostProcessWithEnv(t *testing.T, binary, runtimeHome, issuer, keychainService, keyID string, extraEnvironment map[string]string) *hostProcess {
