@@ -32,6 +32,31 @@ const (
 	agentApprovalLifetime        = time.Hour
 )
 
+const (
+	agentApprovalKeychainServiceEnv = "HOST_API_AGENT_APPROVAL_KEYCHAIN_SERVICE"
+	agentApprovalKeyIDEnv           = "HOST_API_AGENT_APPROVAL_KEY_ID"
+)
+
+type agentApprovalKeychainConfig struct {
+	service string
+	keyID   string
+}
+
+func resolveAgentApprovalKeychainConfig(service, keyID string) (agentApprovalKeychainConfig, error) {
+	if service == "" && keyID == "" {
+		return agentApprovalKeychainConfig{
+			service: localApprovalKeychainService,
+			keyID:   localApprovalKeyID,
+		}, nil
+	}
+	service = strings.TrimSpace(service)
+	keyID = strings.TrimSpace(keyID)
+	if service == "" || keyID == "" {
+		return agentApprovalKeychainConfig{}, fmt.Errorf("agent approval Keychain service and key ID must be configured together")
+	}
+	return agentApprovalKeychainConfig{service: service, keyID: keyID}, nil
+}
+
 // agentApprovalResponse is the operator-safe projection of a paused agent. It
 // intentionally excludes raw tool inputs, prompts, messages, and checkpoint data.
 type agentApprovalResponse struct {
@@ -77,17 +102,28 @@ func (r agentApprovalRequest) coreResolutions() []agentcore.ToolApprovalResoluti
 type hostAgentApprovalService struct {
 	checkpoints runkit.CheckpointStore
 	runner      routingAgentRunner
+	keychain    agentApprovalKeychainConfig
 
 	mu     sync.Mutex
 	cipher goagentapproval.Cipher
 }
 
-func newHostAgentApprovalService(runs runkit.Store, cipher goagentapproval.Cipher, runner routingAgentRunner) (*hostAgentApprovalService, error) {
+func newHostAgentApprovalService(
+	runs runkit.Store,
+	cipher goagentapproval.Cipher,
+	runner routingAgentRunner,
+	keychain agentApprovalKeychainConfig,
+) (*hostAgentApprovalService, error) {
 	checkpoints, ok := runs.(runkit.CheckpointStore)
 	if !ok {
 		return nil, fmt.Errorf("host run store does not implement approval checkpoint persistence")
 	}
-	return &hostAgentApprovalService{checkpoints: checkpoints, cipher: cipher, runner: runner}, nil
+	return &hostAgentApprovalService{
+		checkpoints: checkpoints,
+		cipher:      cipher,
+		runner:      runner,
+		keychain:    keychain,
+	}, nil
 }
 
 // SavePending encrypts a pause before its safe operator-facing metadata is
@@ -180,7 +216,7 @@ func (s *hostAgentApprovalService) activeCipher() (goagentapproval.Cipher, error
 	if s.cipher != nil {
 		return s.cipher, nil
 	}
-	keys, err := approvalcrypto.OpenMacOSKeychainKeyProvider(localApprovalKeychainService, localApprovalKeyID)
+	keys, err := approvalcrypto.OpenMacOSKeychainKeyProvider(s.keychain.service, s.keychain.keyID)
 	if err != nil {
 		return nil, err
 	}

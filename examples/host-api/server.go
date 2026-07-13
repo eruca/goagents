@@ -40,6 +40,10 @@ type Config struct {
 	// AgentApprovalCipher is test-only injection for the host's tool-approval
 	// checkpoint encryption boundary. Real local runs lazily use macOS Keychain.
 	AgentApprovalCipher goagentapproval.Cipher
+	// AgentApprovalKeychainService and AgentApprovalKeyID select the host-owned
+	// Keychain item. They identify key material but never contain it.
+	AgentApprovalKeychainService string
+	AgentApprovalKeyID           string
 	// SkillCatalog is a prebuilt, host-owned snapshot. The HTTP server never
 	// discovers roots itself.
 	SkillCatalog *skillkit.Catalog
@@ -424,6 +428,13 @@ type errorResponse struct {
 }
 
 func NewServer(config Config) (*Server, error) {
+	approvalKeychain, err := resolveAgentApprovalKeychainConfig(
+		config.AgentApprovalKeychainService,
+		config.AgentApprovalKeyID,
+	)
+	if err != nil {
+		return nil, err
+	}
 	resolved, err := resolveRuntimeConfig(config)
 	if err != nil {
 		return nil, err
@@ -467,7 +478,7 @@ func NewServer(config Config) (*Server, error) {
 		skillCatalog:     config.SkillCatalog,
 		skillGateContext: config.SkillGateContext,
 	}
-	agentApprovals, err := newHostAgentApprovalService(runs, config.AgentApprovalCipher, runner)
+	agentApprovals, err := newHostAgentApprovalService(runs, config.AgentApprovalCipher, runner, approvalKeychain)
 	if err != nil {
 		_ = workflows.Close()
 		_ = runs.Close()

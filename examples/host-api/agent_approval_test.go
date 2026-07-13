@@ -16,6 +16,52 @@ import (
 	"github.com/eruca/workflowkit"
 )
 
+func TestResolveAgentApprovalKeychainConfig(t *testing.T) {
+	tests := []struct {
+		name        string
+		service     string
+		keyID       string
+		wantService string
+		wantKeyID   string
+		wantErr     bool
+	}{
+		{name: "defaults", wantService: localApprovalKeychainService, wantKeyID: localApprovalKeyID},
+		{name: "custom", service: "goagents.host-api.approvals.smoke.test", keyID: "smoke-v1", wantService: "goagents.host-api.approvals.smoke.test", wantKeyID: "smoke-v1"},
+		{name: "missing service", keyID: "smoke-v1", wantErr: true},
+		{name: "missing key id", service: "goagents.host-api.approvals.smoke.test", wantErr: true},
+		{name: "whitespace service", service: " ", keyID: "smoke-v1", wantErr: true},
+		{name: "both whitespace", service: " ", keyID: "\t", wantErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config, err := resolveAgentApprovalKeychainConfig(test.service, test.keyID)
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("resolve config = %#v, want error", config)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolve config: %v", err)
+			}
+			if config.service != test.wantService || config.keyID != test.wantKeyID {
+				t.Fatalf("config = %#v, want service=%q key_id=%q", config, test.wantService, test.wantKeyID)
+			}
+		})
+	}
+}
+
+func TestNewServerRejectsPartialAgentApprovalKeychainConfig(t *testing.T) {
+	_, err := NewServer(Config{
+		RuntimeHome:                  t.TempDir(),
+		AgentApprovalKeychainService: "goagents.host-api.approvals.smoke.test",
+	})
+	if err == nil {
+		t.Fatal("NewServer returned nil error for partial Keychain config")
+	}
+}
+
 func TestHostAPIAgentToolApprovalWaitsBeforeWrite(t *testing.T) {
 	cipher := &testApprovalCipher{}
 	server, err := NewServer(Config{

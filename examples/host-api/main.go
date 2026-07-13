@@ -16,9 +16,11 @@ func main() {
 		panic(err)
 	}
 	config := Config{
-		RuntimeHome:           os.Getenv("HOST_RUNTIME_HOME"),
-		LLMKitHome:            os.Getenv("LLMKIT_HOME"),
-		ApprovalAuthenticator: approvalAuthenticator,
+		RuntimeHome:                  os.Getenv("HOST_RUNTIME_HOME"),
+		LLMKitHome:                   os.Getenv("LLMKIT_HOME"),
+		ApprovalAuthenticator:        approvalAuthenticator,
+		AgentApprovalKeychainService: os.Getenv(agentApprovalKeychainServiceEnv),
+		AgentApprovalKeyID:           os.Getenv(agentApprovalKeyIDEnv),
 	}
 	server, err := NewServer(config)
 	if err != nil {
