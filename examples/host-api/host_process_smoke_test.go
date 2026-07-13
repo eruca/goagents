@@ -31,8 +31,15 @@ func TestHostAPIProcessToolApprovalSurvivesRestart(t *testing.T) {
 	binary := buildHostBinary(t)
 	runtimeHome := t.TempDir()
 	token := provider.mintToken(t, "operator-process", "host-api", time.Now().Add(time.Hour))
+	smokeKeychainService := fmt.Sprintf(
+		"%s.smoke.%d",
+		localApprovalKeychainService,
+		time.Now().UnixNano(),
+	)
+	cleanupKeychain := smokeKeychainCleanup(t, smokeKeychainService, localApprovalKeyID)
+	t.Cleanup(cleanupKeychain)
 
-	first := startHostProcess(t, binary, runtimeHome, provider.issuer)
+	first := startHostProcess(t, binary, runtimeHome, provider.issuer, smokeKeychainService, localApprovalKeyID)
 	created, status := processJSON[workflowResponse](t, first, http.MethodPost, "/workflows", map[string]any{
 		"id":    "wf-process-tool-approval",
 		"input": "process-only approval checkpoint plaintext",
@@ -59,7 +66,7 @@ func TestHostAPIProcessToolApprovalSurvivesRestart(t *testing.T) {
 	stopHostProcess(t, first)
 	assertPersistedPendingProcessCheckpoint(t, runtimeHome, created)
 
-	second := startHostProcess(t, binary, runtimeHome, provider.issuer)
+	second := startHostProcess(t, binary, runtimeHome, provider.issuer, smokeKeychainService, localApprovalKeyID)
 	resumed, resumedStatus := processJSON[workflowResponse](t, second, http.MethodPost, "/workflows/"+created.ID+"/agent-approve", map[string]any{
 		"resolutions": []map[string]any{{
 			"index":        pending.Index,
@@ -79,6 +86,7 @@ func TestHostAPIProcessToolApprovalSurvivesRestart(t *testing.T) {
 	}
 	stopHostProcess(t, second)
 	assertCompletedProcessWorkflow(t, runtimeHome, created)
+	cleanupKeychain()
 }
 
 type hostProcess struct {
@@ -159,7 +167,7 @@ func requireInteractiveLoginKeychain(t *testing.T) {
 	}
 }
 
-func startHostProcess(t *testing.T, binary, runtimeHome, issuer string) *hostProcess {
+func startHostProcess(t *testing.T, binary, runtimeHome, issuer, keychainService, keyID string) *hostProcess {
 	t.Helper()
 	address := freeLoopbackAddress(t)
 	process := &hostProcess{
@@ -174,6 +182,8 @@ func startHostProcess(t *testing.T, binary, runtimeHome, issuer string) *hostPro
 		"HOST_API_OIDC_AUDIENCE":                 "host-api",
 		"HOST_API_AGENT_APPROVAL_SWEEP_INTERVAL": time.Hour.String(),
 		"HOST_API_QUEUED_LEASE_DURATION":         time.Minute.String(),
+		agentApprovalKeychainServiceEnv:          keychainService,
+		agentApprovalKeyIDEnv:                    keyID,
 		"LLMKIT_HOME":                            filepath.Join(runtimeHome, ".llmkit"),
 	})
 	process.cmd.Stdout = &process.output
@@ -187,6 +197,28 @@ func startHostProcess(t *testing.T, binary, runtimeHome, issuer string) *hostPro
 		t.Fatalf("host process did not become ready: %v\n%s", err, process.output.String())
 	}
 	return process
+}
+
+func smokeKeychainCleanup(t *testing.T, service, keyID string) func() {
+	t.Helper()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			if !strings.HasPrefix(service, localApprovalKeychainService+".smoke.") {
+				t.Errorf("refusing to delete non-smoke Keychain service %q", service)
+				return
+			}
+			command := exec.Command(
+				"security", "delete-generic-password",
+				"-s", service,
+				"-a", "approval-data-key:"+keyID,
+			)
+			output, err := command.CombinedOutput()
+			if err != nil && !bytes.Contains(output, []byte("could not be found")) {
+				t.Errorf("delete smoke Keychain item: %v: %s", err, strings.TrimSpace(string(output)))
+			}
+		})
+	}
 }
 
 func stopHostProcess(t *testing.T, process *hostProcess) {
