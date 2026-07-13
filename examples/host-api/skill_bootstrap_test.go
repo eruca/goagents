@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -86,5 +87,53 @@ func TestLoadHostSkillConfigRejectsUnsafeRootWithoutPathLeak(t *testing.T) {
 				t.Fatalf("error leaks configured root: %v", err)
 			}
 		})
+	}
+}
+
+func TestBundledWorkflowReviewSkillRunsThroughHostAPI(t *testing.T) {
+	root, err := filepath.Abs("skills")
+	if err != nil {
+		t.Fatalf("resolve bundled Skill root: %v", err)
+	}
+	catalog, gate, err := loadHostSkillConfig(func(key string) string {
+		if key == hostAPISkillRootEnv {
+			return root
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("load bundled Skill config: %v", err)
+	}
+	server, err := NewServer(Config{
+		RuntimeHome:      t.TempDir(),
+		SkillCatalog:     catalog,
+		SkillGateContext: gate,
+	})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		closeStoreIfPossible(t, server.workflows)
+		closeStoreIfPossible(t, server.runs)
+	})
+
+	listed := doJSON[skillListPayload](t, server.Handler(), http.MethodGet, "/skills", nil)
+	if len(listed.Skills) != 1 {
+		t.Fatalf("GET /skills = %#v, want one bundled Skill", listed.Skills)
+	}
+	skill := listed.Skills[0]
+	if skill.Name != "workflow-review" || skill.Scope != string(skillkit.ScopeUser) || skill.Availability != string(skillkit.AvailabilityEligible) || len(skill.Digest) != 64 {
+		t.Fatalf("bundled Skill = %#v, want eligible workflow-review with digest", skill)
+	}
+
+	created := doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]any{
+		"id":    "wf-bundled-skill",
+		"input": "Review this local workflow.",
+		"skill_refs": []map[string]string{{
+			"name": "workflow-review",
+		}},
+	})
+	if len(created.SkillRefs) != 1 || created.SkillRefs[0].Name != skill.Name || created.SkillRefs[0].Digest != skill.Digest {
+		t.Fatalf("workflow Skill refs = %#v, want bundled name@digest", created.SkillRefs)
 	}
 }
