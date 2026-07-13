@@ -242,9 +242,12 @@ defaults to Keychain service `goagents.host-api.approvals` and key ID
 `local-v1`. Hosts may set `HOST_API_AGENT_APPROVAL_KEYCHAIN_SERVICE` and
 `HOST_API_AGENT_APPROVAL_KEY_ID` together to select another host-owned item;
 these environment variables are lookup identifiers, never key material.
-Providing only one fails startup. There is still no file, environment-variable,
-or SQLite key fallback. Tests inject a cipher and never access the machine
-Keychain.
+When both raw environment values are exactly empty (`""`), whether unset or
+explicitly set empty, the production defaults apply. In every other case, both
+trimmed values must be non-empty: partial configuration or any whitespace-only
+value, including two whitespace-only values, fails startup. There is still no
+file, environment-variable, or SQLite key fallback. Default unit and
+integration tests inject a cipher and do not access the machine Keychain.
 
 On an interactive macOS login session, run the optional real-process smoke to
 exercise the actual binary, local OIDC discovery/JWKS verification, SQLite
@@ -255,14 +258,16 @@ go test -tags hostapisystemsmoke -run TestHostAPIProcessToolApprovalSurvivesRest
 ```
 
 It starts a loopback-only OIDC issuer and uses a temporary runtime directory.
-Each run uses a unique Keychain service containing `.smoke.`; both host
-subprocesses reuse that same test item across the restart. At the end, the test
-deletes only the exact service/account pair it created. It never accesses or
-deletes the production-default `goagents.host-api.approvals/local-v1` item, and
-it never prints or exports key material. It skips when the current process
-cannot access an unlocked login Keychain, and therefore a skip is not evidence
-of a passed smoke. Default `go test ./...` and
-`bash ../../scripts/verify-all.sh` do not run it.
+This `hostapisystemsmoke` test is the exception to the default tests above: it
+uses a test-only Keychain item whose unique service has the fixed prefix
+`goagents.host-api.approvals.smoke.`. Both host subprocesses reuse that same
+test item across the restart. Before deletion, cleanup verifies the fixed
+prefix and then deletes only the exact service/account pair created by this
+test. It never accesses or deletes the production-default
+`goagents.host-api.approvals/local-v1` item, and it never prints or exports key
+material. It skips when the current process cannot access an unlocked login
+Keychain, and therefore a skip is not evidence of a passed smoke. Default
+`go test ./...` and `bash ../../scripts/verify-all.sh` do not run it.
 
 An agent tool approval expires one hour after the pause. The host process starts
 an in-process janitor that defaults to a one-minute sweep interval; set
