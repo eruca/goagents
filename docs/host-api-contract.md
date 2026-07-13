@@ -271,7 +271,13 @@ The paused workflow response exposes only safe metadata:
 Checkpoint plaintext, tool JSON input, prompt content, and bearer tokens are
 never returned. The checkpoint is encrypted in `agent-runs.db`; on a real local
 macOS run the data key is lazily created and kept only in Keychain. Tests inject
-a cipher and do not access a machine Keychain.
+a cipher and do not access a machine Keychain. Production defaults to Keychain
+service `goagents.host-api.approvals` and key ID `local-v1`. Hosts may set
+`HOST_API_AGENT_APPROVAL_KEYCHAIN_SERVICE` and
+`HOST_API_AGENT_APPROVAL_KEY_ID` together to select another host-owned item;
+these environment variables are lookup identifiers, never key material.
+Providing only one fails startup. There is still no file, environment-variable,
+or SQLite key fallback.
 
 Authentication is `Authorization: Bearer <OIDC JWT>` and uses the same verified
 `sub` identity rule as final workflow approval. The request accepts only exact
