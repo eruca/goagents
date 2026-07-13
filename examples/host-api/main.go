@@ -40,6 +40,10 @@ func loadHostConfig(
 	if _, err := resolveAgentApprovalKeychainConfig(keychainService, keyID); err != nil {
 		return Config{}, err
 	}
+	catalog, skillGate, err := loadHostSkillConfig(getenv)
+	if err != nil {
+		return Config{}, err
+	}
 
 	startupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -53,5 +57,7 @@ func loadHostConfig(
 		ApprovalAuthenticator:        approvalAuthenticator,
 		AgentApprovalKeychainService: keychainService,
 		AgentApprovalKeyID:           keyID,
+		SkillCatalog:                 catalog,
+		SkillGateContext:             skillGate,
 	}, nil
 }
