@@ -9,18 +9,9 @@ import (
 )
 
 func main() {
-	startupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	approvalAuthenticator, err := loadOIDCApprovalAuthenticator(startupCtx, os.Getenv)
+	config, err := loadHostConfig(os.Getenv, loadOIDCApprovalAuthenticator)
 	if err != nil {
 		panic(err)
-	}
-	config := Config{
-		RuntimeHome:                  os.Getenv("HOST_RUNTIME_HOME"),
-		LLMKitHome:                   os.Getenv("LLMKIT_HOME"),
-		ApprovalAuthenticator:        approvalAuthenticator,
-		AgentApprovalKeychainService: os.Getenv(agentApprovalKeychainServiceEnv),
-		AgentApprovalKeyID:           os.Getenv(agentApprovalKeyIDEnv),
 	}
 	server, err := NewServer(config)
 	if err != nil {
@@ -36,4 +27,31 @@ func main() {
 	if err := http.ListenAndServe(addr, server.Handler()); err != nil {
 		panic(err)
 	}
+}
+
+func loadHostConfig(
+	getenv func(string) string,
+	loadApprovalAuthenticator func(context.Context, func(string) string) (*OIDCApprovalAuthenticator, error),
+) (Config, error) {
+	keychainService := getenv(agentApprovalKeychainServiceEnv)
+	keyID := getenv(agentApprovalKeyIDEnv)
+	// Reject invalid identity before OIDC discovery; NewServer repeats this
+	// validation so direct callers retain the same safety boundary.
+	if _, err := resolveAgentApprovalKeychainConfig(keychainService, keyID); err != nil {
+		return Config{}, err
+	}
+
+	startupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	approvalAuthenticator, err := loadApprovalAuthenticator(startupCtx, getenv)
+	if err != nil {
+		return Config{}, err
+	}
+	return Config{
+		RuntimeHome:                  getenv("HOST_RUNTIME_HOME"),
+		LLMKitHome:                   getenv("LLMKIT_HOME"),
+		ApprovalAuthenticator:        approvalAuthenticator,
+		AgentApprovalKeychainService: keychainService,
+		AgentApprovalKeyID:           keyID,
+	}, nil
 }
