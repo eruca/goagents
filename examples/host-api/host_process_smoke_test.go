@@ -199,7 +199,30 @@ func startHostProcess(t *testing.T, binary, runtimeHome, issuer, keychainService
 	return process
 }
 
+type smokeKeychainCleanupReporter interface {
+	Helper()
+	Errorf(string, ...any)
+}
+
+type smokeKeychainDelete func(service, account string) ([]byte, error)
+
 func smokeKeychainCleanup(t *testing.T, service, keyID string) func() {
+	return smokeKeychainCleanupWithDelete(t, service, keyID, func(service, account string) ([]byte, error) {
+		command := exec.Command(
+			"security", "delete-generic-password",
+			"-s", service,
+			"-a", account,
+		)
+		return command.CombinedOutput()
+	})
+}
+
+func smokeKeychainCleanupWithDelete(
+	t smokeKeychainCleanupReporter,
+	service string,
+	keyID string,
+	deleteItem smokeKeychainDelete,
+) func() {
 	t.Helper()
 	var once sync.Once
 	return func() {
@@ -208,12 +231,7 @@ func smokeKeychainCleanup(t *testing.T, service, keyID string) func() {
 				t.Errorf("refusing to delete non-smoke Keychain service %q", service)
 				return
 			}
-			command := exec.Command(
-				"security", "delete-generic-password",
-				"-s", service,
-				"-a", "approval-data-key:"+keyID,
-			)
-			output, err := command.CombinedOutput()
+			output, err := deleteItem(service, "approval-data-key:"+keyID)
 			if err != nil && !bytes.Contains(output, []byte("could not be found")) {
 				t.Errorf("delete smoke Keychain item: %v: %s", err, strings.TrimSpace(string(output)))
 			}
