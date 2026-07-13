@@ -5,6 +5,7 @@ go 1.26.1
 require (
 	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/eruca/artifactkit v0.0.0
+	github.com/eruca/evalkit v0.0.0
 	github.com/eruca/goagent v0.0.0
 	github.com/eruca/llmkit v0.0.0
 	github.com/eruca/runkit v0.0.0
@@ -33,6 +34,8 @@ require (
 )
 
 replace github.com/eruca/artifactkit => ../../artifactkit
+
+replace github.com/eruca/evalkit => ../../evalkit
 
 replace github.com/eruca/goagent => ../../goagent
 
