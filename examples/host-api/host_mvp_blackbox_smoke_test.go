@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eruca/llmkit/llmkit"
 	"github.com/eruca/runkit"
 	"github.com/eruca/workflowkit"
 )
@@ -18,6 +19,9 @@ func TestHostAPIProcessMVPBlackBoxClosure(t *testing.T) {
 	binary := buildHostBinary(t)
 	t.Run("approval skill and restart", func(t *testing.T) {
 		runMVPApprovalSkillRestart(t, binary)
+	})
+	t.Run("provider failure requeue and success", func(t *testing.T) {
+		runMVPProviderRequeue(t, binary)
 	})
 }
 
@@ -137,6 +141,76 @@ func runMVPApprovalSkillRestart(t *testing.T, binary string) {
 	cleanupKeychain()
 }
 
+func runMVPProviderRequeue(t *testing.T, binary string) {
+	t.Helper()
+	requireInteractiveLoginKeychain(t)
+	provider := newMVPProviderStub(t, mvpProviderUnavailable)
+	oidc := newOIDCTestProvider(t)
+	runtimeHome := t.TempDir()
+	writeMVPLLMKitConfig(t, runtimeHome, provider.URL())
+	token := oidc.mintToken(t, "operator-mvp-requeue", "host-api", time.Now().Add(time.Hour))
+	keychainService := fmt.Sprintf("%s.smoke.mvp.requeue.%d", localApprovalKeychainService, time.Now().UnixNano())
+	cleanupKeychain := smokeKeychainCleanup(t, keychainService, localApprovalKeyID)
+	t.Cleanup(cleanupKeychain)
+	process := startHostProcessWithEnv(t, binary, runtimeHome, oidc.issuer, keychainService, localApprovalKeyID, map[string]string{
+		hostAPISkillRootEnv:  "",
+		mvpProviderAPIKeyEnv: mvpProviderAPIKey,
+	})
+
+	created, status := processJSON[workflowResponse](t, process, http.MethodPost, "/workflows", map[string]any{
+		"id":       "wf-mvp-provider-requeue",
+		"input":    "Recover this workflow after a temporary provider outage.",
+		"run_mode": string(RunModeQueued),
+		"task_profile": map[string]any{
+			"complexity": "simple",
+			"privacy":    "cloud_allowed",
+		},
+	}, "")
+	if status != http.StatusAccepted || created.Status != string(workflowkit.StatusPending) || created.RunMode != string(RunModeQueued) {
+		t.Fatalf("create queued workflow status=%d workflow=%#v", status, created)
+	}
+	failed := waitForProcessWorkflowStatus(t, process, created.ID, workflowkit.StatusFailed)
+	if failed.InputRef == "" || failed.OutputRef != failed.InputRef || failed.AgentRunID != "" || failed.ApprovalRef != "" {
+		t.Fatalf("failed workflow=%#v, want retained ingest ref and no agent result refs", failed)
+	}
+	failedRoutes, status := processJSON[llmRoutesResponse](t, process, http.MethodGet, "/workflows/"+created.ID+"/llm-routes", nil, "")
+	if status != http.StatusOK || !mvpRoutesContainFailure(failedRoutes.Routes, "provider_error", llmkit.ErrorClassTransient) {
+		t.Fatalf("failed routes status=%d routes=%#v", status, failedRoutes.Routes)
+	}
+
+	provider.SetMode(mvpProviderReady)
+	requeued, status := processJSON[workflowResponse](t, process, http.MethodPost, "/workflows/"+created.ID+"/requeue", nil, "")
+	if status != http.StatusAccepted || requeued.Status != string(workflowkit.StatusPending) || requeued.RunMode != string(RunModeQueued) {
+		t.Fatalf("requeue workflow status=%d workflow=%#v", status, requeued)
+	}
+	waiting := waitForProcessWorkflowStatus(t, process, created.ID, workflowkit.StatusWaitingApproval)
+	if waiting.InputRef != failed.InputRef || waiting.OutputRef == "" || waiting.AgentRunID == "" || waiting.ApprovalRef == "" {
+		t.Fatalf("retried workflow=%#v, want original input and new agent output refs", waiting)
+	}
+	completed, status := processJSON[workflowResponse](t, process, http.MethodPost, "/workflows/"+created.ID+"/approve", map[string]any{"note": "mvp provider retry accepted"}, "Bearer "+token)
+	if status != http.StatusOK || completed.Status != string(workflowkit.StatusSucceeded) || completed.OutputRef == "" || completed.OutputRef == waiting.OutputRef || completed.AgentRunID != waiting.AgentRunID {
+		t.Fatalf("complete requeued workflow status=%d workflow=%#v", status, completed)
+	}
+
+	routes, status := processJSON[llmRoutesResponse](t, process, http.MethodGet, "/workflows/"+created.ID+"/llm-routes", nil, "")
+	if status != http.StatusOK || !mvpRoutesContainFailure(routes.Routes, "provider_error", llmkit.ErrorClassTransient) || !mvpRoutesContainSuccess(routes.Routes) {
+		t.Fatalf("final routes status=%d routes=%#v", status, routes.Routes)
+	}
+	events, status := processJSON[workflowEventsResponse](t, process, http.MethodGet, "/workflows/"+created.ID+"/events", nil, "")
+	if status != http.StatusOK || events.Status != string(workflowkit.StatusSucceeded) || !mvpEventsContainFailedStep(events.Events) || !mvpEventsContainRequeue(events.Events) {
+		t.Fatalf("final events status=%d response=%#v", status, events)
+	}
+	run, status := processJSON[agentRunResponse](t, process, http.MethodGet, "/agent-runs/"+completed.AgentRunID, nil, "")
+	if status != http.StatusOK || run.Status != string(runkit.StatusSucceeded) || run.Summary.ToolCalls != 0 {
+		t.Fatalf("requeued agent run status=%d run=%#v", status, run)
+	}
+	if strings.Contains(process.output.String(), mvpProviderAPIKey) {
+		t.Fatal("host process output leaked the synthetic provider key")
+	}
+	stopHostProcess(t, process)
+	cleanupKeychain()
+}
+
 func assertMVPCompletedWorkflow(t *testing.T, process *hostProcess, expected workflowResponse, wantToolCalls int) {
 	t.Helper()
 	workflow, status := processJSON[workflowResponse](t, process, http.MethodGet, "/workflows/"+expected.ID, nil, "")
@@ -160,6 +234,33 @@ func assertMVPCompletedWorkflow(t *testing.T, process *hostProcess, expected wor
 func mvpRoutesContainSuccess(routes []llmRouteResponse) bool {
 	for _, route := range routes {
 		if route.Outcome != nil && route.Outcome.Success {
+			return true
+		}
+	}
+	return false
+}
+
+func mvpRoutesContainFailure(routes []llmRouteResponse, errorCode string, errorClass llmkit.ErrorClass) bool {
+	for _, route := range routes {
+		if route.Outcome != nil && !route.Outcome.Success && route.Outcome.ErrorCode == errorCode && route.Outcome.ErrorClass == string(errorClass) {
+			return true
+		}
+	}
+	return false
+}
+
+func mvpEventsContainFailedStep(events []workflowEventResponse) bool {
+	for _, event := range events {
+		if event.Type == "step" && event.Status == string(workflowkit.StatusFailed) && event.Error != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func mvpEventsContainRequeue(events []workflowEventResponse) bool {
+	for _, event := range events {
+		if event.Type == "workflow_requeued" && event.FromStatus == string(workflowkit.StatusFailed) && event.ToStatus == string(workflowkit.StatusPending) && !event.At.IsZero() {
 			return true
 		}
 	}
