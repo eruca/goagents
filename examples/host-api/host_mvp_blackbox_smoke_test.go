@@ -173,8 +173,12 @@ func runMVPProviderRequeue(t *testing.T, binary string) {
 		t.Fatalf("create queued workflow status=%d workflow=%#v", status, created)
 	}
 	failed := waitForProcessWorkflowStatus(t, process, created.ID, workflowkit.StatusFailed)
-	if failed.InputRef == "" || failed.OutputRef != failed.InputRef || failed.AgentRunID != "" || failed.ApprovalRef != "" {
-		t.Fatalf("failed workflow=%#v, want retained ingest ref and no agent result refs", failed)
+	if failed.InputRef == "" || failed.OutputRef != failed.InputRef || failed.AgentRunID == "" || failed.ApprovalRef != "" {
+		t.Fatalf("failed workflow=%#v, want retained ingest ref and observable failed agent run", failed)
+	}
+	failedRun, status := processJSON[agentRunResponse](t, process, http.MethodGet, "/agent-runs/"+failed.AgentRunID, nil, "")
+	if status != http.StatusOK || failedRun.Status != string(runkit.StatusFailed) || failedRun.Summary.AbortReason == "" || failedRun.Summary.ToolCalls != 0 {
+		t.Fatalf("failed provider agent run status=%d run=%#v", status, failedRun)
 	}
 	failedRoutes, status := processJSON[llmRoutesResponse](t, process, http.MethodGet, "/workflows/"+created.ID+"/llm-routes", nil, "")
 	if status != http.StatusOK || !mvpRoutesContainFailure(failedRoutes.Routes, "provider_error", llmkit.ErrorClassTransient) {
