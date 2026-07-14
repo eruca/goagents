@@ -17,7 +17,13 @@ runner := evalkit.Runner{
         if err != nil {
             return nil, err
         }
-        return &evalkit.RunResult{Output: result.Content}, nil
+        return &evalkit.RunResult{
+            Output: result.Content,
+            Outcome: evalkit.Outcome{
+                Status:    "succeeded",
+                OutputRef: "artifact:run-output",
+            },
+        }, nil
     }),
     TrialsPerTask: 3,
 }
@@ -61,6 +67,20 @@ It does not own:
 - online production monitoring
 - hosted dashboards
 - model-as-judge implementations
+
+## Outcome and sanitized traces
+
+`RunResult.Outcome` separates the evaluated system's domain result from a
+Harness execution error. Use `Status`, `OutputRef`, and a stable `ErrorCode` for
+graders; keep raw provider errors in neither Outcome nor Trace. Outcome metadata
+is defensively copied into each Trial.
+
+Host adapters decide how persisted runtime data becomes `TraceStep` values.
+They should use fixed metadata and label allowlists, store only host-owned
+artifact references, and exclude prompts, tool inputs/outputs, credentials,
+absolute trust paths, and arbitrary event messages. The host-api example maps
+its existing SQLite workflow and run stores this way without adding a production
+HTTP endpoint.
 
 Use `runkit` or `artifactkit` when a host wants durable trace or artifact
 storage. Use a host adapter to map `goagent.RunDetailed`, workflow runs, or

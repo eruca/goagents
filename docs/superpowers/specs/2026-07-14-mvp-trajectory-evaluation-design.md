@@ -2,7 +2,13 @@
 
 **日期：** 2026-07-14
 
-**状态：** 待评审
+**状态：** 已实现
+
+**实现路径：**
+
+- `evalkit/evalkit.go`：`Outcome`、Runner 传递与防御性复制；
+- `examples/host-api/eval_trace.go`：SQLite workflow/run/event 只读适配器；
+- `examples/host-api/eval_trace_test.go`：held-out 场景与 outcome、policy、efficiency grader。
 
 ## 1. 决策摘要
 
