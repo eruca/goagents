@@ -2,7 +2,7 @@
 
 **日期：** 2026-07-14
 
-**状态：** 已确认
+**状态：** 已实现并验收
 
 ## 1. 目标
 
@@ -120,3 +120,17 @@ git diff --check
 - 根 README 中的相对链接指向现有文件；
 - README 不包含真实 key、机器专属路径或可绕过 OIDC 的说明；
 - 文档明确区分“自动化本机验收”和“连接真实 OIDC 后长期运行”。
+
+## 8. 验收记录
+
+2026-07-14 在全新 worktree 中只按 README 发布的命令完成复现：
+
+- `bash ./scripts/verify-all.sh`：PASS；
+- Host API 默认测试：PASS；
+- `approval_skill_and_restart`：PASS；
+- `provider_failure_requeue_and_success`：PASS；
+- `unregistered_tool_fails_closed`：PASS；
+- tagged smoke：没有 SKIP；
+- 根 README 相对链接、安全文本扫描和 `git diff --check`：PASS。
+
+长期服务仍明确要求真实 OIDC discovery/JWKS；本阶段没有增加认证绕过或真实 Provider 凭证。
