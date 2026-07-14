@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1002,6 +1003,33 @@ func TestHostAPIAgentStepFailsWhenTerminalSummaryCannotBeWritten(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "run store unavailable") {
 		t.Fatalf("agent step error = %v, want run store failure", err)
+	}
+}
+
+func TestCompleteFailedAgentRunPersistsTerminalSummary(t *testing.T) {
+	store := runkit.NewMemoryStore()
+	runID := agentcore.NewRunID()
+	if err := store.Create(context.Background(), runkit.RunRecord{RunID: runID.String(), Status: runkit.StatusRunning}); err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	result := &agentcore.RunResult{
+		RunID: runID,
+		Usage: agentcore.Usage{InputTokens: 3, OutputTokens: 5},
+		ExecutionSummary: agentcore.ExecutionSummary{
+			LLMCalls:    1,
+			ToolCalls:   0,
+			AbortReason: "tool not registered",
+		},
+	}
+	if err := completeFailedAgentRun(context.Background(), store, result, errors.New("policy failed")); err != nil {
+		t.Fatalf("completeFailedAgentRun returned error: %v", err)
+	}
+	stored, err := store.Get(context.Background(), runID.String())
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if stored.Status != runkit.StatusFailed || stored.Summary.Status != runkit.StatusFailed || stored.Summary.AbortReason != "tool not registered" || stored.Summary.LLMCalls != 1 || stored.Summary.ToolCalls != 0 {
+		t.Fatalf("stored run = %#v, want failed terminal summary", stored)
 	}
 }
 

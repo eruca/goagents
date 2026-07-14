@@ -1083,17 +1083,7 @@ func (s *Server) rejectAgentApprovalWorkflow(ctx context.Context, run workflowki
 }
 
 func (s *Server) failAgentApprovalWorkflow(ctx context.Context, run workflowkit.WorkflowRun, checkpointID string, result *agentcore.RunResult, cause error) error {
-	if result != nil {
-		_ = s.runs.Complete(ctx, result.RunID.String(), runkit.TerminalSummary{
-			Status:       runkit.StatusFailed,
-			AbortReason:  cause.Error(),
-			InputTokens:  result.Usage.InputTokens,
-			OutputTokens: result.Usage.OutputTokens,
-			LLMCalls:     result.ExecutionSummary.LLMCalls,
-			ToolCalls:    result.ExecutionSummary.ToolCalls,
-			UsedTools:    result.ExecutionSummary.UsedTools,
-		})
-	}
+	_ = completeFailedAgentRun(ctx, s.runs, result, cause)
 	_, err := s.workflows.Update(ctx, run.ID, func(current workflowkit.WorkflowRun) (workflowkit.WorkflowRun, error) {
 		if !workflowHasPendingAgentApproval(current, checkpointID) {
 			return current, errAgentApprovalNotPending
@@ -1280,6 +1270,9 @@ func (s hostAgentStep) Run(ctx context.Context, run workflowkit.WorkflowRun) (wo
 		if errors.Is(err, agentcore.ErrApprovalPending) && result != nil && result.Interruption != nil && s.approvals != nil {
 			approval, saveErr := s.approvals.SavePending(ctx, run.ID, result.Interruption.Checkpoint)
 			if saveErr != nil {
+				if completeErr := completeFailedAgentRun(ctx, s.runs, result, saveErr); completeErr != nil {
+					saveErr = errors.Join(saveErr, fmt.Errorf("complete failed agent run: %w", completeErr))
+				}
 				return failedAgentStepResult(result, saveErr), saveErr
 			}
 			return workflowkit.StepResult{
@@ -1289,6 +1282,9 @@ func (s hostAgentStep) Run(ctx context.Context, run workflowkit.WorkflowRun) (wo
 				WaitingReason: "operator tool approval required before record_review executes",
 				Metadata:      approval.workflowMetadata(),
 			}, nil
+		}
+		if completeErr := completeFailedAgentRun(ctx, s.runs, result, err); completeErr != nil {
+			err = errors.Join(err, fmt.Errorf("complete failed agent run: %w", completeErr))
 		}
 		return failedAgentStepResult(result, err), err
 	}
@@ -1337,6 +1333,25 @@ func failedAgentStepResult(result *agentcore.RunResult, err error) workflowkit.S
 		}
 	}
 	return out
+}
+
+func completeFailedAgentRun(ctx context.Context, store runkit.Store, result *agentcore.RunResult, cause error) error {
+	if result == nil {
+		return nil
+	}
+	abortReason := cause.Error()
+	if result.ExecutionSummary.AbortReason != "" {
+		abortReason = result.ExecutionSummary.AbortReason
+	}
+	return store.Complete(ctx, result.RunID.String(), runkit.TerminalSummary{
+		Status:       runkit.StatusFailed,
+		AbortReason:  abortReason,
+		InputTokens:  result.Usage.InputTokens,
+		OutputTokens: result.Usage.OutputTokens,
+		LLMCalls:     result.ExecutionSummary.LLMCalls,
+		ToolCalls:    result.ExecutionSummary.ToolCalls,
+		UsedTools:    result.ExecutionSummary.UsedTools,
+	})
 }
 
 type routingAgentRunner struct {
