@@ -35,8 +35,18 @@ func (f HarnessFunc) RunTask(ctx context.Context, task Task) (*RunResult, error)
 
 type RunResult struct {
 	Output   string
+	Outcome  Outcome
 	Trace    Trace
 	Metadata map[string]any
+}
+
+// Outcome is the evaluated system's domain result. OutputRef points to
+// host-owned content without copying that content into an eval report.
+type Outcome struct {
+	Status    string
+	OutputRef string
+	ErrorCode string
+	Metadata  map[string]any
 }
 
 // Trace is the bounded trajectory record used by graders. Hosts decide how much
@@ -112,6 +122,7 @@ type Trial struct {
 	TaskID     string
 	Index      int
 	Output     string
+	Outcome    Outcome
 	Trace      Trace
 	Error      string
 	StartedAt  time.Time
@@ -205,6 +216,7 @@ func (r Runner) runTrial(ctx context.Context, task Task, index int, graders []Gr
 	}
 	if run != nil {
 		trial.Output = run.Output
+		trial.Outcome = cloneOutcome(run.Outcome)
 		trial.Trace = cloneTrace(run.Trace)
 		trial.Metadata = cloneMetadata(run.Metadata)
 	}
@@ -312,6 +324,11 @@ func (r Runner) now() time.Time {
 func cloneTask(task Task) Task {
 	task.Metadata = cloneMetadata(task.Metadata)
 	return task
+}
+
+func cloneOutcome(outcome Outcome) Outcome {
+	outcome.Metadata = cloneMetadata(outcome.Metadata)
+	return outcome
 }
 
 func cloneTrace(trace Trace) Trace {

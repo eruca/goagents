@@ -69,6 +69,47 @@ func TestRunnerRepeatsTasksAndAggregatesGrades(t *testing.T) {
 	}
 }
 
+func TestRunnerCarriesAndClonesOutcome(t *testing.T) {
+	sourceMetadata := map[string]any{"dataset_split": "held_out"}
+	runner := Runner{
+		Harness: HarnessFunc(func(context.Context, Task) (*RunResult, error) {
+			return &RunResult{
+				Outcome: Outcome{
+					Status:    "succeeded",
+					OutputRef: "artifact:wf-1:final",
+					Metadata:  sourceMetadata,
+				},
+			}, nil
+		}),
+	}
+
+	result, err := runner.Run(context.Background(), Suite{
+		Name:  "outcome-contract",
+		Tasks: []Task{{ID: "task-a"}},
+		Graders: []Grader{GraderFunc{
+			GraderName: "outcome-contract",
+			Fn: func(_ context.Context, req GradeRequest) (*GradeResult, error) {
+				return &GradeResult{Assertions: []Assertion{
+					{Name: "status", Passed: req.Trial.Outcome.Status == "succeeded"},
+					{Name: "output-ref", Passed: req.Trial.Outcome.OutputRef == "artifact:wf-1:final"},
+					{Name: "dataset-split", Passed: req.Trial.Outcome.Metadata["dataset_split"] == "held_out"},
+				}}, nil
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("run eval suite: %v", err)
+	}
+	if !result.Trials[0].Passed {
+		t.Fatalf("trial = %+v, want passed outcome grader", result.Trials[0])
+	}
+
+	sourceMetadata["dataset_split"] = "mutated"
+	if got := result.Trials[0].Trial.Outcome.Metadata["dataset_split"]; got != "held_out" {
+		t.Fatalf("stored outcome metadata = %v, want defensive copy", got)
+	}
+}
+
 func TestRunnerRecordsHarnessErrorAsFailedTrial(t *testing.T) {
 	runner := Runner{
 		Harness: HarnessFunc(func(ctx context.Context, task Task) (*RunResult, error) {
