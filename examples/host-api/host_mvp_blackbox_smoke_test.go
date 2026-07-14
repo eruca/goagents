@@ -23,6 +23,9 @@ func TestHostAPIProcessMVPBlackBoxClosure(t *testing.T) {
 	t.Run("provider failure requeue and success", func(t *testing.T) {
 		runMVPProviderRequeue(t, binary)
 	})
+	t.Run("unregistered tool fails closed", func(t *testing.T) {
+		runMVPUnregisteredTool(t, binary)
+	})
 }
 
 func runMVPApprovalSkillRestart(t *testing.T, binary string) {
@@ -211,6 +214,73 @@ func runMVPProviderRequeue(t *testing.T, binary string) {
 	cleanupKeychain()
 }
 
+func runMVPUnregisteredTool(t *testing.T, binary string) {
+	t.Helper()
+	requireInteractiveLoginKeychain(t)
+	provider := newMVPProviderStub(t, mvpProviderUnregisteredTool)
+	oidc := newOIDCTestProvider(t)
+	runtimeHome := t.TempDir()
+	writeMVPLLMKitConfig(t, runtimeHome, provider.URL())
+	keychainService := fmt.Sprintf("%s.smoke.mvp.unregistered.%d", localApprovalKeychainService, time.Now().UnixNano())
+	cleanupKeychain := smokeKeychainCleanup(t, keychainService, localApprovalKeyID)
+	t.Cleanup(cleanupKeychain)
+	process := startHostProcessWithEnv(t, binary, runtimeHome, oidc.issuer, keychainService, localApprovalKeyID, map[string]string{
+		hostAPISkillRootEnv:  "",
+		mvpProviderAPIKeyEnv: mvpProviderAPIKey,
+	})
+
+	created, status := processJSON[workflowResponse](t, process, http.MethodPost, "/workflows", map[string]any{
+		"id":       "wf-mvp-unregistered-tool",
+		"input":    "Reject any tool that is not in the host registry.",
+		"run_mode": string(RunModeQueued),
+		"task_profile": map[string]any{
+			"complexity":  "simple",
+			"privacy":     "cloud_allowed",
+			"needs_tools": true,
+		},
+	}, "")
+	if status != http.StatusAccepted || created.Status != string(workflowkit.StatusPending) {
+		t.Fatalf("create unregistered-tool workflow status=%d workflow=%#v", status, created)
+	}
+	failed := waitForProcessWorkflowStatus(t, process, created.ID, workflowkit.StatusFailed)
+	if failed.AgentRunID == "" || failed.AgentApproval != nil || failed.ApprovalRef != "" {
+		t.Fatalf("failed workflow=%#v, want observable failed agent run without approval", failed)
+	}
+
+	routes, status := processJSON[llmRoutesResponse](t, process, http.MethodGet, "/workflows/"+created.ID+"/llm-routes", nil, "")
+	if status != http.StatusOK || len(routes.Routes) != 1 || !mvpRoutesContainSuccess(routes.Routes) {
+		t.Fatalf("unregistered-tool routes status=%d routes=%#v", status, routes.Routes)
+	}
+	events, status := processJSON[workflowEventsResponse](t, process, http.MethodGet, "/workflows/"+created.ID+"/events", nil, "")
+	if status != http.StatusOK || events.Status != string(workflowkit.StatusFailed) || !mvpEventsContainFailedStep(events.Events) {
+		t.Fatalf("unregistered-tool events status=%d response=%#v", status, events)
+	}
+	if !workflowEventsContain(events.Events, func(event workflowEventResponse) bool {
+		return event.Type == "step" && event.Name == "agent_review" && strings.Contains(event.Error, `tool "unregistered_tool" not registered`)
+	}) {
+		t.Fatalf("workflow events=%#v, want explicit unregistered-tool failure", events.Events)
+	}
+
+	run, status := processJSON[agentRunResponse](t, process, http.MethodGet, "/agent-runs/"+failed.AgentRunID, nil, "")
+	if status != http.StatusOK || run.Status != string(runkit.StatusFailed) || run.Summary.ToolCalls != 0 || len(run.Summary.UsedTools) != 0 {
+		t.Fatalf("failed agent run status=%d run=%#v", status, run)
+	}
+	for _, event := range run.Events {
+		if strings.HasPrefix(event.Type, "tool.") {
+			t.Fatalf("unregistered tool emitted execution event: %#v", event)
+		}
+	}
+	requests := provider.Requests()
+	if len(requests) != 1 || requests[0].HasToolObservation || !slicesContain(requests[0].ToolNames, recordReviewToolName) {
+		t.Fatalf("provider requests=%#v, want one registered-tool offer and no tool observation", requests)
+	}
+	if strings.Contains(process.output.String(), mvpProviderAPIKey) {
+		t.Fatal("host process output leaked the synthetic provider key")
+	}
+	stopHostProcess(t, process)
+	cleanupKeychain()
+}
+
 func assertMVPCompletedWorkflow(t *testing.T, process *hostProcess, expected workflowResponse, wantToolCalls int) {
 	t.Helper()
 	workflow, status := processJSON[workflowResponse](t, process, http.MethodGet, "/workflows/"+expected.ID, nil, "")
@@ -261,6 +331,15 @@ func mvpEventsContainFailedStep(events []workflowEventResponse) bool {
 func mvpEventsContainRequeue(events []workflowEventResponse) bool {
 	for _, event := range events {
 		if event.Type == "workflow_requeued" && event.FromStatus == string(workflowkit.StatusFailed) && event.ToStatus == string(workflowkit.StatusPending) && !event.At.IsZero() {
+			return true
+		}
+	}
+	return false
+}
+
+func slicesContain(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
 			return true
 		}
 	}
