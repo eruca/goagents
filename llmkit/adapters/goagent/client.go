@@ -84,6 +84,10 @@ func NewClient(config Config) *Client {
 
 	candidates := make([]llmkit.Candidate, len(config.Candidates))
 	copy(candidates, config.Candidates)
+	errorClassifier := config.ErrorClassifier
+	if errorClassifier == nil {
+		errorClassifier = DefaultErrorClassifier
+	}
 
 	return &Client{
 		policy:                config.Policy,
@@ -97,7 +101,7 @@ func NewClient(config Config) *Client {
 		modelStatsProvider:    config.ModelStatsProvider,
 		healthStore:           config.HealthStore,
 		fallbackPolicy:        config.FallbackPolicy,
-		errorClassifier:       config.ErrorClassifier,
+		errorClassifier:       errorClassifier,
 	}
 }
 

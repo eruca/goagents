@@ -3,8 +3,10 @@ package goagent
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 
+	"github.com/eruca/goagent/extensions/providers/openaiapi"
 	"github.com/eruca/goagent/ports"
 	"github.com/eruca/llmkit/llmkit"
 )
@@ -517,6 +519,38 @@ func TestClientRecordsClassifiedProviderErrors(t *testing.T) {
 	second := recorder.outcomes[1]
 	if !second.Success || second.ErrorClass != "" {
 		t.Fatalf("second outcome = %+v, want successful unclassified outcome", second)
+	}
+}
+
+func TestClientUsesDefaultErrorClassifier(t *testing.T) {
+	local := &fakeProviderClient{err: &openaiapi.ResponseError{StatusCode: http.StatusUnauthorized}}
+	recorder := &fakeRecorder{}
+
+	client := NewClient(Config{
+		Candidates: testCandidates(),
+		Providers: map[string]ProviderClient{
+			"local-small": local,
+		},
+		ProfileProvider: fixedProfile(simpleProfile()),
+		RouteMetadataProvider: fixedRouteMetadata(RouteMetadata{
+			RouteID: "route-default-classifier",
+			TaskID:  "task-default-classifier",
+			Attempt: 1,
+		}),
+		Recorder:       recorder,
+		RecordOutcomes: true,
+	})
+
+	_, err := client.Chat(context.Background(), ports.ChatRequest{})
+	if err == nil {
+		t.Fatal("Chat() error = nil, want provider failure")
+	}
+	if len(recorder.outcomes) != 1 {
+		t.Fatalf("recorded outcomes = %d, want 1", len(recorder.outcomes))
+	}
+	outcome := recorder.outcomes[0]
+	if outcome.ErrorCode != "provider_error" || outcome.ErrorClass != llmkit.ErrorClassAuth {
+		t.Fatalf("outcome = %+v, want provider_error/auth_error", outcome)
 	}
 }
 
