@@ -138,8 +138,12 @@ func runMVPApprovalSkillRestart(t *testing.T, binary string) {
 	if !sawToolRequest || !sawToolObservation {
 		t.Fatalf("provider requests missing tool round trip: %#v", requests)
 	}
-	if strings.Contains(first.output.String()+second.output.String()+third.output.String(), mvpProviderAPIKey) {
+	processOutput := first.output.String() + second.output.String() + third.output.String()
+	if strings.Contains(processOutput, mvpProviderAPIKey) {
 		t.Fatal("host process output leaked the synthetic provider key")
+	}
+	if strings.Contains(processOutput, skillRoot) {
+		t.Fatal("host process output leaked the configured Skill root")
 	}
 	cleanupKeychain()
 }
