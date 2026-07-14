@@ -62,6 +62,37 @@ func TestExecutorMarksRunSucceededAfterOrderedStepsComplete(t *testing.T) {
 	}
 }
 
+func TestExecutorPreservesFailedStepDiagnosticRefs(t *testing.T) {
+	store := NewMemoryStore()
+	executor := NewExecutor(store, []Step{
+		stepFunc{name: "agent", run: func(context.Context, WorkflowRun) (StepResult, error) {
+			return StepResult{
+				Status:     StatusFailed,
+				AgentRunID: "agent-failed",
+				AuditRef:   "audit-failed",
+			}, errors.New("agent failed")
+		}},
+	})
+
+	result, err := executor.Run(context.Background(), WorkflowRun{ID: "wf-failed-refs"})
+	if err == nil || err.Error() != "agent failed" {
+		t.Fatalf("Run error = %v, want agent failed", err)
+	}
+	if result.Status != StatusFailed || result.AgentRunID != "agent-failed" || result.AuditRef != "audit-failed" {
+		t.Fatalf("result = %#v, want failed diagnostic refs", result)
+	}
+	if len(result.StepRecords) != 1 || result.StepRecords[0].AgentRunID != "agent-failed" || result.StepRecords[0].AuditRef != "audit-failed" {
+		t.Fatalf("step records = %#v, want failed diagnostic refs", result.StepRecords)
+	}
+	stored, err := store.Get(context.Background(), result.ID)
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if stored.AgentRunID != result.AgentRunID || stored.AuditRef != result.AuditRef {
+		t.Fatalf("stored = %#v, want persisted failed diagnostic refs", stored)
+	}
+}
+
 func TestExecutorStopsAndPersistsWaitingApproval(t *testing.T) {
 	store := NewMemoryStore()
 	var ranSecond bool

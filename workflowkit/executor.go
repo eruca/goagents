@@ -145,6 +145,9 @@ func (e *Executor) runFrom(ctx context.Context, run WorkflowRun) (WorkflowRun, e
 		}
 		result, err := e.runStepWithRetry(ctx, step, &run)
 		if err != nil {
+			// Failed steps may still return diagnostic references such as an
+			// AgentRunID. Preserve them before persisting the terminal failure.
+			applyStepResult(&run, result)
 			run.Status = StatusFailed
 			run.Error = err.Error()
 			_ = e.save(ctx, run)
@@ -175,6 +178,7 @@ func (e *Executor) runStepWithRetry(ctx context.Context, step Step, run *Workflo
 		maxAttempts = 1
 	}
 	var lastErr error
+	var lastResult StepResult
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		recordStepAttempt(run, step.Name())
 		record := StepRecord{
@@ -199,16 +203,20 @@ func (e *Executor) runStepWithRetry(ctx context.Context, step Step, run *Workflo
 			return result, nil
 		}
 		lastErr = err
-		finishStepRecord(&record, StepResult{Status: StatusFailed}, err.Error())
+		failedResult := result
+		failedResult.Status = StatusFailed
+		failedResult.Error = err.Error()
+		lastResult = failedResult
+		finishStepRecord(&record, failedResult, err.Error())
 		run.StepRecords = append(run.StepRecords, record)
 		if err := e.save(ctx, *run); err != nil {
 			return StepResult{}, err
 		}
 		if errors.Is(err, ErrInvalidStatus) {
-			return StepResult{}, err
+			return failedResult, err
 		}
 		if !IsTransient(err) || attempt == maxAttempts {
-			return StepResult{}, err
+			return failedResult, err
 		}
 		if e.retryPolicy.Delay > 0 {
 			timer := time.NewTimer(e.retryPolicy.Delay)
@@ -220,7 +228,7 @@ func (e *Executor) runStepWithRetry(ctx context.Context, step Step, run *Workflo
 			}
 		}
 	}
-	return StepResult{}, lastErr
+	return lastResult, lastErr
 }
 
 func finishStepRecord(record *StepRecord, result StepResult, err string) {
