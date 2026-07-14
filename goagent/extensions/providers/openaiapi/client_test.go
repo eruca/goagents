@@ -3,6 +3,7 @@ package openaiapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -250,6 +251,13 @@ func TestClientReturnsErrorForNon2xxResponse(t *testing.T) {
 	_, err = client.Chat(context.Background(), ports.ChatRequest{})
 	if err == nil || !strings.Contains(err.Error(), "status 400") || !strings.Contains(err.Error(), "bad request") {
 		t.Fatalf("err = %v", err)
+	}
+	var responseErr *ResponseError
+	if !errors.As(err, &responseErr) {
+		t.Fatalf("err type = %T, want *ResponseError", err)
+	}
+	if responseErr.StatusCode != http.StatusBadRequest || !strings.Contains(responseErr.Body, "bad request") {
+		t.Fatalf("ResponseError = %+v", responseErr)
 	}
 }
 

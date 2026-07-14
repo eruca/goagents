@@ -78,7 +78,7 @@ func (c *Client) Chat(ctx context.Context, req ports.ChatRequest) (*ports.ChatRe
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("openai-compatible request failed: status %d: %s", resp.StatusCode, string(data))
+		return nil, &ResponseError{StatusCode: resp.StatusCode, Body: string(data)}
 	}
 
 	var decoded chatCompletionsResponse
