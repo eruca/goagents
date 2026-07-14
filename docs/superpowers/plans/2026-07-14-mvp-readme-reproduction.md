@@ -92,7 +92,9 @@ go test -v -tags hostapisystemsmoke \
 All three subtests must report `PASS`. A `SKIP` means the local environment is
 blocked and is not evidence of a completed MVP acceptance run. The smoke uses
 loopback test providers, synthetic credentials, isolated temporary runtime
-state, and a uniquely named `.smoke.` Keychain item that it removes afterward.
+state, and separate `.smoke.` Keychain service/account pairs for its three
+scenarios. Each scenario removes only its exact pair.
+The suite never accesses the production-default Keychain item.
 ```
 
 - [ ] **Step 3: 验证根 README 链接与命令存在**
@@ -107,7 +109,12 @@ for target in \
   ocrs/README.md examples/host-api/README.md scripts/verify-all.sh; do
   test -f "$target" || exit 1
 done
-rg -n "TestHostAPIProcessMVPBlackBoxClosure|SKIP.*not evidence" README.md
+rg -n "TestHostAPIProcessMVPBlackBoxClosure" README.md
+rg -n 'A `SKIP` means the local environment is' README.md
+rg -n "not evidence of a completed MVP acceptance run" README.md
+rg -n 'separate `\.smoke\.` Keychain service/account pairs' README.md
+rg -n "Each scenario removes only its exact pair" README.md
+rg -n "never accesses the production-default Keychain item" README.md
 ```
 
 Expected: 退出码为 0，并匹配完整 smoke 名称和 SKIP 边界。
@@ -127,14 +134,14 @@ git commit -m "docs: 增加仓库入口与 MVP 导航"
 
 **Interfaces:**
 - Consumes: `TestHostAPIProcessMVPBlackBoxClosure` 和现有 OIDC 配置契约。
-- Produces: 零真实凭证的本机验收路径，以及明确要求真实 OIDC 的长期运行路径。
+- Produces: 不需要真实外部或云端 Provider 凭证的本机验收路径，以及明确要求真实 OIDC 的长期运行路径。
 
 - [ ] **Step 1: 验证 README 尚未暴露完整 MVP smoke**
 
-Run:
+Run from the repository root:
 
 ```bash
-rg -n "TestHostAPIProcessMVPBlackBoxClosure" README.md
+rg -n "TestHostAPIProcessMVPBlackBoxClosure" examples/host-api/README.md
 ```
 
 Expected: FAIL，退出码为 1。
@@ -146,9 +153,9 @@ Expected: FAIL，退出码为 1。
 ```markdown
 ## Local MVP acceptance
 
-The shortest credential-free path is the real-process black-box smoke. From
-this directory, first run the default package tests, then the complete MVP
-acceptance suite:
+The shortest path that needs no real credentials for external or cloud
+providers is the real-process black-box smoke. From this directory, first run
+the default package tests, then the complete MVP acceptance suite:
 
 ```bash
 go test ./... -count=1
@@ -162,6 +169,11 @@ unlocked login Keychain. It starts loopback-only OIDC and OpenAI-compatible
 test providers, uses a synthetic API key, and keeps each scenario in an
 isolated temporary runtime home. It never loads a real Qwen or cloud-provider
 credential.
+
+Each scenario uses a separate Keychain service/account pair whose service
+contains `.smoke.`. Cleanup deletes only that exact pair and refuses non-smoke
+services. The suite never accesses or deletes the production-default item.
+That item uses service `goagents.host-api.approvals` and account `approval-data-key:local-v1`.
 
 The three subtests cover approval plus Skill restart recovery, Provider 503
 followed by HTTP requeue, and fail-closed handling of an unregistered tool.
@@ -193,8 +205,8 @@ in-process queued worker lease duration; it accepts Go durations such as `30s`
 or `2m` and defaults to `1m`.
 
 There is intentionally no switch that disables OIDC or accepts an approver
-identity from the request body. For a credential-free local proof, use the MVP
-acceptance smoke above.
+identity from the request body. For a local proof without real external or
+cloud-provider credentials, use the MVP acceptance smoke above.
 ```
 
 - [ ] **Step 4: 验证文档明确区分两条路径**
@@ -202,11 +214,23 @@ acceptance smoke above.
 Run:
 
 ```bash
-rg -n "Local MVP acceptance|TestHostAPIProcessMVPBlackBoxClosure|Run the long-lived service|not a zero-configuration command|no switch that disables OIDC" README.md
-if rg -n "^Run it:$" README.md; then exit 1; fi
+rg -n "Local MVP acceptance" examples/host-api/README.md
+rg -n "TestHostAPIProcessMVPBlackBoxClosure" examples/host-api/README.md
+rg -n "Run the long-lived service" examples/host-api/README.md
+rg -n "not a zero-configuration command" examples/host-api/README.md
+rg -n "no switch that disables OIDC" examples/host-api/README.md
+rg -n "needs no real credentials for external or cloud" examples/host-api/README.md
+rg -n "Each scenario uses a separate Keychain service/account pair" examples/host-api/README.md
+rg -n 'contains `\.smoke\.`' examples/host-api/README.md
+rg -n "Cleanup deletes only that exact pair" examples/host-api/README.md
+rg -n "refuses non-smoke" examples/host-api/README.md
+rg -n "never accesses or deletes the production-default item" examples/host-api/README.md
+rg -n 'service `goagents\.host-api\.approvals`' examples/host-api/README.md
+rg -n 'account `approval-data-key:local-v1`' examples/host-api/README.md
+if rg -n "^Run it:$" examples/host-api/README.md; then exit 1; fi
 ```
 
-Expected: 退出码为 0，五个新边界均可匹配，旧的模糊标题不存在。
+Expected: 退出码为 0，上述必需边界均可匹配，旧的模糊标题不存在。
 
 - [ ] **Step 5: 提交 Host README**
 
@@ -264,7 +288,8 @@ for target in \
   test -f "$target" || exit 1
 done
 if rg -n '/Users/|sk-[A-Za-z0-9_-]{8,}|Bearer [A-Za-z0-9._-]{12,}' README.md examples/host-api/README.md; then exit 1; fi
-git diff --check
+base=$(git merge-base main HEAD)
+git diff --check "$base"..HEAD
 ```
 
 Expected: 退出码为 0，不包含机器路径、疑似 secret 或空白错误。
@@ -284,7 +309,7 @@ Expected: 退出码为 0，不包含机器路径、疑似 secret 或空白错误
 - `provider_failure_requeue_and_success`：PASS；
 - `unregistered_tool_fails_closed`：PASS；
 - tagged smoke：没有 SKIP；
-- 根 README 相对链接、安全文本扫描和 `git diff --check`：PASS。
+- 根 README 相对链接、安全文本扫描和基于 `main` merge-base 的 range `git diff --check`：PASS。
 
 长期服务仍明确要求真实 OIDC discovery/JWKS；本阶段没有增加认证绕过或真实 Provider 凭证。
 ```
@@ -294,6 +319,8 @@ Expected: 退出码为 0，不包含机器路径、疑似 secret 或空白错误
 ```bash
 git add docs/superpowers/specs/2026-07-14-mvp-readme-reproduction-design.md
 git commit -m "docs(mvp): 记录 README 干净环境复现结果"
+base=$(git merge-base main HEAD)
+git diff --check "$base"..HEAD
 git status --short --branch
 git log --oneline --decorate -6
 ```

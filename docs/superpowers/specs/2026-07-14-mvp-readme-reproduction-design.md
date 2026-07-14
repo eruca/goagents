@@ -64,7 +64,8 @@ go test -v -tags hostapisystemsmoke \
 
 - 第二条命令仅支持带 CGO 的 macOS 交互式登录会话；
 - 测试自带 loopback OIDC 和合成 OpenAI-compatible Provider，不使用真实 Qwen/API key；
-- 使用唯一 `.smoke.` Keychain item，并在结束时精确清理；
+- 每个场景使用独立的 `.smoke.` Keychain service/account 对，并在结束时精确清理；
+- 不访问或删除 production-default Keychain item；
 - 三个子场景必须全部 PASS；任何 SKIP 都表示环境阻塞，而不是验收成功。
 
 ### 5.2 连接真实 OIDC 后运行服务
@@ -110,7 +111,8 @@ go test -v -tags hostapisystemsmoke \
   -run '^TestHostAPIProcessMVPBlackBoxClosure$' \
   -count=1 ./...
 cd ../..
-git diff --check
+base=$(git merge-base main HEAD)
+git diff --check "$base"..HEAD
 ```
 
 验收要求：
@@ -131,6 +133,6 @@ git diff --check
 - `provider_failure_requeue_and_success`：PASS；
 - `unregistered_tool_fails_closed`：PASS；
 - tagged smoke：没有 SKIP；
-- 根 README 相对链接、安全文本扫描和 `git diff --check`：PASS。
+- 根 README 相对链接、安全文本扫描和基于 `main` merge-base 的 range `git diff --check`：PASS。
 
 长期服务仍明确要求真实 OIDC discovery/JWKS；本阶段没有增加认证绕过或真实 Provider 凭证。

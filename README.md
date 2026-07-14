@@ -45,4 +45,6 @@ go test -v -tags hostapisystemsmoke \
 All three subtests must report `PASS`. A `SKIP` means the local environment is
 blocked and is not evidence of a completed MVP acceptance run. The smoke uses
 loopback test providers, synthetic credentials, isolated temporary runtime
-state, and a uniquely named `.smoke.` Keychain item that it removes afterward.
+state, and separate `.smoke.` Keychain service/account pairs for its three
+scenarios. Each scenario removes only its exact pair.
+The suite never accesses the production-default Keychain item.

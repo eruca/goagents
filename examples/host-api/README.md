@@ -11,9 +11,9 @@ core module; it shows how a host application can compose:
 
 ## Local MVP acceptance
 
-The shortest credential-free path is the real-process black-box smoke. From
-this directory, first run the default package tests, then the complete MVP
-acceptance suite:
+The shortest path that needs no real credentials for external or cloud
+providers is the real-process black-box smoke. From this directory, first run
+the default package tests, then the complete MVP acceptance suite:
 
 ```bash
 go test ./... -count=1
@@ -27,6 +27,11 @@ unlocked login Keychain. It starts loopback-only OIDC and OpenAI-compatible
 test providers, uses a synthetic API key, and keeps each scenario in an
 isolated temporary runtime home. It never loads a real Qwen or cloud-provider
 credential.
+
+Each scenario uses a separate Keychain service/account pair whose service
+contains `.smoke.`. Cleanup deletes only that exact pair and refuses non-smoke
+services. The suite never accesses or deletes the production-default item.
+That item uses service `goagents.host-api.approvals` and account `approval-data-key:local-v1`.
 
 The three subtests cover approval plus Skill restart recovery, Provider 503
 followed by HTTP requeue, and fail-closed handling of an unregistered tool.
@@ -345,5 +350,5 @@ in-process queued worker lease duration; it accepts Go durations such as `30s`
 or `2m` and defaults to `1m`.
 
 There is intentionally no switch that disables OIDC or accepts an approver
-identity from the request body. For a credential-free local proof, use the MVP
-acceptance smoke above.
+identity from the request body. For a local proof without real external or
+cloud-provider credentials, use the MVP acceptance smoke above.
