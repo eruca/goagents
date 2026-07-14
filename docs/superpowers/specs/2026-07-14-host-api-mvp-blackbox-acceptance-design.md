@@ -2,7 +2,7 @@
 
 **日期：** 2026-07-14
 
-**状态：** 已确认
+**状态：** 已实现并验收
 
 ## 1. 目标
 
@@ -38,7 +38,7 @@ TestHostAPIProcessMVPBlackBoxClosure
 测试使用三个独立子场景，共用现有的二进制构建、OIDC、进程启停、HTTP JSON 和 Keychain
 隔离 helper。每个子场景使用独立 runtime home，避免状态串扰。
 
-本轮不修改：
+黑盒测试本身不修改：
 
 - 生产 HTTP API；
 - SQLite schema 或 store contract；
@@ -47,6 +47,9 @@ TestHostAPIProcessMVPBlackBoxClosure
 - `scripts/verify-all.sh` 的默认外部环境要求。
 
 若验收暴露产品缺陷，先按 P0-P3 分级，再单独设计最小修复；不得在 smoke 中硬编码绕过。
+
+实际验收暴露了三项 P1 可观测性缺陷，均以独立语义提交做了最小修复；HTTP API、SQLite
+schema、路由策略和重试策略仍未改变。详见第 9 节。
 
 ## 3. 本地 OpenAI-compatible Provider Stub
 
@@ -169,3 +172,68 @@ git diff --check
 3. 汇总 P0-P3、环境限制和验收证据，形成 MVP 最终结论。
 
 这些阶段不与本次 smoke 实现混在同一语义提交中。
+
+## 9. 实现与验收记录
+
+### 9.1 交付提交
+
+| 提交 | 内容 |
+|---|---|
+| `4330030` | 审批、Skill 与重启黑盒场景及可控 Provider stub |
+| `9fe1459` | 修复重排与多轮调用复用 RouteID 导致历史 Outcome 被覆盖 |
+| `96cb5f4` | Provider 503、HTTP requeue 与恢复成功场景 |
+| `62020ed` | `workflowkit` 保留失败步骤返回的 AgentRunID/AuditRef |
+| `c98e89f` | Host 把初次执行失败的 AgentRun 正确终结为 `failed` |
+| `90d00ff` | 未注册工具失败关闭场景 |
+| `8f76103` | Provider 失败场景校验失败 AgentRun 终态 |
+| `c2a3926` | 显式校验进程日志不泄露 Skill 物理路径 |
+
+### 9.2 验收中发现并修复的问题
+
+| 级别 | 问题 | 影响 | 处理结果 |
+|---|---|---|---|
+| P1 | 同一 workflow 重排时复用 RouteID | 后一次成功 Outcome 覆盖前一次 Provider 失败证据 | RouteID 改为 AgentRunID 加持久化 LLM 调用序号，已修复 |
+| P1 | 执行器丢弃失败 StepResult 中的诊断引用 | 失败 workflow 无法关联 AgentRun | 失败路径保留并持久化诊断引用，已修复 |
+| P1 | 初次 Agent 执行失败未写 terminal summary | AgentRun 长期停留在 `running` | 统一失败运行收口为 `failed`，已修复 |
+
+没有发现 P0、P2 或 P3 缺陷。
+
+### 9.3 黑盒结果
+
+2026-07-14 执行：
+
+```text
+TestHostAPIProcessMVPBlackBoxClosure/approval_skill_and_restart             PASS
+TestHostAPIProcessMVPBlackBoxClosure/provider_failure_requeue_and_success  PASS
+TestHostAPIProcessMVPBlackBoxClosure/unregistered_tool_fails_closed        PASS
+```
+
+三个子场景均为 PASS，没有 SKIP。断言只通过第 5 节列出的公开 HTTP API 获取产品状态；没有读取、
+修改 SQLite 或直接写入 artifact store 来制造结果。
+
+### 9.4 回归证据
+
+以下命令均以退出码 0 完成：
+
+```bash
+cd examples/host-api
+go test -v -tags hostapisystemsmoke -run '^TestHostAPIProcessMVPBlackBoxClosure$' -count=1 ./...
+go test ./... -count=1
+go vet ./...
+go vet -tags hostapisystemsmoke ./...
+cd ../..
+bash ./scripts/verify-all.sh
+git diff --check
+```
+
+仓库级验证覆盖所有 Go 模块、`workflowkit` 与 `goagent` race、MCP stdio/HTTP smoke、示例程序和
+Host API 回归。
+
+### 9.5 安全边界结果
+
+- Provider 使用测试专用合成 key，没有读取 todo/Qwen 的真实凭证；
+- 进程输出显式检查不包含合成 key 或配置的 Skill 绝对路径；
+- `/skills` 只返回安全目录字段与固定 digest，不返回 manifest、instructions、resources 或 root；
+- 每个场景使用唯一 `.smoke.` Keychain service，并通过原有前缀保护清理精确 item；
+- 未注册工具场景中 AgentRun 为 `failed`、`ToolCalls=0`、`UsedTools=[]`，且事件没有任何
+  `tool.*`，证明策略阶段在工具执行前失败关闭。
