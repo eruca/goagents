@@ -9,6 +9,30 @@ core module; it shows how a host application can compose:
 - `artifactkit` for durable payload refs.
 - `runkit` for durable agent run audit records and events.
 
+## Local MVP acceptance
+
+The shortest credential-free path is the real-process black-box smoke. From
+this directory, first run the default package tests, then the complete MVP
+acceptance suite:
+
+```bash
+go test ./... -count=1
+go test -v -tags hostapisystemsmoke \
+  -run '^TestHostAPIProcessMVPBlackBoxClosure$' \
+  -count=1 ./...
+```
+
+The tagged suite requires macOS, CGO, an interactive login session, and an
+unlocked login Keychain. It starts loopback-only OIDC and OpenAI-compatible
+test providers, uses a synthetic API key, and keeps each scenario in an
+isolated temporary runtime home. It never loads a real Qwen or cloud-provider
+credential.
+
+The three subtests cover approval plus Skill restart recovery, Provider 503
+followed by HTTP requeue, and fail-closed handling of an unregistered tool.
+All three must report `PASS`. A `SKIP` means the environment is blocked and is
+not a successful MVP acceptance result.
+
 By default, the example creates a temporary runtime directory. Set
 `HOST_RUNTIME_HOME` to make workflow state, agent run audit, artifacts, and
 llmkit audit survive process restarts:
@@ -302,14 +326,24 @@ workflow step fails instead of moving to `waiting_approval` with broken refs.
 See `../../docs/host-api-contract.md` for the prose contract and
 `openapi.yaml` for the machine-readable HTTP contract.
 
-Run it:
+## Run the long-lived service
+
+`go run .` is not a zero-configuration command. The service fails closed
+unless it can discover a real OIDC issuer and verify approval bearer tokens
+through that issuer's JWKS:
 
 ```bash
+export HOST_API_OIDC_ISSUER=https://id.example.com
+export HOST_API_OIDC_AUDIENCE=goagents-host-api
 go run .
 ```
 
-Set `HOST_API_ADDR` to choose the listen address and `LLMKIT_HOME` to choose the
-audit directory. If `LLMKIT_HOME` is unset, it defaults to
+Set `HOST_RUNTIME_HOME` to retain state across restarts and `HOST_API_ADDR` to
+choose the listen address. If `LLMKIT_HOME` is unset, it defaults to
 `$HOST_RUNTIME_HOME/.llmkit`. Set `HOST_API_QUEUED_LEASE_DURATION` to tune the
 in-process queued worker lease duration; it accepts Go durations such as `30s`
 or `2m` and defaults to `1m`.
+
+There is intentionally no switch that disables OIDC or accepts an approver
+identity from the request body. For a credential-free local proof, use the MVP
+acceptance smoke above.
