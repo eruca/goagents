@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/eruca/artifactkit"
@@ -1355,12 +1356,15 @@ func (r routingAgentRunner) RunDetailed(ctx context.Context, req agentcore.RunRe
 	if workflowID == "" {
 		return nil, fmt.Errorf("workflow_id metadata is required")
 	}
+	if req.RunID.IsZero() {
+		req.RunID = agentcore.NewRunID()
+	}
 	profile := taskProfileFromMetadata(req.Metadata["task_profile"])
 	activation, err := r.activateSkillRefs(req.Metadata)
 	if err != nil {
 		return nil, err
 	}
-	agent, err := r.newAgent(workflowID, profile, activation)
+	agent, err := r.newAgent(workflowID, req.RunID.String(), 0, profile, activation)
 	if err != nil {
 		return nil, err
 	}
@@ -1379,18 +1383,20 @@ func (r routingAgentRunner) ResumeDetailed(ctx context.Context, checkpoint agent
 	if err != nil {
 		return nil, err
 	}
-	agent, err := r.newAgent(workflowID, profile, activation)
+	agent, err := r.newAgent(workflowID, checkpoint.RunID, checkpoint.LLMCalls, profile, activation)
 	if err != nil {
 		return nil, err
 	}
 	return agent.ResumeDetailed(ctx, checkpoint, resolutions)
 }
 
-func (r routingAgentRunner) newAgent(workflowID string, profile llmkit.TaskProfile, activation *skillkit.Activation) (*agentcore.Agent, error) {
+func (r routingAgentRunner) newAgent(workflowID, agentRunID string, completedLLMCalls int, profile llmkit.TaskProfile, activation *skillkit.Activation) (*agentcore.Agent, error) {
 	recorder, err := llmkit.NewJSONLRecorder(r.llmkitHome)
 	if err != nil {
 		return nil, err
 	}
+	var routeSequence atomic.Int64
+	routeSequence.Store(int64(completedLLMCalls))
 	client := goagentadapter.NewClient(goagentadapter.Config{
 		Candidates: r.candidates,
 		Providers:  r.providers,
@@ -1398,8 +1404,12 @@ func (r routingAgentRunner) newAgent(workflowID string, profile llmkit.TaskProfi
 			return profile
 		},
 		RouteMetadataProvider: func(context.Context, ports.ChatRequest) goagentadapter.RouteMetadata {
+			// RouteID must identify one logical LLM call. AgentRunID separates
+			// workflow requeues, while the persisted call count keeps resumed
+			// tool-approval runs from reusing an earlier call's audit identity.
+			call := routeSequence.Add(1)
 			return goagentadapter.RouteMetadata{
-				RouteID: "route:" + workflowID + ":1",
+				RouteID: "route:" + workflowID + ":" + agentRunID + ":" + strconv.FormatInt(call, 10),
 				TaskID:  workflowID,
 				Attempt: 1,
 			}

@@ -886,7 +886,8 @@ func TestHostAPIReturnsWorkflowLLMRouteAudit(t *testing.T) {
 		t.Fatalf("routes len = %d, want 1: %+v", len(routes.Routes), routes.Routes)
 	}
 	got := routes.Routes[0]
-	if got.RouteID != "route:wf-routes-1:1" || got.ModelAlias != "local-free" || got.Provider != "local" || got.AccountAlias != "local-dev" {
+	wantRouteID := fmt.Sprintf("route:%s:%s:1", create.ID, create.AgentRunID)
+	if got.RouteID != wantRouteID || got.ModelAlias != "local-free" || got.Provider != "local" || got.AccountAlias != "local-dev" {
 		t.Fatalf("route audit = %+v, want selected local-free route", got)
 	}
 	if got.Score == 0 || got.ScoreBreakdown["price"] == 0 || len(got.CandidateModelAliases) != 2 {
