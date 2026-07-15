@@ -131,9 +131,24 @@ endpoint、模型名和凭证来自进程环境或本机安全存储，不写入
 
 ### 4.6 并发与稳定性
 
-本轮不凭空设定生产吞吐量。开始负载测试前，先明确目标机器、provider 限额、预期并发
-workflow 数和可接受延迟。最低要求是：在该明确目标下，无数据竞争、无重复副作用、
-无永久 lease、无 goroutine/文件描述符持续增长，重启后队列能够继续收敛。
+本轮不凭空设定生产吞吐量。已确认的测试目标是 Apple M1 Pro、10 核、16GB、macOS
+26.5.1；使用 loopback Provider/OIDC，执行 3 轮 × 50 个 workflow、10 路并发 HTTP 提交，
+并在第二轮后重启真实 Host 进程。每个 workflow 完成 `pending -> waiting_approval -> OIDC
+approve -> succeeded`。
+
+硬门禁是：单请求 2 秒、每轮提交/审批各 10 秒、waiting/succeeded 收敛各 30 秒；空闲后
+goroutine/FD 不超过暖机基线 `+5`，RSS 不超过 `+64 MiB`，第二轮相对第一轮新增 FD 不超过
+2、RSS 不超过 32 MiB。该门禁只用于发现当前单进程、单执行槽 MVP 的卡死、重复执行、
+永久 lease 和持续资源增长，不是生产吞吐或容量承诺。
+
+执行命令：
+
+```bash
+cd examples/host-api
+go test -v -tags hostapisystemsmoke \
+  -run '^TestHostAPIProcessMVPStability$' \
+  -count=1 ./...
+```
 
 ## 5. 测试证据
 

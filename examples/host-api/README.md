@@ -38,6 +38,26 @@ followed by HTTP requeue, and fail-closed handling of an unregistered tool.
 All three must report `PASS`. A `SKIP` means the environment is blocked and is
 not a successful MVP acceptance result.
 
+## Single-host stability gate
+
+The stability gate targets an Apple M1 Pro with 10 CPU cores, 16 GiB RAM, and
+macOS 26.5.1. It runs three waves of 50 queued workflows with 10 concurrent
+HTTP submitters, performs OIDC final approval, restarts the real Host process,
+and checks SQLite convergence plus RSS/file-descriptor bounds:
+
+```bash
+go test -v -tags hostapisystemsmoke \
+  -run '^TestHostAPIProcessMVPStability$' \
+  -count=1 ./...
+```
+
+This is a correctness and leak-regression gate for the current single-process,
+single-slot worker. It is not a production throughput SLO. A `SKIP` means the
+required macOS, Keychain, `ps`, or `lsof` environment is unavailable and is not
+a passing acceptance result. The test uses only loopback Provider/OIDC servers,
+synthetic credentials, temporary runtime state, and its exact `.smoke.`
+Keychain service/account pair.
+
 By default, the example creates a temporary runtime directory. Set
 `HOST_RUNTIME_HOME` to make workflow state, agent run audit, artifacts, and
 llmkit audit survive process restarts:
@@ -209,9 +229,13 @@ errors, and timestamps. Manual requeues are returned as
 `POST /workflows` accepts optional `run_mode`. `sync` is the default and runs
 the workflow during the HTTP request. `queued` is an in-process proof: it writes
 the input artifact and pending workflow, returns immediately, then a background
-worker loop claims a `workflowkit.QueueLeaseStore` lease, advances the workflow
-until `waiting_approval` or terminal, extends the lease while the workflow is
-running, and releases the lease. The CLI starts the worker loop on boot, so
+worker loop claims a `workflowkit.QueueLeaseStore` lease. Each Server has one
+execution slot: create and requeue only send a bounded wake signal, and the
+worker drains SQLite serially until no runnable workflow remains. It advances
+each workflow until `waiting_approval` or terminal, extends the lease while the
+workflow is running, and releases the lease. `StartQueuedWorker` starts at most
+one loop during a Server lifetime. Without that call, queued workflows remain
+`pending`; the CLI calls it on boot, so
 restarting with the same `HOST_RUNTIME_HOME` can recover pending or
 expired-lease workflows. It is still not a distributed worker model; worker
 crash supervision and multi-worker scheduling are intentionally not implemented.

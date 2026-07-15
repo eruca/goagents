@@ -48,3 +48,16 @@ loopback test providers, synthetic credentials, isolated temporary runtime
 state, and separate `.smoke.` Keychain service/account pairs for its three
 scenarios. Each scenario removes only its exact pair.
 The suite never accesses the production-default Keychain item.
+
+The longer single-host stability gate runs three waves of 50 queued workflows,
+with 10 concurrent HTTP submitters and a real Host process restart:
+
+```bash
+go test -v -tags hostapisystemsmoke \
+  -run '^TestHostAPIProcessMVPStability$' \
+  -count=1 ./...
+```
+
+This target-specific gate is documented in the Host API README. It checks the
+current single-slot worker for convergence and resource growth; it is not a
+production throughput SLO. A `SKIP` is not a passing acceptance result.

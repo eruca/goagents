@@ -2,7 +2,7 @@
 
 **日期：** 2026-07-15
 
-**状态：** 已批准，待实现
+**状态：** 已实现并验收
 
 ## 1. 决策摘要
 
@@ -183,3 +183,25 @@ git diff --check
 - 生产压测工具、dashboard、pprof endpoint 或长期遥测；
 - 超过 150 个 workflow 的容量承诺；
 - 为满足阈值硬编码 workflow ID、sleep 或 Provider 响应。
+
+## 11. 实现与稳定性观测
+
+实现提交：
+
+- `a8c4130`：queued create/requeue 改为有界唤醒，`StartQueuedWorker` 每个 Server 只启动
+  一个执行槽；默认回归记录旧实现最大活跃执行数为 14，修复后为 1；
+- `438fe30`：增加真实进程 3×50 稳定性门禁、OIDC final approval、同 runtime home 重启、
+  Provider/AgentRun/route 唯一性检查、SQLite lease 核对和 `ps`/`lsof` 资源采样。
+
+2026-07-15 在目标机器连续执行两次稳定性门禁，均为 PASS 且无 SKIP：
+
+- 三个正式波次的 submit p95 为 9.87–13.91ms；
+- waiting-approval 收敛为 1.19–1.38s；
+- approve p95 为 34.08–198.02ms，approval-to-success 收敛为 139.64–329.88ms；
+- 暖机 RSS 为 25.3–27.7MB，正式波次 RSS 为 32.8–35.5MB；
+- 暖机 FD 为 13，三个正式波次均为 14，第二轮未继续增长；
+- 150 个正式 workflow 均 succeeded，Provider 请求总数与 2 个暖机加 150 个正式
+  workflow 完全一致，worker/heartbeat error 为 0，最终 lease 全部清空。
+
+上述数值是本机 MVP 回归证据，不是生产 SLO。Host 默认测试、race、默认/带标签 vet、
+两个带标签真实进程门禁和 `scripts/verify-all.sh` 均已通过。
