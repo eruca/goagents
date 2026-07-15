@@ -2,7 +2,9 @@
 
 **日期：** 2026-07-14
 
-**状态：** 待评审
+**状态：** 已验收（2026-07-15）
+
+**最终记录：** [2026-07-15-mvp-final-acceptance.md](2026-07-15-mvp-final-acceptance.md)
 
 ## 1. 决策摘要
 
@@ -90,6 +92,23 @@ git diff --check
 
 endpoint、模型名和凭证来自进程环境或本机安全存储，不写入仓库。若没有可用 provider，
 该组状态为 `blocked`，不能用 fake provider 代替并宣称完成。
+
+可复跑门禁：
+
+```bash
+cd examples/host-api
+OPENAI_COMPAT_BASE_URL=... \
+OPENAI_COMPAT_MODEL=... \
+OPENAI_COMPAT_API_KEY=... \
+go test -v -tags provideracceptance \
+  -run '^TestRealProviderMVPAcceptance$' \
+  -count=1 ./...
+```
+
+成功路径只记录 Provider 类型、配置的模型标识和子测试状态；失败诊断只包含非敏感的
+工具元数据与稳定错误类型/class/code。不记录 endpoint、凭证、Prompt、模型正文、随机
+observation nonce 或原始 Provider 错误。缺少配置时 `SKIP`，在验收台账中仍按
+`blocked` 处理。
 
 ### 4.3 Host 黑盒闭环
 

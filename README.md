@@ -49,6 +49,11 @@ state, and separate `.smoke.` Keychain service/account pairs for its three
 scenarios. Each scenario removes only its exact pair.
 The suite never accesses the production-default Keychain item.
 
+The Host API README also documents a separately tagged real
+OpenAI-compatible Provider gate. That gate requires caller-supplied local
+credentials; a missing configuration is blocked, not replaced by a fake
+Provider.
+
 The longer single-host stability gate runs three waves of 50 queued workflows,
 with 10 concurrent HTTP submitters and a real Host process restart:
 
@@ -61,3 +66,6 @@ go test -v -tags hostapisystemsmoke \
 This target-specific gate is documented in the Host API README. It checks the
 current single-slot worker for convergence and resource growth; it is not a
 production throughput SLO. A `SKIP` is not a passing acceptance result.
+
+The current GO decision, accepted P2 item, and operating limitations are
+recorded in the [MVP final acceptance record](docs/superpowers/specs/2026-07-15-mvp-final-acceptance.md).
