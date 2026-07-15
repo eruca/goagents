@@ -38,6 +38,31 @@ followed by HTTP requeue, and fail-closed handling of an unregistered tool.
 All three must report `PASS`. A `SKIP` means the environment is blocked and is
 not a successful MVP acceptance result.
 
+## Real Provider acceptance
+
+The external Provider gate is separate from the deterministic local smoke. It
+uses a caller-supplied OpenAI-compatible endpoint and verifies a text response,
+one typed-tool observation round trip, structured-output success, fail-closed
+schema validation, and stable authentication/timeout error classification:
+
+```bash
+export OPENAI_COMPAT_BASE_URL=https://provider.example/v1
+export OPENAI_COMPAT_MODEL=provider-model
+export OPENAI_COMPAT_API_KEY=... # supply through the local shell or secret store
+
+go test -v -tags provideracceptance \
+  -run '^TestRealProviderMVPAcceptance$' \
+  -count=1 ./...
+```
+
+On success, the test logs only `provider=openai_compatible`, the configured
+model identifier, and subtest status. Failure diagnostics are limited to
+non-sensitive tool metadata and stable error type/class/code. It does not log
+the endpoint, credential, prompt, model response, random observation nonce, or
+raw Provider error. Missing configuration produces `SKIP`, which is an
+environment blocker rather than a passing acceptance result. The deliberately
+invalid credential used by the negative subtest is a fixed synthetic value.
+
 ## Single-host stability gate
 
 The stability gate targets an Apple M1 Pro with 10 CPU cores, 16 GiB RAM, and
@@ -65,6 +90,16 @@ required macOS, Keychain, `ps`, or `lsof` environment is unavailable and is not
 a passing acceptance result. The test uses only loopback Provider/OIDC servers,
 synthetic credentials, temporary runtime state, and its exact `.smoke.`
 Keychain service/account pair.
+
+## Shutdown boundary
+
+The example process does not yet implement signal-aware draining. Stop it only
+after request handling is quiescent and the queued worker has remained idle;
+SQLite leases recover interrupted workflows, but they cannot make an external
+side effect and its local checkpoint one atomic transaction. Irreversible write
+tools must use an idempotent external API or deduplicate by stable ToolCallID.
+An arbitrary `SIGKILL` during that commit window is outside the MVP's
+exactly-once guarantee.
 
 By default, the example creates a temporary runtime directory. Set
 `HOST_RUNTIME_HOME` to make workflow state, agent run audit, artifacts, and
