@@ -10,7 +10,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -606,6 +608,106 @@ func TestHostAPIQueuedWorkerStatusTracksCompletedRun(t *testing.T) {
 	}
 }
 
+func TestHostAPIQueuedWorkerUsesSingleExecutionSlot(t *testing.T) {
+	testHostAPIQueuedWorkerSingleExecutionSlot(t, 1)
+}
+
+func TestHostAPIQueuedWorkerStartsOnce(t *testing.T) {
+	testHostAPIQueuedWorkerSingleExecutionSlot(t, 2)
+}
+
+func testHostAPIQueuedWorkerSingleExecutionSlot(t *testing.T, starts int) {
+	t.Helper()
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		closeStoreIfPossible(t, server.workflows)
+		closeStoreIfPossible(t, server.runs)
+	})
+
+	const workflowCount = 20
+	release := make(chan struct{})
+	step := newSingleSlotStep(release, workflowCount)
+	server.executor = workflowkit.NewExecutor(server.workflows, []workflowkit.Step{step})
+
+	baselineGoroutines := runtime.NumGoroutine()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	for range starts {
+		server.StartQueuedWorker(ctx)
+	}
+
+	handler := server.Handler()
+	errors := make(chan error, workflowCount)
+	var requests sync.WaitGroup
+	for index := range workflowCount {
+		workflowID := fmt.Sprintf("wf-single-slot-%02d", index)
+		requests.Add(1)
+		go func() {
+			defer requests.Done()
+			errors <- postQueuedWorkflow(handler, workflowID)
+		}()
+	}
+	requests.Wait()
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	select {
+	case <-step.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("queued worker did not start the first workflow")
+	}
+	select {
+	case <-step.started:
+	case <-time.After(500 * time.Millisecond):
+	}
+	close(release)
+
+	for index := range workflowCount {
+		workflowID := fmt.Sprintf("wf-single-slot-%02d", index)
+		waitForWorkflowStatus(t, handler, workflowID, workflowkit.StatusWaitingApproval)
+		waitForWorkflowLeaseCleared(t, server.workflows, workflowID)
+	}
+
+	maxActive, counts := step.snapshot()
+	if maxActive != 1 {
+		t.Fatalf("maximum active queued workflows = %d, want 1", maxActive)
+	}
+	for index := range workflowCount {
+		workflowID := fmt.Sprintf("wf-single-slot-%02d", index)
+		if counts[workflowID] != 1 {
+			t.Fatalf("workflow %s execution count = %d, want 1", workflowID, counts[workflowID])
+		}
+	}
+
+	cancel()
+	deadline := time.Now().Add(2 * time.Second)
+	for runtime.NumGoroutine() > baselineGoroutines+5 && time.Now().Before(deadline) {
+		runtime.Gosched()
+	}
+	if got := runtime.NumGoroutine(); got > baselineGoroutines+5 {
+		t.Fatalf("goroutines after worker cancellation = %d, want <= %d", got, baselineGoroutines+5)
+	}
+}
+
+func postQueuedWorkflow(handler http.Handler, workflowID string) error {
+	body := fmt.Sprintf(`{"id":%q,"input":"single-slot regression","run_mode":"queued"}`, workflowID)
+	request := httptest.NewRequest(http.MethodPost, "/workflows", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted {
+		return fmt.Errorf("POST workflow %s status = %d, want 202; body=%s", workflowID, response.Code, response.Body.String())
+	}
+	return nil
+}
+
 func TestHostAPIQueuedWorkerExtendsLeaseWhileWorkflowRuns(t *testing.T) {
 	t.Setenv("HOST_API_QUEUED_LEASE_DURATION", "40ms")
 
@@ -616,6 +718,9 @@ func TestHostAPIQueuedWorkerExtendsLeaseWhileWorkflowRuns(t *testing.T) {
 	server.executor = workflowkit.NewExecutor(server.workflows, []workflowkit.Step{
 		slowApprovalStep{delay: 500 * time.Millisecond},
 	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	server.StartQueuedWorker(ctx)
 
 	queued := doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]string{
 		"id":       "wf-worker-heartbeat",
@@ -1325,6 +1430,9 @@ func TestHostAPIRunModeSyncAndQueuedSemantics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewServer returned error: %v", err)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	server.StartQueuedWorker(ctx)
 
 	syncRun := doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]string{
 		"id":       "wf-sync",
@@ -1664,6 +1772,67 @@ func waitForQueuedWorkerStatus(t *testing.T, handler http.Handler, accept func(q
 
 type slowApprovalStep struct {
 	delay time.Duration
+}
+
+type singleSlotStep struct {
+	mu        sync.Mutex
+	active    int
+	maxActive int
+	counts    map[string]int
+	started   chan struct{}
+	release   <-chan struct{}
+}
+
+func newSingleSlotStep(release <-chan struct{}, capacity int) *singleSlotStep {
+	return &singleSlotStep{
+		counts:  make(map[string]int),
+		started: make(chan struct{}, capacity),
+		release: release,
+	}
+}
+
+func (s *singleSlotStep) Name() string {
+	return "single_slot"
+}
+
+func (s *singleSlotStep) Run(ctx context.Context, run workflowkit.WorkflowRun) (workflowkit.StepResult, error) {
+	s.mu.Lock()
+	s.active++
+	if s.active > s.maxActive {
+		s.maxActive = s.active
+	}
+	s.counts[run.ID]++
+	s.mu.Unlock()
+
+	s.started <- struct{}{}
+	select {
+	case <-ctx.Done():
+		s.finish()
+		return workflowkit.StepResult{}, ctx.Err()
+	case <-s.release:
+	}
+	s.finish()
+	return workflowkit.StepResult{
+		Status:        workflowkit.StatusWaitingApproval,
+		ApprovalRef:   "approval:" + run.ID,
+		WaitingReason: "single-slot test completed",
+	}, nil
+}
+
+func (s *singleSlotStep) finish() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.active--
+}
+
+func (s *singleSlotStep) snapshot() (int, map[string]int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	counts := make(map[string]int, len(s.counts))
+	for id, count := range s.counts {
+		counts[id] = count
+	}
+	return s.maxActive, counts
 }
 
 func (s slowApprovalStep) Name() string {

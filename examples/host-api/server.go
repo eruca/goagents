@@ -69,6 +69,8 @@ type Server struct {
 	skillGateContext        skillkit.GateContext
 	worker                  queuedWorkerStatus
 	workerCfg               queuedWorkerConfig
+	workerWake              chan struct{}
+	workerStart             sync.Once
 	agentApprovalJanitorCfg agentApprovalJanitorConfig
 }
 
@@ -496,6 +498,7 @@ func NewServer(config Config) (*Server, error) {
 		models:                  models,
 		providers:               providers,
 		workerCfg:               workerCfg,
+		workerWake:              make(chan struct{}, 1),
 		agentApprovalJanitorCfg: agentApprovalJanitorCfg,
 		approvalAuthenticator:   config.ApprovalAuthenticator,
 		agentApprovals:          agentApprovals,
@@ -684,7 +687,7 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "workflow_error", err.Error())
 			return
 		}
-		s.runQueuedWorkflow(run)
+		s.signalQueuedWorker()
 		writeJSON(w, http.StatusAccepted, workflowToResponse(run, runMode))
 		return
 	}
@@ -732,20 +735,19 @@ func (s *Server) resolveSkillRefs(requested []workflowSkillRef) ([]map[string]st
 	return resolved, nil
 }
 
-func (s *Server) runQueuedWorkflow(run workflowkit.WorkflowRun) {
-	go func() {
-		if s.queue == nil {
-			_, _ = s.executor.Run(context.Background(), run)
-			return
-		}
-		_, _ = s.runOneQueuedWorkflow(context.Background())
-	}()
+func (s *Server) signalQueuedWorker() {
+	select {
+	case s.workerWake <- struct{}{}:
+	default:
+	}
 }
 
 // StartQueuedWorker starts the host-owned in-process worker loop for pending workflows.
 func (s *Server) StartQueuedWorker(ctx context.Context) {
-	s.worker.markStarted(queuedWorkerID)
-	go s.runQueuedWorkerLoop(ctx)
+	s.workerStart.Do(func() {
+		s.worker.markStarted(queuedWorkerID)
+		go s.runQueuedWorkerLoop(ctx)
+	})
 }
 
 func (s *Server) runQueuedWorkerLoop(ctx context.Context) {
@@ -762,6 +764,13 @@ func (s *Server) runQueuedWorkerLoop(ctx context.Context) {
 		case <-ctx.Done():
 			timer.Stop()
 			return
+		case <-s.workerWake:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
 		case <-timer.C:
 		}
 	}
@@ -895,7 +904,7 @@ func (s *Server) handleRequeueWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeWorkflowStoreError(w, err)
 		return
 	}
-	s.runQueuedWorkflow(run)
+	s.signalQueuedWorker()
 	writeJSON(w, http.StatusAccepted, workflowToResponse(run, RunModeQueued))
 }
 
