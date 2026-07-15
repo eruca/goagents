@@ -15,7 +15,8 @@
 - 不新增生产 HTTP endpoint、并发配置、数据库迁移、外部依赖或多 worker 调度。
 - queued 请求仍立即返回 `202 pending`；SQLite 是唯一队列事实源。
 - 单个提交最长 2 秒；每轮提交和审批各 10 秒；waiting/succeeded 收敛各 30 秒。
-- goroutine/FD 以暖机基线 `+5` 为硬门禁；RSS 以 `+64 MiB` 为宽松硬门禁。
+- 真实进程 FD 以暖机基线 `+5` 为硬门禁，RSS 以 `+64 MiB` 为宽松硬门禁；goroutine
+  由进程内取消回归独立验证。
 - 第二轮相对第一轮新增 FD 不超过 2，新增 RSS 不超过 32 MiB。
 - 不保存请求正文、token、API key、Keychain 内容、本机绝对信任路径或原始数据库。
 - 所有生产代码改动必须先有可观察的 RED；不得用 sleep、固定输出或特定 workflow ID 绕过真实行为。
@@ -418,11 +419,11 @@ cloud_allowed、无 tools。`runStabilityWave` 必须：
 6. 第二进程把 HTTP client timeout 设为 2 秒，通过 wave 4/count 1/concurrency 1 执行独立
    暖机 workflow、采集 baseline，再执行正式 wave 3；
 7. Provider 请求总数等于两个暖机 workflow 加 150 个正式 workflow；每个请求都使用合成 Authorization；
-8. 停止第二进程，通过 SQLite store 读取 150 个 workflow，断言 succeeded、lease owner 为空、lease until 为零；
-9. Host 输出不得包含合成 API key 或 OIDC bearer token；精确清理测试 Keychain pair。
+8. 停止第二进程，通过 SQLite read-only connection 读取 150 个 workflow，断言 succeeded、lease owner 为空、lease until 为零；
+9. 扫描两个进程的完整输出，不得包含合成 API key 或 OIDC bearer token；精确清理测试 Keychain pair。
 
-若复用 `workflowsql.Open` 做最终只读语义核对，只允许调用 `Get`，不得调用 `Save`、`Update`、
-`ClaimRunnable`、`ExtendLease` 或 `ReleaseLease`。
+最终核对必须使用 SQLite `mode=ro` 连接直接查询，不得调用会执行 migration 的 store opener，
+也不得执行任何写语句。
 
 持久化 helper 的完整签名和语义：
 
@@ -430,8 +431,9 @@ cloud_allowed、无 tools。`runStabilityWave` 必须：
 func assertStabilityRuntime(t *testing.T, runtimeHome string, ids []string)
 ```
 
-它打开 `$HOST_RUNTIME_HOME/workflow.db`，逐个 `Get`，断言 status 为 succeeded、lease owner 为空、
-lease until 为零，然后关闭 store。`ids` 只传正式 wave 1-3 的 150 个 ID，不包含 wave 0/4 暖机。
+它以 SQLite `mode=ro` 打开 `$HOST_RUNTIME_HOME/workflow.db`，逐行 `QueryRowContext`，断言
+status 为 succeeded、lease owner 为空、lease until 为零，然后关闭 read-only connection。
+`ids` 只传正式 wave 1-3 的 150 个 ID，不包含 wave 0/4 暖机。
 
 - [ ] **Step 6: 运行稳定性门禁并确认 GREEN**
 
@@ -439,6 +441,9 @@ Run:
 
 ```bash
 cd examples/host-api
+go test -tags hostapisystemsmoke \
+  -run '^(TestWaitForStabilityWorkflowsRejectsMatchAfterDeadline|TestOpenStabilityDatabaseReadOnly)$' \
+  -count=1 ./...
 go test -v -tags hostapisystemsmoke \
   -run '^TestHostAPIProcessMVPStability$' \
   -count=1 ./...
@@ -538,11 +543,11 @@ Run:
 
 ```bash
 go test -v -tags hostapisystemsmoke \
-  -run '^(TestHostAPIProcessMVPBlackBoxClosure|TestHostAPIProcessMVPStability)$' \
+  -run '^(TestHostAPIProcessMVPBlackBoxClosure|TestHostAPIProcessMVPStability|TestWaitForStabilityWorkflowsRejectsMatchAfterDeadline|TestOpenStabilityDatabaseReadOnly)$' \
   -count=1 ./...
 ```
 
-Expected: 黑盒三个子场景和稳定性三轮全部 PASS，无 SKIP。
+Expected: 两条快速负向回归、黑盒三个子场景和稳定性三轮全部 PASS，无 SKIP。
 
 - [ ] **Step 5: 运行完整 workspace 验证**
 

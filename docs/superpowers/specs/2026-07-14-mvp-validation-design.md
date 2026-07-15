@@ -136,10 +136,11 @@ endpoint、模型名和凭证来自进程环境或本机安全存储，不写入
 并在第二轮后重启真实 Host 进程。每个 workflow 完成 `pending -> waiting_approval -> OIDC
 approve -> succeeded`。
 
-硬门禁是：单请求 2 秒、每轮提交/审批各 10 秒、waiting/succeeded 收敛各 30 秒；空闲后
-goroutine/FD 不超过暖机基线 `+5`，RSS 不超过 `+64 MiB`，第二轮相对第一轮新增 FD 不超过
-2、RSS 不超过 32 MiB。该门禁只用于发现当前单进程、单执行槽 MVP 的卡死、重复执行、
-永久 lease 和持续资源增长，不是生产吞吐或容量承诺。
+硬门禁是：单请求 2 秒、每轮提交/审批各 10 秒、waiting/succeeded 收敛各 30 秒。真实进程
+每轮空闲后的 FD 不超过暖机基线 `+5`，RSS 不超过 `+64 MiB`，第二轮相对第一轮新增 FD
+不超过 2、RSS 不超过 32 MiB；进程内回归另行确认取消 worker 后 goroutine 回落。该门禁
+只用于发现当前单进程、单执行槽 MVP 的卡死、重复执行、永久 lease 和持续资源增长，不是
+生产吞吐或容量承诺。
 
 执行命令：
 

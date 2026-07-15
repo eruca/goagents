@@ -5,11 +5,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
+	"net/http/httptest"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -57,6 +60,52 @@ type stabilityWaveResult struct {
 	WaitingConvergence time.Duration
 	SuccessConvergence time.Duration
 	Resources          processResourceSnapshot
+}
+
+func TestWaitForStabilityWorkflowsRejectsMatchAfterDeadline(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		time.Sleep(20 * time.Millisecond)
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(workflowResponse{
+			ID:     "wf-late",
+			Status: string(workflowkit.StatusSucceeded),
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	process := &hostProcess{
+		baseURL: server.URL,
+		client:  &http.Client{Timeout: time.Second},
+	}
+	_, err := waitForStabilityWorkflows(
+		process,
+		[]string{"wf-late"},
+		workflowkit.StatusSucceeded,
+		5*time.Millisecond,
+	)
+	if err == nil {
+		t.Fatal("workflow matched after the convergence deadline, want timeout")
+	}
+}
+
+func TestOpenStabilityDatabaseReadOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "workflow.db")
+	store, err := workflowsql.Open(path)
+	if err != nil {
+		t.Fatalf("create workflow database: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close workflow database: %v", err)
+	}
+
+	database, err := openStabilityDatabaseReadOnly(path)
+	if err != nil {
+		t.Fatalf("open workflow database read-only: %v", err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`CREATE TABLE stability_write_must_fail (id TEXT)`); err == nil {
+		t.Fatal("write through stability database connection succeeded, want read-only failure")
+	}
 }
 
 func TestHostAPIProcessMVPStability(t *testing.T) {
@@ -122,6 +171,7 @@ func TestHostAPIProcessMVPStability(t *testing.T) {
 		}
 	}
 
+	stopHostProcess(t, second)
 	processOutput := first.output.String() + second.output.String()
 	if strings.Contains(processOutput, mvpProviderAPIKey) {
 		t.Fatal("host process output leaked the synthetic provider key")
@@ -129,7 +179,6 @@ func TestHostAPIProcessMVPStability(t *testing.T) {
 	if strings.Contains(processOutput, token) {
 		t.Fatal("host process output leaked the OIDC bearer token")
 	}
-	stopHostProcess(t, second)
 	assertStabilityRuntime(t, runtimeHome, formalIDs)
 	cleanupKeychain()
 }
@@ -281,13 +330,17 @@ func runStabilityWave(
 }
 
 func callProcessJSON[T any](process *hostProcess, method, path string, body any, authorization string) stabilityCall[T] {
+	return callProcessJSONWithContext[T](context.Background(), process, method, path, body, authorization)
+}
+
+func callProcessJSONWithContext[T any](ctx context.Context, process *hostProcess, method, path string, body any, authorization string) stabilityCall[T] {
 	started := time.Now()
 	var result T
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return stabilityCall[T]{Duration: time.Since(started), Err: fmt.Errorf("marshal request: %w", err)}
 	}
-	request, err := http.NewRequest(method, process.baseURL+path, bytes.NewReader(payload))
+	request, err := http.NewRequestWithContext(ctx, method, process.baseURL+path, bytes.NewReader(payload))
 	if err != nil {
 		return stabilityCall[T]{Duration: time.Since(started), Err: fmt.Errorf("build request: %w", err)}
 	}
@@ -341,16 +394,23 @@ func waitForStabilityWorkflows(
 	want workflowkit.Status,
 	timeout time.Duration,
 ) (map[string]workflowResponse, error) {
-	deadline := time.Now().Add(timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 	matched := make(map[string]workflowResponse, len(ids))
 	lastStatus := make(map[string]string, len(ids))
-	for time.Now().Before(deadline) {
+	for ctx.Err() == nil {
 		for _, id := range ids {
+			if ctx.Err() != nil {
+				break
+			}
 			if _, ok := matched[id]; ok {
 				continue
 			}
-			call := callProcessJSON[workflowResponse](process, http.MethodGet, "/workflows/"+id, nil, "")
+			call := callProcessJSONWithContext[workflowResponse](ctx, process, http.MethodGet, "/workflows/"+id, nil, "")
 			if call.Err != nil {
+				if ctx.Err() != nil {
+					break
+				}
 				return nil, fmt.Errorf("GET %s: %w", id, call.Err)
 			}
 			if call.Status != http.StatusOK {
@@ -365,10 +425,13 @@ func waitForStabilityWorkflows(
 				return nil, fmt.Errorf("workflow %s reached terminal status %s while waiting for %s", id, call.Value.Status, want)
 			}
 		}
-		if len(matched) == len(ids) {
+		if len(matched) == len(ids) && ctx.Err() == nil {
 			return matched, nil
 		}
-		time.Sleep(25 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+		case <-time.After(25 * time.Millisecond):
+		}
 	}
 	missing := make([]string, 0, len(ids)-len(matched))
 	for _, id := range ids {
@@ -439,12 +502,17 @@ func requireStabilityResourceTools(t *testing.T) {
 			t.Skipf("MVP stability requires %s: %v", command, err)
 		}
 	}
+	if _, err := sampleProcessResources(os.Getpid()); err != nil {
+		t.Skipf("MVP stability cannot sample process resources in this environment: %v", err)
+	}
 }
 
 func sampleProcessResources(pid int) (processResourceSnapshot, error) {
-	psOutput, err := exec.Command("ps", "-o", "rss=", "-p", strconv.Itoa(pid)).Output()
+	psContext, cancelPS := context.WithTimeout(context.Background(), stabilityRequestTimeout)
+	psOutput, err := exec.CommandContext(psContext, "ps", "-o", "rss=", "-p", strconv.Itoa(pid)).CombinedOutput()
+	cancelPS()
 	if err != nil {
-		return processResourceSnapshot{}, fmt.Errorf("read RSS: %w", err)
+		return processResourceSnapshot{}, fmt.Errorf("read RSS: %w: %s", err, strings.TrimSpace(string(psOutput)))
 	}
 	rssKiB, err := strconv.ParseInt(strings.TrimSpace(string(psOutput)), 10, 64)
 	if err != nil {
@@ -453,7 +521,9 @@ func sampleProcessResources(pid int) (processResourceSnapshot, error) {
 	if rssKiB <= 0 {
 		return processResourceSnapshot{}, fmt.Errorf("RSS %d KiB must be positive", rssKiB)
 	}
-	lsofOutput, err := exec.Command("lsof", "-nP", "-a", "-p", strconv.Itoa(pid), "-Fn").CombinedOutput()
+	lsofContext, cancelLSOF := context.WithTimeout(context.Background(), stabilityRequestTimeout)
+	lsofOutput, err := exec.CommandContext(lsofContext, "lsof", "-nP", "-a", "-p", strconv.Itoa(pid), "-Fn").CombinedOutput()
+	cancelLSOF()
 	if err != nil {
 		return processResourceSnapshot{}, fmt.Errorf("read file descriptors: %w: %s", err, strings.TrimSpace(string(lsofOutput)))
 	}
@@ -467,6 +537,19 @@ func sampleProcessResources(pid int) (processResourceSnapshot, error) {
 		return processResourceSnapshot{}, fmt.Errorf("lsof returned no file descriptors for pid %d", pid)
 	}
 	return processResourceSnapshot{RSSBytes: rssKiB * 1024, FileDescriptors: fileDescriptors}, nil
+}
+
+func openStabilityDatabaseReadOnly(path string) (*sql.DB, error) {
+	database, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?mode=ro")
+	if err != nil {
+		return nil, err
+	}
+	database.SetMaxOpenConns(1)
+	if err := database.PingContext(context.Background()); err != nil {
+		_ = database.Close()
+		return nil, err
+	}
+	return database, nil
 }
 
 func assertProcessResourceBounds(t *testing.T, label string, baseline, current processResourceSnapshot) {
@@ -495,18 +578,31 @@ func assertSecondWaveResourceGrowth(t *testing.T, first, second processResourceS
 
 func assertStabilityRuntime(t *testing.T, runtimeHome string, ids []string) {
 	t.Helper()
-	workflows, err := workflowsql.Open(filepath.Join(runtimeHome, "workflow.db"))
+	database, err := openStabilityDatabaseReadOnly(filepath.Join(runtimeHome, "workflow.db"))
 	if err != nil {
-		t.Fatalf("open stability workflow store: %v", err)
+		t.Fatalf("open stability workflow database read-only: %v", err)
 	}
-	defer workflows.Close()
+	defer database.Close()
 	for _, id := range ids {
-		run, err := workflows.Get(context.Background(), id)
+		var status string
+		var leaseOwner string
+		var leaseUntil time.Time
+		err := database.QueryRowContext(context.Background(), `
+SELECT status, lease_owner, lease_until
+FROM workflow_runs
+WHERE id = ?
+`, id).Scan(&status, &leaseOwner, &leaseUntil)
 		if err != nil {
 			t.Fatalf("read persisted stability workflow %s: %v", id, err)
 		}
-		if run.Status != workflowkit.StatusSucceeded || run.LeaseOwner != "" || !run.LeaseUntil.IsZero() {
-			t.Fatalf("persisted stability workflow %s=%+v, want succeeded with cleared lease", id, run)
+		if status != string(workflowkit.StatusSucceeded) || leaseOwner != "" || !leaseUntil.IsZero() {
+			t.Fatalf(
+				"persisted stability workflow %s status=%s lease_owner=%q lease_until=%s, want succeeded with cleared lease",
+				id,
+				status,
+				leaseOwner,
+				leaseUntil,
+			)
 		}
 	}
 }

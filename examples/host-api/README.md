@@ -46,10 +46,18 @@ HTTP submitters, performs OIDC final approval, restarts the real Host process,
 and checks SQLite convergence plus RSS/file-descriptor bounds:
 
 ```bash
+go test -tags hostapisystemsmoke \
+  -run '^(TestWaitForStabilityWorkflowsRejectsMatchAfterDeadline|TestOpenStabilityDatabaseReadOnly)$' \
+  -count=1 ./...
+
 go test -v -tags hostapisystemsmoke \
   -run '^TestHostAPIProcessMVPStability$' \
   -count=1 ./...
 ```
+
+The first command is a fast negative-regression gate for wall-clock convergence
+deadlines and the final SQLite read-only connection. The second command runs the
+full process workload.
 
 This is a correctness and leak-regression gate for the current single-process,
 single-slot worker. It is not a production throughput SLO. A `SKIP` means the
