@@ -289,6 +289,13 @@ if [[ -f "$ROOT/goagent/.github/workflows/ci.yml" ]]; then
   report_error "nested goagent GitHub Actions workflow is not active in the monorepo"
 fi
 
+if [[ ! -f "$ROOT/LICENSE" ]]; then
+  report_error "missing repository-root LICENSE"
+elif ! grep -Eq '^[[:space:]]*Apache License[[:space:]]*$' "$ROOT/LICENSE" ||
+  ! grep -Eq '^[[:space:]]*Version 2\.0, January 2004[[:space:]]*$' "$ROOT/LICENSE"; then
+  report_error "LICENSE is not the Apache License 2.0 text"
+fi
+
 if (( failed != 0 )); then
   exit 1
 fi

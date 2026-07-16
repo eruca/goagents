@@ -39,8 +39,8 @@ bash ./scripts/verify-release-layout.sh
 ```
 
 The technical layout is separate from public publication. A canonical Git
-remote, a root license, actual module tags, and a clean `GOWORK=off` consumer
-test are still required before any public release.
+remote, actual module tags, and a clean `GOWORK=off` consumer test are still
+required before any public release.
 
 ## Host API MVP
 
@@ -83,3 +83,7 @@ production throughput SLO. A `SKIP` is not a passing acceptance result.
 
 The current GO decision, accepted P2 item, and operating limitations are
 recorded in the [MVP final acceptance record](docs/superpowers/specs/2026-07-15-mvp-final-acceptance.md).
+
+## License
+
+GoAgents is licensed under the [Apache License 2.0](LICENSE).
