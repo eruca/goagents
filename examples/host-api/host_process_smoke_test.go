@@ -102,13 +102,32 @@ type hostProcess struct {
 }
 
 type lockedBuffer struct {
-	mu sync.Mutex
-	b  bytes.Buffer
+	mu         sync.Mutex
+	b          bytes.Buffer
+	redactions []string
 }
 
 type lockedString struct {
 	mu    sync.Mutex
 	value string
+}
+
+func TestLockedBufferRedactsSensitiveValues(t *testing.T) {
+	var buffer lockedBuffer
+	buffer.SetRedactions("provider-key", "https://provider.example/v1")
+	if _, err := buffer.Write([]byte("key=provider-key endpoint=https://provider.example/v1")); err != nil {
+		t.Fatalf("write locked buffer: %v", err)
+	}
+	if !buffer.ContainsSensitive("provider-key") || !buffer.ContainsSensitive("https://provider.example/v1") {
+		t.Fatal("locked buffer did not retain sensitive values for leak detection")
+	}
+	got := buffer.String()
+	if strings.Contains(got, "provider-key") || strings.Contains(got, "https://provider.example/v1") {
+		t.Fatalf("locked buffer returned unredacted sensitive output: %q", got)
+	}
+	if got != "key=[REDACTED] endpoint=[REDACTED]" {
+		t.Fatalf("locked buffer output = %q, want redacted placeholders", got)
+	}
 }
 
 func (s *lockedString) Set(value string) {
@@ -133,10 +152,30 @@ func (b *lockedBuffer) Write(value []byte) (int, error) {
 	return b.b.Write(value)
 }
 
+func (b *lockedBuffer) SetRedactions(values ...string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, value := range values {
+		if value != "" {
+			b.redactions = append(b.redactions, value)
+		}
+	}
+}
+
+func (b *lockedBuffer) ContainsSensitive(value string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return value != "" && strings.Contains(b.b.String(), value)
+}
+
 func (b *lockedBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.b.String()
+	value := b.b.String()
+	for _, sensitive := range b.redactions {
+		value = strings.ReplaceAll(value, sensitive, "[REDACTED]")
+	}
+	return value
 }
 
 func buildHostBinary(t *testing.T) string {
@@ -175,12 +214,18 @@ func startHostProcess(t *testing.T, binary, runtimeHome, issuer, keychainService
 
 func startHostProcessWithEnv(t *testing.T, binary, runtimeHome, issuer, keychainService, keyID string, extraEnvironment map[string]string) *hostProcess {
 	t.Helper()
+	return startHostProcessWithEnvAndRedactions(t, binary, runtimeHome, issuer, keychainService, keyID, extraEnvironment, nil)
+}
+
+func startHostProcessWithEnvAndRedactions(t *testing.T, binary, runtimeHome, issuer, keychainService, keyID string, extraEnvironment map[string]string, redactions []string) *hostProcess {
+	t.Helper()
 	address := freeLoopbackAddress(t)
 	process := &hostProcess{
 		baseURL: "http://" + address,
 		client:  &http.Client{Timeout: time.Second},
 		cmd:     exec.Command(binary),
 	}
+	process.output.SetRedactions(redactions...)
 	environment := make(map[string]string, len(extraEnvironment)+9)
 	for name, value := range extraEnvironment {
 		environment[name] = value

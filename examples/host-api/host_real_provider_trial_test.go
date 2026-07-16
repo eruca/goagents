@@ -7,10 +7,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/eruca/llmkit/llmkit"
 	"github.com/eruca/runkit"
 	"github.com/eruca/workflowkit"
 )
@@ -32,8 +34,14 @@ func TestHostAPIProcessRealProviderLocalTrial(t *testing.T) {
 		hostAPISkillRootEnv:     "",
 		"OPENAI_COMPAT_API_KEY": providerConfig.APIKey,
 	}
+	redactions := []string{
+		providerConfig.APIKey,
+		providerConfig.BaseURL,
+		strings.TrimRight(providerConfig.BaseURL, "/"),
+		token,
+	}
 
-	first := startHostProcessWithEnv(t, binary, runtimeHome, oidc.issuer, keychainService, localApprovalKeyID, environment)
+	first := startHostProcessWithEnvAndRedactions(t, binary, runtimeHome, oidc.issuer, keychainService, localApprovalKeyID, environment, redactions)
 	first.client.Timeout = 90 * time.Second
 	models, status := processJSON[modelsResponse](t, first, http.MethodGet, "/llmkit/models", nil, "")
 	if status != http.StatusOK || len(models.Models) != 1 || models.Models[0].Alias != realProviderTrialModelAlias || models.Models[0].Provider != "openai_compatible" {
@@ -50,15 +58,15 @@ func TestHostAPIProcessRealProviderLocalTrial(t *testing.T) {
 			"needs_reasoning": true,
 		},
 	}, "")
-	if status != http.StatusAccepted || created.Status != string(workflowkit.StatusWaitingApproval) || created.AgentApproval != nil || created.OutputRef == "" || created.AgentRunID == "" || created.ApprovalRef == "" {
+	if status != http.StatusAccepted || created.Status != string(workflowkit.StatusWaitingApproval) || created.AgentApproval != nil || created.InputRef == "" || created.OutputRef == "" || created.AgentRunID == "" || created.ApprovalRef == "" || created.WaitingReason == "" || !reflect.DeepEqual(created.Completed, []string{"ingest", "agent_review"}) {
 		t.Fatalf("create status=%d workflow=%#v, want persisted final approval wait", status, created)
 	}
 	run, status := processJSON[agentRunResponse](t, first, http.MethodGet, "/agent-runs/"+created.AgentRunID, nil, "")
-	if status != http.StatusOK || run.Status != string(runkit.StatusSucceeded) || run.Summary.LLMCalls != 1 || run.Summary.ToolCalls != 0 {
+	if status != http.StatusOK || !realProviderTrialRunMatches(run, created, created.OutputRef) {
 		t.Fatalf("agent run status=%d run=%#v, want one successful real Provider call", status, run)
 	}
 	routes, status := processJSON[llmRoutesResponse](t, first, http.MethodGet, "/workflows/"+created.ID+"/llm-routes", nil, "")
-	if status != http.StatusOK || !realProviderTrialRouteSucceeded(routes.Routes) {
+	if status != http.StatusOK || !realProviderTrialRouteMatches(routes.Routes, false) {
 		t.Fatalf("routes status=%d routes=%#v, want successful selected real Provider route", status, routes.Routes)
 	}
 
@@ -69,50 +77,107 @@ func TestHostAPIProcessRealProviderLocalTrial(t *testing.T) {
 		t.Fatalf("invalid approval status=%d, want 401", invalidStatus)
 	}
 	unchanged, status := processJSON[workflowResponse](t, first, http.MethodGet, "/workflows/"+created.ID, nil, "")
-	if status != http.StatusOK || unchanged.Status != created.Status || unchanged.OutputRef != created.OutputRef || unchanged.AgentRunID != created.AgentRunID || unchanged.ApprovalRef != created.ApprovalRef {
+	if status != http.StatusOK {
 		t.Fatalf("workflow after invalid approval status=%d workflow=%#v, want unchanged approval wait", status, unchanged)
 	}
+	assertRealProviderTrialWorkflowEqual(t, "invalid approval", created, unchanged)
 	stopHostProcess(t, first)
 
-	second := startHostProcessWithEnv(t, binary, runtimeHome, oidc.issuer, keychainService, localApprovalKeyID, environment)
+	second := startHostProcessWithEnvAndRedactions(t, binary, runtimeHome, oidc.issuer, keychainService, localApprovalKeyID, environment, redactions)
 	second.client.Timeout = 30 * time.Second
 	persisted, status := processJSON[workflowResponse](t, second, http.MethodGet, "/workflows/"+created.ID, nil, "")
-	if status != http.StatusOK || persisted.Status != created.Status || persisted.OutputRef != created.OutputRef || persisted.AgentRunID != created.AgentRunID || persisted.ApprovalRef != created.ApprovalRef {
+	if status != http.StatusOK {
 		t.Fatalf("workflow after first restart status=%d workflow=%#v, want persisted approval boundary", status, persisted)
 	}
+	assertRealProviderTrialWorkflowEqual(t, "first restart", created, persisted)
 	completed, status := processJSON[workflowResponse](t, second, http.MethodPost, "/workflows/"+created.ID+"/approve", map[string]any{
 		"note": "real Provider local trial accepted",
 	}, "Bearer "+token)
-	if status != http.StatusOK || completed.Status != string(workflowkit.StatusSucceeded) || completed.OutputRef == "" || completed.OutputRef == created.OutputRef || completed.AgentRunID != created.AgentRunID {
+	if status != http.StatusOK || completed.Status != string(workflowkit.StatusSucceeded) || completed.InputRef != created.InputRef || completed.OutputRef == "" || completed.OutputRef == created.OutputRef || completed.AgentRunID != created.AgentRunID || completed.AuditRef == "" || completed.ApprovalRef != created.ApprovalRef || !reflect.DeepEqual(completed.Completed, []string{"ingest", "agent_review", "finalize"}) {
 		t.Fatalf("final approval status=%d workflow=%#v, want succeeded", status, completed)
 	}
 	stopHostProcess(t, second)
 
-	third := startHostProcessWithEnv(t, binary, runtimeHome, oidc.issuer, keychainService, localApprovalKeyID, environment)
+	third := startHostProcessWithEnvAndRedactions(t, binary, runtimeHome, oidc.issuer, keychainService, localApprovalKeyID, environment, redactions)
 	third.client.Timeout = 30 * time.Second
-	assertMVPCompletedWorkflow(t, third, completed, 0)
+	persistedCompleted, status := processJSON[workflowResponse](t, third, http.MethodGet, "/workflows/"+completed.ID, nil, "")
+	if status != http.StatusOK {
+		t.Fatalf("workflow after second restart status=%d workflow=%#v", status, persistedCompleted)
+	}
+	assertRealProviderTrialWorkflowEqual(t, "second restart", completed, persistedCompleted)
+	persistedRun, status := processJSON[agentRunResponse](t, third, http.MethodGet, "/agent-runs/"+created.AgentRunID, nil, "")
+	if status != http.StatusOK || !realProviderTrialRunMatches(persistedRun, created, created.OutputRef) {
+		t.Fatalf("agent run after second restart status=%d run=%#v", status, persistedRun)
+	}
+	persistedRoutes, status := processJSON[llmRoutesResponse](t, third, http.MethodGet, "/workflows/"+completed.ID+"/llm-routes", nil, "")
+	if status != http.StatusOK || !realProviderTrialRouteMatches(persistedRoutes.Routes, true) {
+		t.Fatalf("routes after second restart status=%d routes=%#v", status, persistedRoutes.Routes)
+	}
+	events, status := processJSON[workflowEventsResponse](t, third, http.MethodGet, "/workflows/"+completed.ID+"/events", nil, "")
+	if status != http.StatusOK || !realProviderTrialEventsMatch(events, created, completed) {
+		t.Fatalf("events after second restart status=%d events=%#v", status, events)
+	}
 	stopHostProcess(t, third)
 
-	processOutput := first.output.String() + second.output.String() + third.output.String()
-	for label, sensitive := range map[string]string{
-		"Provider API key":  providerConfig.APIKey,
-		"Provider endpoint": strings.TrimRight(providerConfig.BaseURL, "/"),
-		"OIDC bearer token": token,
+	for _, item := range []struct {
+		label string
+		value string
+	}{
+		{label: "Provider API key", value: providerConfig.APIKey},
+		{label: "Provider endpoint", value: providerConfig.BaseURL},
+		{label: "normalized Provider endpoint", value: strings.TrimRight(providerConfig.BaseURL, "/")},
+		{label: "OIDC bearer token", value: token},
 	} {
-		if strings.Contains(processOutput, sensitive) {
-			t.Fatalf("host process output leaked %s", label)
+		if first.output.ContainsSensitive(item.value) || second.output.ContainsSensitive(item.value) || third.output.ContainsSensitive(item.value) {
+			t.Fatalf("host process output leaked %s", item.label)
 		}
 	}
 	cleanupKeychain()
 }
 
-func realProviderTrialRouteSucceeded(routes []llmRouteResponse) bool {
-	for _, route := range routes {
-		if route.Selected && route.ModelAlias == realProviderTrialModelAlias && route.Provider == "openai_compatible" && route.Outcome != nil && route.Outcome.Success {
-			return true
-		}
+func assertRealProviderTrialWorkflowEqual(t *testing.T, phase string, expected, actual workflowResponse) {
+	t.Helper()
+	if !reflect.DeepEqual(actual, expected) {
+		t.Fatalf("workflow after %s = %#v, want %#v", phase, actual, expected)
 	}
-	return false
+}
+
+func realProviderTrialRunMatches(run agentRunResponse, workflow workflowResponse, contentRef string) bool {
+	return run.RunID == workflow.AgentRunID &&
+		run.WorkflowID == workflow.ID &&
+		run.Status == string(runkit.StatusSucceeded) &&
+		run.Summary.Status == runkit.StatusSucceeded &&
+		run.Summary.ContentRef == contentRef &&
+		run.Summary.AbortReason == "" &&
+		run.Summary.LLMCalls == 1 &&
+		run.Summary.ToolCalls == 0 &&
+		len(run.Summary.UsedTools) == 0
+}
+
+func realProviderTrialRouteMatches(routes []llmRouteResponse, wantHumanAccepted bool) bool {
+	if len(routes) != 1 {
+		return false
+	}
+	route := routes[0]
+	if !route.Selected || route.ModelAlias != realProviderTrialModelAlias || route.Provider != "openai_compatible" || route.Outcome == nil || !route.Outcome.Success {
+		return false
+	}
+	if !wantHumanAccepted {
+		return true
+	}
+	return route.Outcome.BusinessOutcome == string(llmkit.BusinessOutcomeSuccess) && route.Outcome.SuccessSignal == string(llmkit.SuccessSignalHumanAccepted)
+}
+
+func realProviderTrialEventsMatch(events workflowEventsResponse, created, completed workflowResponse) bool {
+	if events.WorkflowID != completed.ID || events.Status != string(workflowkit.StatusSucceeded) || events.RunMode != completed.RunMode || events.CurrentStep != "finalize" || !reflect.DeepEqual(events.Completed, completed.Completed) || len(events.Events) != 3 {
+		return false
+	}
+	ingest := events.Events[0]
+	agent := events.Events[1]
+	finalize := events.Events[2]
+	return ingest.Type == "step" && ingest.Name == "ingest" && ingest.Status == string(workflowkit.StatusSucceeded) && ingest.OutputRef == created.InputRef &&
+		agent.Type == "step" && agent.Name == "agent_review" && agent.Status == string(workflowkit.StatusWaitingApproval) && agent.OutputRef == created.OutputRef && agent.AgentRunID == created.AgentRunID && agent.ApprovalRef == created.ApprovalRef && agent.WaitingReason == created.WaitingReason &&
+		finalize.Type == "step" && finalize.Name == "finalize" && finalize.Status == string(workflowkit.StatusSucceeded) && finalize.OutputRef == completed.OutputRef
 }
 
 func writeHostRealProviderTrialConfig(t *testing.T, runtimeHome string, config realProviderConfig) {
