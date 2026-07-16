@@ -18,8 +18,8 @@ import (
 const realProviderTrialModelAlias = "qwen-local-trial"
 
 func TestHostAPIProcessRealProviderLocalTrial(t *testing.T) {
-	requireInteractiveLoginKeychain(t)
 	providerConfig := requireRealProviderConfig(t)
+	requireInteractiveLoginKeychain(t)
 	oidc := newOIDCTestProvider(t)
 	binary := buildHostBinary(t)
 	runtimeHome := t.TempDir()
@@ -69,7 +69,7 @@ func TestHostAPIProcessRealProviderLocalTrial(t *testing.T) {
 		t.Fatalf("invalid approval status=%d, want 401", invalidStatus)
 	}
 	unchanged, status := processJSON[workflowResponse](t, first, http.MethodGet, "/workflows/"+created.ID, nil, "")
-	if status != http.StatusOK || unchanged.Status != created.Status || unchanged.ApprovalRef != created.ApprovalRef {
+	if status != http.StatusOK || unchanged.Status != created.Status || unchanged.OutputRef != created.OutputRef || unchanged.AgentRunID != created.AgentRunID || unchanged.ApprovalRef != created.ApprovalRef {
 		t.Fatalf("workflow after invalid approval status=%d workflow=%#v, want unchanged approval wait", status, unchanged)
 	}
 	stopHostProcess(t, first)
@@ -96,7 +96,7 @@ func TestHostAPIProcessRealProviderLocalTrial(t *testing.T) {
 	processOutput := first.output.String() + second.output.String() + third.output.String()
 	for label, sensitive := range map[string]string{
 		"Provider API key":  providerConfig.APIKey,
-		"Provider endpoint": providerConfig.BaseURL,
+		"Provider endpoint": strings.TrimRight(providerConfig.BaseURL, "/"),
 		"OIDC bearer token": token,
 	} {
 		if strings.Contains(processOutput, sensitive) {
