@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.work
+          cache-dependency-path: |
+            **/go.sum
+            go.work.sum
+
+      - name: Verify release layout
+        run: bash ./scripts/verify-release-layout.sh
+
+      - name: Verify workspace
+        run: bash ./scripts/verify-all.sh
