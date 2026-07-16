@@ -17,7 +17,10 @@ import (
 	"github.com/eruca/workflowkit"
 )
 
-const realProviderTrialModelAlias = "qwen-local-trial"
+const (
+	realProviderTrialAccountAlias = "qwen-local-trial-account"
+	realProviderTrialModelAlias   = "qwen-local-trial"
+)
 
 func TestHostAPIProcessRealProviderLocalTrial(t *testing.T) {
 	providerConfig := requireRealProviderConfig(t)
@@ -66,7 +69,7 @@ func TestHostAPIProcessRealProviderLocalTrial(t *testing.T) {
 		t.Fatalf("agent run status=%d run=%#v, want one successful real Provider call", status, run)
 	}
 	routes, status := processJSON[llmRoutesResponse](t, first, http.MethodGet, "/workflows/"+created.ID+"/llm-routes", nil, "")
-	if status != http.StatusOK || !realProviderTrialRouteMatches(routes.Routes, false) {
+	if status != http.StatusOK || !realProviderTrialRoutesMatch(routes, created, false) {
 		t.Fatalf("routes status=%d routes=%#v, want successful selected real Provider route", status, routes.Routes)
 	}
 
@@ -81,6 +84,10 @@ func TestHostAPIProcessRealProviderLocalTrial(t *testing.T) {
 		t.Fatalf("workflow after invalid approval status=%d workflow=%#v, want unchanged approval wait", status, unchanged)
 	}
 	assertRealProviderTrialWorkflowEqual(t, "invalid approval", created, unchanged)
+	unchangedRoutes, status := processJSON[llmRoutesResponse](t, first, http.MethodGet, "/workflows/"+created.ID+"/llm-routes", nil, "")
+	if status != http.StatusOK || !realProviderTrialRoutesMatch(unchangedRoutes, created, false) {
+		t.Fatalf("routes after invalid approval status=%d routes=%#v, want no human acceptance outcome", status, unchangedRoutes.Routes)
+	}
 	stopHostProcess(t, first)
 
 	second := startHostProcessWithEnvAndRedactions(t, binary, runtimeHome, oidc.issuer, keychainService, localApprovalKeyID, environment, redactions)
@@ -93,7 +100,8 @@ func TestHostAPIProcessRealProviderLocalTrial(t *testing.T) {
 	completed, status := processJSON[workflowResponse](t, second, http.MethodPost, "/workflows/"+created.ID+"/approve", map[string]any{
 		"note": "real Provider local trial accepted",
 	}, "Bearer "+token)
-	if status != http.StatusOK || completed.Status != string(workflowkit.StatusSucceeded) || completed.InputRef != created.InputRef || completed.OutputRef == "" || completed.OutputRef == created.OutputRef || completed.AgentRunID != created.AgentRunID || completed.AuditRef == "" || completed.ApprovalRef != created.ApprovalRef || !reflect.DeepEqual(completed.Completed, []string{"ingest", "agent_review", "finalize"}) {
+	wantAuditRef := "audit:" + created.ID + ":approval"
+	if status != http.StatusOK || completed.Status != string(workflowkit.StatusSucceeded) || completed.InputRef != created.InputRef || completed.OutputRef == "" || completed.OutputRef == created.OutputRef || completed.AgentRunID != created.AgentRunID || completed.AuditRef != wantAuditRef || completed.ApprovalRef != created.ApprovalRef || !reflect.DeepEqual(completed.Completed, []string{"ingest", "agent_review", "finalize"}) {
 		t.Fatalf("final approval status=%d workflow=%#v, want succeeded", status, completed)
 	}
 	stopHostProcess(t, second)
@@ -110,7 +118,7 @@ func TestHostAPIProcessRealProviderLocalTrial(t *testing.T) {
 		t.Fatalf("agent run after second restart status=%d run=%#v", status, persistedRun)
 	}
 	persistedRoutes, status := processJSON[llmRoutesResponse](t, third, http.MethodGet, "/workflows/"+completed.ID+"/llm-routes", nil, "")
-	if status != http.StatusOK || !realProviderTrialRouteMatches(persistedRoutes.Routes, true) {
+	if status != http.StatusOK || !realProviderTrialRoutesMatch(persistedRoutes, completed, true) {
 		t.Fatalf("routes after second restart status=%d routes=%#v", status, persistedRoutes.Routes)
 	}
 	events, status := processJSON[workflowEventsResponse](t, third, http.MethodGet, "/workflows/"+completed.ID+"/events", nil, "")
@@ -154,16 +162,17 @@ func realProviderTrialRunMatches(run agentRunResponse, workflow workflowResponse
 		len(run.Summary.UsedTools) == 0
 }
 
-func realProviderTrialRouteMatches(routes []llmRouteResponse, wantHumanAccepted bool) bool {
-	if len(routes) != 1 {
+func realProviderTrialRoutesMatch(response llmRoutesResponse, workflow workflowResponse, wantHumanAccepted bool) bool {
+	if response.WorkflowID != workflow.ID || len(response.Routes) != 1 {
 		return false
 	}
-	route := routes[0]
-	if !route.Selected || route.ModelAlias != realProviderTrialModelAlias || route.Provider != "openai_compatible" || route.Outcome == nil || !route.Outcome.Success {
+	route := response.Routes[0]
+	wantRouteID := fmt.Sprintf("route:%s:%s:1", workflow.ID, workflow.AgentRunID)
+	if route.RouteID != wantRouteID || route.TaskID != workflow.ID || route.Attempt != 1 || route.AccountAlias != realProviderTrialAccountAlias || !route.Selected || route.ModelAlias != realProviderTrialModelAlias || route.Provider != "openai_compatible" || route.Outcome == nil || !route.Outcome.Success {
 		return false
 	}
 	if !wantHumanAccepted {
-		return true
+		return route.Outcome.BusinessOutcome == "" && route.Outcome.SuccessSignal == ""
 	}
 	return route.Outcome.BusinessOutcome == string(llmkit.BusinessOutcomeSuccess) && route.Outcome.SuccessSignal == string(llmkit.SuccessSignalHumanAccepted)
 }
@@ -177,7 +186,7 @@ func realProviderTrialEventsMatch(events workflowEventsResponse, created, comple
 	finalize := events.Events[2]
 	return ingest.Type == "step" && ingest.Name == "ingest" && ingest.Status == string(workflowkit.StatusSucceeded) && ingest.OutputRef == created.InputRef &&
 		agent.Type == "step" && agent.Name == "agent_review" && agent.Status == string(workflowkit.StatusWaitingApproval) && agent.OutputRef == created.OutputRef && agent.AgentRunID == created.AgentRunID && agent.ApprovalRef == created.ApprovalRef && agent.WaitingReason == created.WaitingReason &&
-		finalize.Type == "step" && finalize.Name == "finalize" && finalize.Status == string(workflowkit.StatusSucceeded) && finalize.OutputRef == completed.OutputRef
+		finalize.Type == "step" && finalize.Name == "finalize" && finalize.Status == string(workflowkit.StatusSucceeded) && finalize.OutputRef == completed.OutputRef && finalize.AuditRef == completed.AuditRef
 }
 
 func writeHostRealProviderTrialConfig(t *testing.T, runtimeHome string, config realProviderConfig) {
@@ -192,7 +201,7 @@ audit:
   route_events_file: route-events.jsonl
   outcomes_file: outcomes.jsonl
 accounts:
-  - alias: qwen-local-trial-account
+  - alias: %s
     provider: openai_compatible
     base_url: %q
     api_key_env: OPENAI_COMPAT_API_KEY
@@ -201,7 +210,7 @@ models:
   - alias: %s
     model: %q
     provider: openai_compatible
-    account_alias: qwen-local-trial-account
+    account_alias: %s
     capability_level: advanced
     supports_tools: true
     supports_json: true
@@ -215,7 +224,7 @@ routing:
     latency_requirement: normal
     failure_cost: high
     privacy_level: cloud_allowed
-`, strings.TrimRight(config.BaseURL, "/"), realProviderTrialModelAlias, config.Model)
+`, realProviderTrialAccountAlias, strings.TrimRight(config.BaseURL, "/"), realProviderTrialModelAlias, config.Model, realProviderTrialAccountAlias)
 	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte(strings.TrimSpace(content)+"\n"), 0o600); err != nil {
 		t.Fatalf("write real Provider trial llmkit config: %v", err)
 	}
