@@ -2,6 +2,8 @@
 
 Date: 2026-05-03
 
+Updated: 2026-07-16
+
 ## Judgment
 
 `workflowkit` is ready to enter `v0.1.0` preparation.
@@ -14,7 +16,7 @@ The first release should be scoped as a host-side workflow baseline:
 - step records
 - transient retry
 - memory store
-- SQLite store with schema version 1
+- SQLite store with schema version 2
 - optional `agentstep` adapter module
 - deterministic examples and E2E verification
 
@@ -53,16 +55,16 @@ Adjacent workspace checks for this source tree:
 
 Core module:
 
-- `github.com/eruca/workflowkit`
+- `github.com/eruca/goagents/workflowkit`
 
 Optional adapter module:
 
-- `github.com/eruca/workflowkit/agentstep`
+- `github.com/eruca/goagents/workflowkit/agentstep`
 
 Verification/example modules:
 
-- `github.com/eruca/workflowkit/examples/agent-approval`
-- `github.com/eruca/workflowkit/examples/ocr-review`
+- `github.com/eruca/goagents/workflowkit/examples/agent-approval`
+- `github.com/eruca/goagents/workflowkit/examples/ocr-review`
 
 The example modules are not required user-facing release artifacts.
 
@@ -72,13 +74,11 @@ There are no runtime or test blockers for the first release slice.
 
 Operational blockers before an actual public tag:
 
-- Decide where `workflowkit` will live as a git-tracked module. The current
-  workspace root `/Users/nick/VibeCoding/goagents` is not a git repository; only
-  `/Users/nick/VibeCoding/goagents/goagent` is currently git-tracked.
-- Decide whether `workflowkit` and `workflowkit/agentstep` receive matching
-  `v0.1.0` tags from the same repository snapshot.
-- Remove or replace local `replace` directives before publishing any consumer
-  module outside this workspace.
+- Create/configure the canonical `github.com/eruca/goagents` Git remote.
+- Select and add the repository root license.
+- Create `workflowkit/v0.1.0` and `workflowkit/agentstep/v0.1.0` from the same
+  reviewed repository snapshot.
+- Re-test a clean consumer with `GOWORK=off` after the tags exist.
 
 ## Acceptable Known Limitations
 
@@ -94,12 +94,11 @@ These are documented and do not block `v0.1.0`:
 
 ## Recommended Tag Sequence
 
-After moving or adding the module to the intended git repository:
+After the canonical remote and license are in place:
 
 1. Run `./scripts/verify-e2e.sh`.
 2. Run adjacent checks if releasing from this workspace.
-3. Tag the core module as `v0.1.0`.
-4. Tag `workflowkit/agentstep` as `v0.1.0` if releasing the adapter in the same
-   snapshot.
+3. Tag the core module as `workflowkit/v0.1.0`.
+4. Tag the adapter as `workflowkit/agentstep/v0.1.0` from the same snapshot.
 5. Re-test a clean consumer module with released versions instead of local
    replace directives.

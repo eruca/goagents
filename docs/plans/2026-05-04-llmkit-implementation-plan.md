@@ -4,9 +4,9 @@
 
 **Goal:** Add a new isolated `llmkit` module that routes LLM calls by task profile, model capability, cost, latency, concurrency, and historical failures while keeping `goagent` core unchanged.
 
-**Architecture:** `llmkit` is a sibling module in the `goagents` workspace. Its core package owns configuration, task profiles, route decisions, audit records, and deterministic routing. A separate adapter package exposes the router as `github.com/eruca/goagent/ports.LLMClient`.
+**Architecture:** `llmkit` is a sibling module in the `goagents` workspace. Its core package owns configuration, task profiles, route decisions, audit records, and deterministic routing. A separate adapter package exposes the router as `github.com/eruca/goagents/goagent/ports.LLMClient`.
 
-**Tech Stack:** Go modules, standard library JSON/YAML parsing where practical, `github.com/eruca/goagent/ports` only in the adapter package, JSONL audit files under `LLMKIT_HOME`.
+**Tech Stack:** Go modules, standard library JSON/YAML parsing where practical, `github.com/eruca/goagents/goagent/ports` only in the adapter package, JSONL audit files under `LLMKIT_HOME`.
 
 ---
 
@@ -29,7 +29,7 @@ Run:
 ```bash
 mkdir -p llmkit/llmkit
 cd llmkit
-go mod init github.com/eruca/llmkit
+go mod init github.com/eruca/goagents/llmkit
 ```
 
 Expected: `llmkit/go.mod` exists.
@@ -46,7 +46,7 @@ Expected: root `go.work` includes `./llmkit`.
 
 **Step 4: Update module documentation**
 
-Add `github.com/eruca/llmkit` to `docs/modules.md` as an optional adapter/capability module. State that `goagent` must not import `llmkit`.
+Add `github.com/eruca/goagents/llmkit` to `docs/modules.md` as an optional adapter/capability module. State that `goagent` must not import `llmkit`.
 
 **Step 5: Verify**
 
@@ -252,10 +252,10 @@ Use a fake provider client. Verify the adapter implements `ports.LLMClient`, sel
 Run:
 
 ```bash
-(cd llmkit && go get github.com/eruca/goagent)
+(cd llmkit && go get github.com/eruca/goagents/goagent)
 ```
 
-Expected: `llmkit/go.mod` references `github.com/eruca/goagent`.
+Expected: `llmkit/go.mod` references `github.com/eruca/goagents/goagent`.
 
 **Step 3: Implement adapter**
 

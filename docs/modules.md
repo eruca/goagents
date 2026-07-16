@@ -9,34 +9,35 @@ tag.
 
 Core modules:
 
-- `github.com/eruca/goagent` in `goagent/`
-- `github.com/eruca/artifactkit` in `artifactkit/`
-- `github.com/eruca/contextkit` in `contextkit/`
-- `github.com/eruca/evalkit` in `evalkit/`
-- `github.com/eruca/ocrs` in `ocrs/`
-- `github.com/eruca/runkit` in `runkit/`
-- `github.com/eruca/skillkit` in `skillkit/`
-- `github.com/eruca/workflowkit` in `workflowkit/`
+- `github.com/eruca/goagents/goagent` in `goagent/`
+- `github.com/eruca/goagents/artifactkit` in `artifactkit/`
+- `github.com/eruca/goagents/contextkit` in `contextkit/`
+- `github.com/eruca/goagents/evalkit` in `evalkit/`
+- `github.com/eruca/goagents/ocrs` in `ocrs/`
+- `github.com/eruca/goagents/runkit` in `runkit/`
+- `github.com/eruca/goagents/skillkit` in `skillkit/`
+- `github.com/eruca/goagents/workflowkit` in `workflowkit/`
 
 Optional adapter/capability modules:
 
-- `github.com/eruca/workflowkit/agentstep` in `workflowkit/agentstep/`
-- `github.com/eruca/llmkit` in `llmkit/` for LLM routing, account/model policy,
+- `github.com/eruca/goagents/workflowkit/agentstep` in `workflowkit/agentstep/`
+- `github.com/eruca/goagents/llmkit` in `llmkit/` for LLM routing, account/model policy,
   and audit contracts. It is optional host-side capability, not part of
   `goagent` core.
-- `github.com/eruca/mcpkit` in `mcpkit/` for adapting MCP-style tool
+- `github.com/eruca/goagents/mcpkit` in `mcpkit/` for adapting MCP-style tool
   descriptors to `goagent` tools. It is optional host-side capability, not part
   of `goagent` core.
-- `github.com/eruca/mcpkit/officialsdk` in `mcpkit/officialsdk/` for adapting
+- `github.com/eruca/goagents/mcpkit/officialsdk` in `mcpkit/officialsdk/` for adapting
   the official MCP Go SDK stdio and Streamable HTTP clients to `mcpkit.Client`.
   It is optional and keeps SDK transport/session dependencies out of `mcpkit`.
 
 Verification/example modules:
 
+- `github.com/eruca/goagents/examples/evalkit-goagent-regression`
 - `github.com/eruca/goagents/examples/host-api`
 - `github.com/eruca/goagents/examples/host-runtime`
-- `github.com/eruca/workflowkit/examples/agent-approval`
-- `github.com/eruca/workflowkit/examples/ocr-review`
+- `github.com/eruca/goagents/workflowkit/examples/agent-approval`
+- `github.com/eruca/goagents/workflowkit/examples/ocr-review`
 
 Example modules are used for workspace verification and should not be treated as
 required runtime dependencies for users.
@@ -54,7 +55,7 @@ ocrs          must not import goagent, workflowkit, or contextkit
 llmkit        must not import goagent from its core routing package
 artifactkit   must not import goagent, workflowkit, llmkit, contextkit, or ocrs
 runkit        must not import workflowkit, llmkit, contextkit, ocrs, or artifactkit
-skillkit      must not import other workspace modules; a future optional adapter may import goagent
+skillkit core must not import other workspace modules; skillkit/agentadapter may import goagent
 ```
 
 Adapter and composition modules may depend on multiple core modules:
@@ -64,6 +65,7 @@ workflowkit/agentstep        may import workflowkit + goagent
 llmkit adapters              may import llmkit + goagent
 mcpkit                       may import goagent
 mcpkit/officialsdk           may import mcpkit + official MCP Go SDK
+skillkit/agentadapter        may import skillkit + goagent
 examples/host-api            may import workflowkit + agentstep + goagent + llmkit + artifactkit + runkit
 examples/host-runtime        may import workflowkit + agentstep + goagent + llmkit + artifactkit + runkit
 examples/agent-approval      may import workflowkit + agentstep + goagent
@@ -74,7 +76,10 @@ host applications            compose whatever modules they need
 ## Local Development
 
 The root `go.work` file is for local development only. It lets the modules use
-workspace sources without publishing intermediate versions.
+workspace sources without publishing intermediate versions. Until `v0.1.0`
+exists remotely, version-specific workspace replacements map internal
+`module@v0.1.0` requirements to the matching local directories. Published module
+`go.mod` files do not contain those replacements.
 
 Do not rely on `go.work` for external consumers. Published consumers should use
 tagged module versions and no local `replace` directives.
@@ -101,7 +106,7 @@ mcpkit/officialsdk/v0.1.0
 Only tag modules that changed. If `workflowkit/agentstep` changes without a core
 `workflowkit` change, tag only `workflowkit/agentstep`.
 
-`runkit/sqlitestore` is part of the `github.com/eruca/runkit` module. It is a
+`runkit/sqlitestore` is part of the `github.com/eruca/goagents/runkit` module. It is a
 host-side durable audit backend, not a separate module.
 
 ## Verification
@@ -109,6 +114,7 @@ host-side durable audit backend, not a separate module.
 Run the whole workspace:
 
 ```bash
+./scripts/verify-release-layout.sh
 ./scripts/verify-all.sh
 ```
 

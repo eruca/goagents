@@ -5,11 +5,11 @@ workflow features.
 
 ## Module Boundary
 
-`github.com/eruca/workflowkit` is the core host-side orchestration module. It
-must not import `github.com/eruca/goagent` or
-`github.com/eruca/workflowkit/agentstep`.
+`github.com/eruca/goagents/workflowkit` is the core host-side orchestration module. It
+must not import `github.com/eruca/goagents/goagent` or
+`github.com/eruca/goagents/workflowkit/agentstep`.
 
-`github.com/eruca/workflowkit/agentstep` is an optional adapter module. It may
+`github.com/eruca/goagents/workflowkit/agentstep` is an optional adapter module. It may
 import both `workflowkit` and `goagent`.
 
 Host applications compose modules at the boundary:

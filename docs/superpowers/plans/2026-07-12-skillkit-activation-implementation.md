@@ -6,7 +6,7 @@
 
 **Architecture:** 保持 `skillkit` 的 catalog 记录私有 canonical skill root，仅在激活或资源读取时重新计算 digest。Activation 是不可变的宿主对象，既不暴露物理路径，也不执行脚本；`agentadapter` 只将已激活正文映射为 `agentcore.Skill`，不注册、删除或扩大工具。
 
-**Tech Stack:** Go 1.26.1、`net/url`、标准测试包、既有 `github.com/eruca/goagent/agentcore`。
+**Tech Stack:** Go 1.26.1、`net/url`、标准测试包、既有 `github.com/eruca/goagents/goagent/agentcore`。
 
 ## Global Constraints
 

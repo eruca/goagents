@@ -7,7 +7,7 @@
 
 ## Name And Environment
 
-The module name is `contextkit` and the module path is `github.com/eruca/contextkit`.
+The module name is `contextkit` and the module path is `github.com/eruca/goagents/contextkit`.
 
 The runtime profile is controlled by `CONTEXT_DEEP_COMPRESSION`:
 

@@ -26,7 +26,7 @@
 
 ```text
 llmkit/
-  go.mod              # module github.com/eruca/llmkit
+  go.mod              # module github.com/eruca/goagents/llmkit
   llmkit/             # 核心路由、配置、审计 contract
   adapters/goagent/   # 可选：把 Router 暴露为 goagent ports.LLMClient
 ```

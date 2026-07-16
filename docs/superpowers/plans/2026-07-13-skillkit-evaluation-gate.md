@@ -19,7 +19,7 @@
 
 **Step 1: Add the local evalkit test dependency**
 
-Add `github.com/eruca/evalkit v0.0.0` to the direct requirements and `replace github.com/eruca/evalkit => ../../evalkit`. Do not change production imports.
+Add `github.com/eruca/goagents/evalkit v0.0.0` to the direct requirements and `replace github.com/eruca/goagents/evalkit => ../../evalkit`. Do not change production imports.
 
 **Step 2: Write the failing release-gate test**
 

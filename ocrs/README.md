@@ -9,14 +9,14 @@ RAG codebase.
 ## Install
 
 ```bash
-go get github.com/eruca/ocrs
+go get github.com/eruca/goagents/ocrs
 ```
 
 For local development before publishing:
 
 ```bash
-go mod edit -replace github.com/eruca/ocrs=/Users/nick/VibeCoding/goagents/ocrs
-go get github.com/eruca/ocrs
+go mod edit -replace github.com/eruca/goagents/ocrs=/Users/nick/VibeCoding/goagents/ocrs
+go get github.com/eruca/goagents/ocrs
 ```
 
 ## Packages
@@ -34,12 +34,12 @@ Keep the dependency direction at the application boundary:
 
 ```text
 your application
-  imports github.com/eruca/goagent
-  imports github.com/eruca/ocrs
+  imports github.com/eruca/goagents/goagent
+  imports github.com/eruca/goagents/ocrs
   wraps ocrs as one or more goagent tools
 
-github.com/eruca/goagent does not import github.com/eruca/ocrs
-github.com/eruca/ocrs does not import github.com/eruca/goagent
+github.com/eruca/goagents/goagent does not import github.com/eruca/goagents/ocrs
+github.com/eruca/goagents/ocrs does not import github.com/eruca/goagents/goagent
 ```
 
 This keeps `goagent` generic and keeps `ocrs` usable by non-agent programs.
@@ -139,7 +139,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/eruca/ocrs/paddleocr"
+	"github.com/eruca/goagents/ocrs/paddleocr"
 )
 
 func main() {

@@ -252,7 +252,7 @@ Recommended rules:
 
 ## goagent Adapter
 
-The adapter in `adapters/goagent` implements `github.com/eruca/goagent/ports.LLMClient`.
+The adapter in `adapters/goagent` implements `github.com/eruca/goagents/goagent/ports.LLMClient`.
 
 Typical usage:
 
@@ -294,8 +294,8 @@ Import aliases are host-owned; one common pattern is:
 
 ```go
 import (
-    goagentadapter "github.com/eruca/llmkit/adapters/goagent"
-    "github.com/eruca/llmkit/llmkit"
+    goagentadapter "github.com/eruca/goagents/llmkit/adapters/goagent"
+    "github.com/eruca/goagents/llmkit/llmkit"
 )
 ```
 
@@ -338,11 +338,14 @@ cd llmkit
 go test ./...
 ```
 
-For release-style checks, use `GOWORK=off` to test llmkit as an independent module:
+After the internal `goagent/v0.1.0` tag is available, use `GOWORK=off` to test
+llmkit as an independent module:
 
 ```sh
 cd llmkit
 GOWORK=off go test ./...
 ```
 
-If the module still depends on a local `replace` such as `github.com/eruca/goagent => ../goagent`, `GOWORK=off` will still need that relative path to exist. Before publishing or testing from a clean checkout, either remove the replace after the dependency is released or provide the matching local module path.
+The published `llmkit/go.mod` intentionally has no local replace. Before the tag
+exists, the root `go.work` supplies the exact local `goagent@v0.1.0` mapping for
+workspace tests; this does not count as a clean consumer check.

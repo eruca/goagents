@@ -13,12 +13,12 @@ Use this dependency shape:
 
 ```text
 application
-  imports github.com/eruca/goagent
-  imports capability modules such as github.com/eruca/ocrs
+  imports github.com/eruca/goagents/goagent
+  imports capability modules such as github.com/eruca/goagents/ocrs
   wires capability modules into goagent through tools, providers, or memory
 
-github.com/eruca/goagent does not import sibling capability modules
-sibling capability modules do not import github.com/eruca/goagent
+github.com/eruca/goagents/goagent does not import sibling capability modules
+sibling capability modules do not import github.com/eruca/goagents/goagent
 ```
 
 This keeps `goagent` reusable for many hosts and keeps capability modules usable

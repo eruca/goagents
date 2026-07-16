@@ -58,7 +58,7 @@ Those concerns stay in host applications or transport-specific adapter modules.
 
 ## Transport Adapters
 
-The first transport-specific adapter is `github.com/eruca/mcpkit/officialsdk`
+The first transport-specific adapter is `github.com/eruca/goagents/mcpkit/officialsdk`
 in `mcpkit/officialsdk/`. It uses the official MCP Go SDK to connect to stdio
 and Streamable HTTP MCP servers, then exposes the existing `mcpkit.Client`
 interface.

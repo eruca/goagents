@@ -5,8 +5,8 @@ context compression should wire both modules at the host boundary:
 
 ```text
 application
-  imports github.com/eruca/goagent
-  imports github.com/eruca/contextkit
+  imports github.com/eruca/goagents/goagent
+  imports github.com/eruca/goagents/contextkit
   maps agentcore.Message to contextkit.Message
   returns agentcore.ContextProjectionResult
 ```
@@ -14,8 +14,8 @@ application
 For local development before `contextkit` is published:
 
 ```bash
-go mod edit -replace github.com/eruca/contextkit=/Users/nick/VibeCoding/goagents/contextkit
-go get github.com/eruca/contextkit
+go mod edit -replace github.com/eruca/goagents/contextkit=/Users/nick/VibeCoding/goagents/contextkit
+go get github.com/eruca/goagents/contextkit
 ```
 
 Adapter shape:
@@ -26,9 +26,9 @@ package app
 import (
 	"context"
 
-	"github.com/eruca/contextkit"
-	"github.com/eruca/contextkit/window"
-	"github.com/eruca/goagent/agentcore"
+	"github.com/eruca/goagents/contextkit"
+	"github.com/eruca/goagents/contextkit/window"
+	"github.com/eruca/goagents/goagent/agentcore"
 )
 
 type ContextKitProjector struct {

@@ -30,9 +30,9 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/eruca/goagent/policy"
-	"github.com/eruca/goagent/ports"
-	"github.com/eruca/goagent/tools"
+	"github.com/eruca/goagents/goagent/policy"
+	"github.com/eruca/goagents/goagent/ports"
+	"github.com/eruca/goagents/goagent/tools"
 )
 
 type staticToolApprover struct {

@@ -3,15 +3,15 @@
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 >
 > Historical note: this plan predates the final module split. The current
-> release contract keeps `github.com/eruca/workflowkit` free of `goagent`
-> imports and places the adapter in `github.com/eruca/workflowkit/agentstep`.
+> release contract keeps `github.com/eruca/goagents/workflowkit` free of `goagent`
+> imports and places the adapter in `github.com/eruca/goagents/workflowkit/agentstep`.
 > See `../contracts.md` and `../release.md`.
 
 **Goal:** Build the first `workflowkit` module as a small host-side orchestration layer for ordered workflow steps and optional `goagent` run adapters.
 
 **Architecture:** `workflowkit` is a standalone module under `/Users/nick/VibeCoding/goagents/workflowkit`. The core package defines workflow run state, a store interface, an in-memory store, and a sequential executor. A small separate `agentstep` module adapts `goagent/agentcore.RunDetailed` into workflow step results without changing `goagent`.
 
-**Tech Stack:** Go 1.26.1, standard library, SQLite for the optional store. `github.com/eruca/goagent` is used only by the optional `agentstep` module and nested examples via local replace during workspace development.
+**Tech Stack:** Go 1.26.1, standard library, SQLite for the optional store. `github.com/eruca/goagents/goagent` is used only by the optional `agentstep` module and nested examples via local replace during workspace development.
 
 ---
 

@@ -2,10 +2,10 @@
 
 This workspace currently contains multiple Go modules:
 
-- `github.com/eruca/workflowkit`
-- `github.com/eruca/workflowkit/agentstep`
-- `github.com/eruca/workflowkit/examples/agent-approval`
-- `github.com/eruca/workflowkit/examples/ocr-review`
+- `github.com/eruca/goagents/workflowkit`
+- `github.com/eruca/goagents/workflowkit/agentstep`
+- `github.com/eruca/goagents/workflowkit/examples/agent-approval`
+- `github.com/eruca/goagents/workflowkit/examples/ocr-review`
 
 The examples are executable verification modules. They are not required runtime
 dependencies for users.
@@ -29,16 +29,19 @@ cd /Users/nick/VibeCoding/goagents/workflowkit/agentstep
 go test ./...
 ```
 
-## Local Development Replaces
+## Local Development Mapping
 
-Local workspace development uses `replace` directives:
+Published module files use tagged `v0.1.0` requirements and no local replace.
+Before those tags exist, the root `go.work` maps each exact internal
+`module@v0.1.0` to its workspace directory.
 
-- `agentstep` replaces `github.com/eruca/goagent` and `github.com/eruca/workflowkit`
+- `agentstep` requires `goagent` and `workflowkit` at `v0.1.0`
 - `examples/agent-approval` replaces `goagent`, `workflowkit`, and `agentstep`
 - `examples/ocr-review` replaces `contextkit`, `ocrs`, `goagent`, `workflowkit`, and `agentstep`
 
-Before publishing a consumer module, replace directives must point at released
-versions or be removed.
+The example replaces are allowed because examples are not release modules.
+After tags exist, a clean consumer must be tested with `GOWORK=off` and no local
+replace.
 
 ## Suggested Tagging
 
@@ -46,8 +49,8 @@ Use the same version number for the core and optional adapter when they are
 released from the same source snapshot:
 
 ```text
-workflowkit: v0.1.0
-workflowkit/agentstep: v0.1.0
+workflowkit/v0.1.0
+workflowkit/agentstep/v0.1.0
 ```
 
 If the adapter changes without a core change, it may be tagged independently

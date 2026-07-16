@@ -31,7 +31,7 @@ package main
 import (
 	"runtime"
 
-	"github.com/eruca/skillkit"
+	"github.com/eruca/goagents/skillkit"
 )
 
 func activateWorkspaceSkill() error {

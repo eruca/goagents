@@ -8,14 +8,14 @@ how to use the returned projection.
 ## Install
 
 ```bash
-go get github.com/eruca/contextkit
+go get github.com/eruca/goagents/contextkit
 ```
 
 For local development before publishing:
 
 ```bash
-go mod edit -replace github.com/eruca/contextkit=/Users/nick/VibeCoding/goagents/contextkit
-go get github.com/eruca/contextkit
+go mod edit -replace github.com/eruca/goagents/contextkit=/Users/nick/VibeCoding/goagents/contextkit
+go get github.com/eruca/goagents/contextkit
 ```
 
 ## Compression Profile
@@ -164,13 +164,13 @@ Keep the dependency direction at the application boundary:
 
 ```text
 application
-  imports github.com/eruca/goagent
-  imports github.com/eruca/contextkit
+  imports github.com/eruca/goagents/goagent
+  imports github.com/eruca/goagents/contextkit
   maps goagent messages into contextkit messages
   uses contextkit output as the model-facing projection
 
-github.com/eruca/goagent does not import github.com/eruca/contextkit
-github.com/eruca/contextkit does not import github.com/eruca/goagent
+github.com/eruca/goagents/goagent does not import github.com/eruca/goagents/contextkit
+github.com/eruca/goagents/contextkit does not import github.com/eruca/goagents/goagent
 ```
 
 Until `goagent` has a native context compression port, use `contextkit` in host

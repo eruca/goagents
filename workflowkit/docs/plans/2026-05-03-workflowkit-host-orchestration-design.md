@@ -1,9 +1,9 @@
 # WorkflowKit Host Orchestration Design
 
 > Historical note: this was the initial implementation design. The current
-> release contract is stricter: the core `github.com/eruca/workflowkit` module
+> release contract is stricter: the core `github.com/eruca/goagents/workflowkit` module
 > must not import `goagent`; the optional adapter lives in the separate
-> `github.com/eruca/workflowkit/agentstep` module. See `../contracts.md`.
+> `github.com/eruca/goagents/workflowkit/agentstep` module. See `../contracts.md`.
 
 ## Goal
 

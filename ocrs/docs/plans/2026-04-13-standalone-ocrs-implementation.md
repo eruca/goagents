@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Build `github.com/eruca/ocrs` as a standalone OCR module based on the original `kairon/rag/internal/ocr` code.
+**Goal:** Build `github.com/eruca/goagents/ocrs` as a standalone OCR module based on the original `kairon/rag/internal/ocr` code.
 
 **Architecture:** Move shared handler/middleware and OCR provider contracts into the root package, then port PaddleOCR, retry, chunking, and scheduler code to depend only on this module. Keep behavior compatible with the reference implementation while making import paths public and reusable.
 

@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Build `github.com/eruca/contextkit` with standard and deep context compression profiles.
+**Goal:** Build `github.com/eruca/goagents/contextkit` with standard and deep context compression profiles.
 
 **Architecture:** The root package defines messages, budgets, profiles, levels, and compressor contracts. `toolbudget` implements level 1 truncation helpers. `window` implements a deterministic compressor for levels 1-5, using `CONTEXT_DEEP_COMPRESSION=1` to choose deep behavior.
 

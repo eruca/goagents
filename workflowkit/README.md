@@ -10,14 +10,14 @@ It is not an agent runtime. `goagent` owns a single ReAct-style agent run;
 ## Install
 
 ```bash
-go get github.com/eruca/workflowkit
+go get github.com/eruca/goagents/workflowkit
 ```
 
 For local development before publishing:
 
 ```bash
-go mod edit -replace github.com/eruca/workflowkit=/Users/nick/VibeCoding/goagents/workflowkit
-go get github.com/eruca/workflowkit
+go mod edit -replace github.com/eruca/goagents/workflowkit=/Users/nick/VibeCoding/goagents/workflowkit
+go get github.com/eruca/goagents/workflowkit
 ```
 
 ## Boundary
@@ -26,13 +26,13 @@ Keep the dependency direction at the application boundary:
 
 ```text
 application
-  imports github.com/eruca/workflowkit
-  imports github.com/eruca/goagent
-  imports github.com/eruca/workflowkit/agentstep when needed
-  imports capability modules such as github.com/eruca/ocrs
+  imports github.com/eruca/goagents/workflowkit
+  imports github.com/eruca/goagents/goagent
+  imports github.com/eruca/goagents/workflowkit/agentstep when needed
+  imports capability modules such as github.com/eruca/goagents/ocrs
 
-github.com/eruca/goagent does not import github.com/eruca/workflowkit
-github.com/eruca/workflowkit does not import github.com/eruca/goagent
+github.com/eruca/goagents/goagent does not import github.com/eruca/goagents/workflowkit
+github.com/eruca/goagents/workflowkit does not import github.com/eruca/goagents/goagent
 ```
 
 `workflowkit` currently provides:
@@ -242,7 +242,7 @@ store implementations keep the same semantics.
 
 ## Agent Step
 
-Use the optional `github.com/eruca/workflowkit/agentstep` module when a workflow
+Use the optional `github.com/eruca/goagents/workflowkit/agentstep` module when a workflow
 step should run a `goagent` agent:
 
 ```go
@@ -294,5 +294,7 @@ Extension packages are useful but still early:
   introduced.
 - `storetest` is intended for future store implementations.
 
-Before publishing, replace local `replace` directives with tagged module
-versions.
+`workflowkit/agentstep` requires tagged `goagent` and `workflowkit` versions and
+contains no local replace. The root `go.work` supplies version-specific local
+mappings before those tags exist; nested example modules keep relative replaces
+because they are verification programs, not published libraries.

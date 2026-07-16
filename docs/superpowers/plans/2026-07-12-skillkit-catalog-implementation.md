@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- 创建 `github.com/eruca/skillkit`，不得 import `goagent`、`workflowkit`、`runkit`、`llmkit`、`mcpkit` 或 host example。
+- 创建 `github.com/eruca/goagents/skillkit`，不得 import `goagent`、`workflowkit`、`runkit`、`llmkit`、`mcpkit` 或 host example。
 - 仅识别 `<root>/<name>/SKILL.md`；名称须匹配 `[a-z0-9-]{1,64}` 且等于目录名。
 - 未知标准 `metadata` 必须保留；只有 `metadata.goagents` 被解释。
 - 发现过程不得执行进程、网络请求、依赖安装或修改环境。
@@ -152,7 +152,7 @@ func Evaluate(entry Entry, ctx GateContext) AvailabilityReport
 创建 `skillkit/go.mod`：
 
 ```go
-module github.com/eruca/skillkit
+module github.com/eruca/goagents/skillkit
 
 go 1.26.1
 
@@ -176,7 +176,7 @@ package skillkit
 run_in "$ROOT/skillkit" go test ./...
 ```
 
-在 `docs/modules.md` 的 core modules 下新增 `github.com/eruca/skillkit`，并在依赖规则中说明：`skillkit` 不 import 其他 workspace module；只有未来可选 adapter 才可依赖 `goagent`。
+在 `docs/modules.md` 的 core modules 下新增 `github.com/eruca/goagents/skillkit`，并在依赖规则中说明：`skillkit` 不 import 其他 workspace module；只有未来可选 adapter 才可依赖 `goagent`。
 
 - [x] **Step 3: 验证空 module 可构建**
 

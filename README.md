@@ -28,6 +28,20 @@ bash ./scripts/verify-all.sh
 This runs module tests, race checks for the core execution paths, MCP smokes,
 and runnable examples.
 
+## v0.1.0 release preparation
+
+The repository uses one monorepo namespace, `github.com/eruca/goagents`, with
+independently tagged subdirectory modules. Validate module paths, internal
+versions, workspace mappings, and tag prefixes with:
+
+```bash
+bash ./scripts/verify-release-layout.sh
+```
+
+The technical layout is separate from public publication. A canonical Git
+remote, a root license, actual module tags, and a clean `GOWORK=off` consumer
+test are still required before any public release.
+
 ## Host API MVP
 
 The runnable single-host MVP is documented in

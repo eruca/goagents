@@ -188,7 +188,7 @@ Expected: FAIL because tool call IDs and assistant tool-call messages are not pr
 Update `agentcore/request.go`:
 
 ```go
-import "github.com/eruca/goagent/ports"
+import "github.com/eruca/goagents/goagent/ports"
 
 type Message struct {
 	Role       string

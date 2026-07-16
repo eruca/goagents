@@ -6,7 +6,7 @@ Turn the OCR code from `kairon/rag/internal/ocr` into a standalone Go module tha
 
 ## Module Boundary
 
-The module path is `github.com/eruca/ocrs`. It owns its generic handler and middleware contracts, OCR provider contracts, retry policy, PaddleOCR HTTP client, structured PaddleOCR response parsing, OCR result merging, chunk-aware processing, and endpoint dispatching.
+The module path is `github.com/eruca/goagents/ocrs`. It owns its generic handler and middleware contracts, OCR provider contracts, retry policy, PaddleOCR HTTP client, structured PaddleOCR response parsing, OCR result merging, chunk-aware processing, and endpoint dispatching.
 
 The module must not import `github.com/eruca/rag` packages. Types previously sourced from `rag/core`, `rag/internal/ocr/types`, `rag/internal/retrypolicy`, and `rag/types` move into this module.
 
