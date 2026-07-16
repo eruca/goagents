@@ -143,3 +143,41 @@ func TestAgentStreamWaitDoesNotDependOnConsumingEvents(t *testing.T) {
 		t.Fatal("Wait blocked while stream events were not consumed")
 	}
 }
+
+func TestAgentStreamPreservesTailEventsWhenConsumedAfterWait(t *testing.T) {
+	llm := &mockLLM{responses: []*ports.ChatResponse{
+		{}, {}, {}, {}, {}, {}, {}, {Content: "done"},
+	}}
+	agent, err := NewAgent(WithLLM(llm), WithMaxIterations(8))
+	if err != nil {
+		t.Fatalf("NewAgent returned error: %v", err)
+	}
+
+	stream := agent.Stream(context.Background(), RunRequest{Input: "loop then finish"})
+	result, err := stream.Wait()
+	if err != nil {
+		t.Fatalf("Wait returned error: %v", err)
+	}
+	if result == nil || result.Content != "done" {
+		t.Fatalf("result = %#v", result)
+	}
+
+	var foundFinalized bool
+	var events []RunStreamEvent
+	for event := range stream.Events {
+		events = append(events, event)
+		if event.Event.Type == EventFinalized {
+			foundFinalized = true
+		}
+	}
+	if !foundFinalized {
+		t.Fatal("stream dropped finalized event after its buffer filled")
+	}
+	if len(events) == 0 {
+		t.Fatal("stream returned no events")
+	}
+	terminal := events[len(events)-1]
+	if !terminal.Done || terminal.Result == nil || terminal.Result.Content != "done" {
+		t.Fatalf("terminal event = %#v", terminal)
+	}
+}

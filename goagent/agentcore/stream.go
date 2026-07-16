@@ -23,17 +23,19 @@ type runStreamDone struct {
 
 func (a *Agent) Stream(ctx context.Context, req RunRequest) *RunStream {
 	events := make(chan RunStreamEvent, runStreamBuffer)
+	pending := make(chan RunStreamEvent, runStreamBuffer)
 	done := make(chan runStreamDone, 1)
 	stream := &RunStream{Events: events, done: done}
 	sink := streamEventSink{
-		events: events,
+		events: pending,
 		next:   a.eventSink,
 	}
 
+	go relayRunStreamEvents(pending, events)
 	go func() {
-		defer close(events)
+		defer close(pending)
 		result, err := a.runWithEventSink(ctx, req, true, sink)
-		sendRunStreamEvent(events, RunStreamEvent{Result: result, Error: err, Done: true})
+		sendRunStreamEvent(pending, RunStreamEvent{Result: result, Error: err, Done: true})
 		done <- runStreamDone{result: result, err: err}
 	}()
 
@@ -59,8 +61,34 @@ func (s streamEventSink) Emit(ctx context.Context, event Event) error {
 }
 
 func sendRunStreamEvent(events chan<- RunStreamEvent, event RunStreamEvent) {
-	select {
-	case events <- event:
-	default:
+	events <- event
+}
+
+// relayRunStreamEvents decouples execution from the public stream consumer.
+// The queue preserves event order without silently dropping tail events when
+// the public channel is full; Wait can still finish before Events is consumed.
+func relayRunStreamEvents(pending <-chan RunStreamEvent, events chan<- RunStreamEvent) {
+	defer close(events)
+
+	queue := make([]RunStreamEvent, 0, runStreamBuffer)
+	for pending != nil || len(queue) > 0 {
+		var output chan<- RunStreamEvent
+		var next RunStreamEvent
+		if len(queue) > 0 {
+			output = events
+			next = queue[0]
+		}
+
+		select {
+		case event, ok := <-pending:
+			if !ok {
+				pending = nil
+				continue
+			}
+			queue = append(queue, event)
+		case output <- next:
+			queue[0] = RunStreamEvent{}
+			queue = queue[1:]
+		}
 	}
 }
