@@ -100,11 +100,69 @@ check_no_internal_replace() {
   fi
 }
 
+check_workspace_replace() {
+  local dir="$1"
+  local module="$2"
+  local target="./$dir"
+
+  if ! awk -v module="$module" -v version="$VERSION" -v target="$target" '
+    $1 == "replace" && $2 == module && $3 == version && $4 == "=>" && $5 == target { found = 1 }
+    END { exit(found ? 0 : 1) }
+  ' "$ROOT/go.work"; then
+    report_error "go.work: missing exact replacement $module $VERSION => $target"
+  fi
+}
+
+check_example_replaces() {
+  local dir="$1"
+  local go_mod="$ROOT/$dir/go.mod"
+  local dependency
+  local target
+  local target_dir
+  local target_module
+
+  while IFS= read -r dependency; do
+    [[ -z "$dependency" ]] && continue
+    target="$(awk -v dependency="$dependency" '
+      BEGIN { mode = "" }
+      $1 == "replace" && $2 == "(" { mode = "replace"; next }
+      $1 == ")" { mode = ""; next }
+      $1 == "replace" && $2 == dependency && $3 == "=>" { print $4; exit }
+      mode == "replace" && $1 == dependency && $2 == "=>" { print $3; exit }
+    ' "$go_mod")"
+    if [[ -z "$target" ]]; then
+      report_error "$dir: example require $dependency has no local replace"
+      continue
+    fi
+    if [[ "$target" != ./* && "$target" != ../* ]]; then
+      report_error "$dir: example replace for $dependency is not relative: $target"
+      continue
+    fi
+    target_dir="$(cd "$ROOT/$dir" && cd "$target" && pwd -P)"
+    if [[ ! -f "$target_dir/go.mod" ]]; then
+      report_error "$dir: example replace target for $dependency has no go.mod: $target"
+      continue
+    fi
+    target_module="$(module_path "$target_dir/go.mod")"
+    if [[ "$target_module" != "$dependency" ]]; then
+      report_error "$dir: replace $dependency points to module $target_module"
+    fi
+  done < <(awk -v prefix="$MODULE_PREFIX" '
+    BEGIN { mode = "" }
+    $1 == "require" && $2 == "(" { mode = "require"; next }
+    $1 == "replace" && $2 == "(" { mode = "replace"; next }
+    $1 == ")" { mode = ""; next }
+    $1 == "require" && index($2, prefix) == 1 { print $2; next }
+    mode == "require" && index($1, prefix) == 1 { print $1 }
+  ' "$go_mod")
+}
+
 for spec in "${published_modules[@]}"; do
   IFS='|' read -r dir module tag <<<"$spec"
   check_module_path "$dir" "$module"
   check_internal_require_versions "$dir"
   check_no_internal_replace "$dir"
+  check_workspace_replace "$dir" "$module"
   printf 'release module: %-28s tag=%s\n' "$module" "$tag"
 done
 
@@ -112,6 +170,7 @@ for spec in "${example_modules[@]}"; do
   IFS='|' read -r dir module <<<"$spec"
   check_module_path "$dir" "$module"
   check_internal_require_versions "$dir"
+  check_example_replaces "$dir"
 done
 
 old_path_pattern='github\.com/eruca/(artifactkit|contextkit|evalkit|goagent|llmkit|mcpkit|ocrs|runkit|skillkit|workflowkit)(?=/|[[:space:]"`])'
