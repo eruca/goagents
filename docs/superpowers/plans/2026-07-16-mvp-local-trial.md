@@ -6,12 +6,12 @@
 
 **Architecture:** A Darwin/CGO tagged test reuses the existing real-process, loopback OIDC, Keychain isolation, and HTTP contract helpers. It injects a one-model llmkit configuration from caller-owned environment variables, drives the workflow through a persisted approval boundary and two Host restarts, then verifies workflow, run, route, and event evidence.
 
-**Tech Stack:** Go 1.24, `testing`, real `host-api` binary, SQLite, macOS Keychain, loopback OIDC, llmkit OpenAI-compatible provider.
+**Tech Stack:** Go workspace language version 1.26.1, `testing`, real `host-api` binary, SQLite, macOS Keychain, loopback OIDC, llmkit OpenAI-compatible provider.
 
 ## Global Constraints
 
 - Do not modify product runtime code.
-- Do not write or log the real endpoint, API key, bearer token, Prompt, model response, or raw Provider error.
+- Do not write the real endpoint or API key to tracked files, and do not log the endpoint, API key, bearer token, Prompt, model response, or raw Provider error. The endpoint and model may exist only in the test's temporary llmkit configuration; the API key remains environment-only.
 - Missing Provider configuration or inaccessible login Keychain is `SKIP/blocked`, never PASS.
 - Use only a unique `goagents.host-api.approvals.smoke.` Keychain service and exact-item cleanup.
 - Keep the gate out of default CI by requiring both `hostapisystemsmoke` and `provideracceptance` tags.
