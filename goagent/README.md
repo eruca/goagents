@@ -143,6 +143,7 @@ Use `Agent.Stream` when a host needs in-process lifecycle updates while a run is
 
 ```go
 stream := agent.Stream(ctx, agentcore.RunRequest{Input: "look up the account"})
+defer stream.DiscardEvents()
 for event := range stream.Events {
 	if event.Done {
 		break
@@ -153,6 +154,7 @@ result, err := stream.Wait()
 ```
 
 `Stream` uses `RunDetailed` semantics for terminal results. On abort, `Wait` returns the partial result and error. Existing sinks configured with `WithEventSink` still receive runtime events.
+Call `stream.DiscardEvents()` if the host stops reading `Events`; this releases the event relay without canceling the Agent run or the configured event sink.
 
 The stream is in-process and transport-neutral; HTTP, SSE, WebSocket, and durable audit storage belong in the host application.
 

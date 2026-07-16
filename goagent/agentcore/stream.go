@@ -1,12 +1,18 @@
 package agentcore
 
-import "context"
+import (
+	"context"
+	"sync"
+)
 
 const runStreamBuffer = 64
 
 type RunStream struct {
-	Events <-chan RunStreamEvent
-	done   <-chan runStreamDone
+	Events      <-chan RunStreamEvent
+	done        <-chan runStreamDone
+	discard     chan struct{}
+	discardOnce sync.Once
+	relayDone   <-chan struct{}
 }
 
 type RunStreamEvent struct {
@@ -22,16 +28,23 @@ type runStreamDone struct {
 }
 
 func (a *Agent) Stream(ctx context.Context, req RunRequest) *RunStream {
-	events := make(chan RunStreamEvent, runStreamBuffer)
+	events := make(chan RunStreamEvent)
 	pending := make(chan RunStreamEvent, runStreamBuffer)
 	done := make(chan runStreamDone, 1)
-	stream := &RunStream{Events: events, done: done}
+	discard := make(chan struct{})
+	relayDone := make(chan struct{})
+	stream := &RunStream{
+		Events:    events,
+		done:      done,
+		discard:   discard,
+		relayDone: relayDone,
+	}
 	sink := streamEventSink{
 		events: pending,
 		next:   a.eventSink,
 	}
 
-	go relayRunStreamEvents(pending, events)
+	go relayRunStreamEvents(pending, events, discard, relayDone)
 	go func() {
 		defer close(pending)
 		result, err := a.runWithEventSink(ctx, req, true, sink)
@@ -45,6 +58,14 @@ func (a *Agent) Stream(ctx context.Context, req RunRequest) *RunStream {
 func (s *RunStream) Wait() (*RunResult, error) {
 	done := <-s.done
 	return done.result, done.err
+}
+
+// DiscardEvents stops public event delivery without canceling the Agent run.
+// Call it when Events will not be drained; repeated calls are safe.
+func (s *RunStream) DiscardEvents() {
+	s.discardOnce.Do(func() {
+		close(s.discard)
+	})
 }
 
 type streamEventSink struct {
@@ -65,13 +86,32 @@ func sendRunStreamEvent(events chan<- RunStreamEvent, event RunStreamEvent) {
 }
 
 // relayRunStreamEvents decouples execution from the public stream consumer.
-// The queue preserves event order without silently dropping tail events when
-// the public channel is full; Wait can still finish before Events is consumed.
-func relayRunStreamEvents(pending <-chan RunStreamEvent, events chan<- RunStreamEvent) {
-	defer close(events)
+// It preserves FIFO delivery while a consumer is active. After discard it
+// clears queued events but keeps draining pending so the Agent cannot block.
+func relayRunStreamEvents(
+	pending <-chan RunStreamEvent,
+	events chan<- RunStreamEvent,
+	discard <-chan struct{},
+	relayDone chan<- struct{},
+) {
+	eventsOpen := true
+	defer func() {
+		if eventsOpen {
+			close(events)
+		}
+		close(relayDone)
+	}()
 
 	queue := make([]RunStreamEvent, 0, runStreamBuffer)
-	for pending != nil || len(queue) > 0 {
+	discarding := false
+	for pending != nil || (!discarding && len(queue) > 0) {
+		if discarding {
+			if _, ok := <-pending; !ok {
+				pending = nil
+			}
+			continue
+		}
+
 		var output chan<- RunStreamEvent
 		var next RunStreamEvent
 		if len(queue) > 0 {
@@ -80,6 +120,12 @@ func relayRunStreamEvents(pending <-chan RunStreamEvent, events chan<- RunStream
 		}
 
 		select {
+		case <-discard:
+			clear(queue)
+			queue = nil
+			discarding = true
+			close(events)
+			eventsOpen = false
 		case event, ok := <-pending:
 			if !ok {
 				pending = nil

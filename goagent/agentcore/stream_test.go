@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -142,13 +143,24 @@ func TestAgentStreamWaitDoesNotDependOnConsumingEvents(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("Wait blocked while stream events were not consumed")
 	}
+
+	stream.DiscardEvents()
+	select {
+	case <-stream.relayDone:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("event relay did not stop after DiscardEvents")
+	}
+	if _, ok := <-stream.Events; ok {
+		t.Fatal("Events remained open after DiscardEvents")
+	}
 }
 
 func TestAgentStreamPreservesTailEventsWhenConsumedAfterWait(t *testing.T) {
+	recorder := &recordingEventSink{}
 	llm := &mockLLM{responses: []*ports.ChatResponse{
 		{}, {}, {}, {}, {}, {}, {}, {Content: "done"},
 	}}
-	agent, err := NewAgent(WithLLM(llm), WithMaxIterations(8))
+	agent, err := NewAgent(WithLLM(llm), WithMaxIterations(8), WithEventSink(recorder))
 	if err != nil {
 		t.Fatalf("NewAgent returned error: %v", err)
 	}
@@ -164,10 +176,14 @@ func TestAgentStreamPreservesTailEventsWhenConsumedAfterWait(t *testing.T) {
 
 	var foundFinalized bool
 	var events []RunStreamEvent
+	var runtimeEvents []Event
 	for event := range stream.Events {
 		events = append(events, event)
 		if event.Event.Type == EventFinalized {
 			foundFinalized = true
+		}
+		if !event.Done {
+			runtimeEvents = append(runtimeEvents, event.Event)
 		}
 	}
 	if !foundFinalized {
@@ -179,5 +195,41 @@ func TestAgentStreamPreservesTailEventsWhenConsumedAfterWait(t *testing.T) {
 	terminal := events[len(events)-1]
 	if !terminal.Done || terminal.Result == nil || terminal.Result.Content != "done" {
 		t.Fatalf("terminal event = %#v", terminal)
+	}
+	if !reflect.DeepEqual(runtimeEvents, recorder.events) {
+		t.Fatalf("stream events differ from sink events:\nstream=%#v\nsink=%#v", runtimeEvents, recorder.events)
+	}
+}
+
+func TestAgentStreamDiscardEventsDoesNotCancelRunOrSink(t *testing.T) {
+	recorder := &recordingEventSink{}
+	llm := &mockLLM{responses: []*ports.ChatResponse{
+		{}, {}, {}, {}, {}, {}, {}, {Content: "done"},
+	}}
+	agent, err := NewAgent(WithLLM(llm), WithMaxIterations(8), WithEventSink(recorder))
+	if err != nil {
+		t.Fatalf("NewAgent returned error: %v", err)
+	}
+
+	stream := agent.Stream(context.Background(), RunRequest{Input: "discard events only"})
+	stream.DiscardEvents()
+	stream.DiscardEvents()
+	result, err := stream.Wait()
+	if err != nil {
+		t.Fatalf("Wait returned error: %v", err)
+	}
+	if result == nil || result.Content != "done" {
+		t.Fatalf("result = %#v", result)
+	}
+	if !recorder.hasEvent(EventFinalized, result.RunID) {
+		t.Fatal("configured sink did not receive finalized event after stream discard")
+	}
+	select {
+	case <-stream.relayDone:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("event relay did not stop after discarded run completed")
+	}
+	if _, ok := <-stream.Events; ok {
+		t.Fatal("Events remained open after discarded run completed")
 	}
 }
