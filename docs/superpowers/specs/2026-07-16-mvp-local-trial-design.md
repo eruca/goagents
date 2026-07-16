@@ -41,7 +41,7 @@ Host composition 的接缝。该测试不进入默认 CI，避免把外部服务
 - 真实模型 route outcome 为 success；
 - 无效审批为 401，有效审批后 workflow 为 succeeded；
 - 两次安全边界重启后持久化和审计一致；
-- Host 输出不包含真实 API key、endpoint、OIDC token 或本机 Skill 路径；
+- Host 输出不包含真实 API key、endpoint 或 OIDC token；
 - 默认 `go test ./...` 与 workspace 全量验证不回归。
 
 本阶段只据此判定本机 MVP 是否出现新 P0/P1，不扩大到生产 OIDC、多 worker、分布式执行、

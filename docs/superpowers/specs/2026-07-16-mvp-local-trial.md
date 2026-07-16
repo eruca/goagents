@@ -52,10 +52,11 @@ go test -v -tags 'hostapisystemsmoke provideracceptance' \
 | 有效 OIDC approval | PASS | workflow 转为 succeeded，final output ref 固化 |
 | 第二次重启 | PASS | workflow、AgentRun、成功 route 与事件时间线均可查询 |
 | 敏感输出 | PASS | Host 输出不含 API key、endpoint 或 bearer token |
-| race/static/default regression | PASS | tagged `-race`、tagged `go vet`、默认 Host tests 均退出 0 |
+| race/static/default regression | PASS | tagged test harness `-race`、tagged `go vet`、默认 Host tests 均退出 0 |
 
-首次真实组合命令与 `-race` 重跑均 PASS、无 SKIP。测试不记录 Prompt、模型正文、endpoint、
-凭证、token、临时路径或原始 Provider 错误。
+首次真实组合命令与 test harness `-race` 重跑均 PASS、无 SKIP；实际 Host 子进程仍由既有
+helper 以普通 `go build` 构建，不把该结果表述为 race-instrumented Host。测试不记录 Prompt、
+模型正文、endpoint、凭证、token、临时路径或原始 Provider 错误。
 
 ## 4. 缺陷分级
 

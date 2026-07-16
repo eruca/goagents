@@ -66,7 +66,10 @@ Map the existing local Qwen values into the three `OPENAI_COMPAT_*` variables wi
 
 - [ ] **Step 4: Run race and static checks**
 
-Run the real trial with `go test -race`, then run:
+Run the real trial with `go test -race`, then run the commands below. The race
+detector covers the Go test process and its in-process helpers; the Host child
+is built by the existing process helper without `-race`, so this command must
+not be described as a race-instrumented Host binary run.
 
 ```bash
 go vet -tags 'hostapisystemsmoke provideracceptance' ./...
