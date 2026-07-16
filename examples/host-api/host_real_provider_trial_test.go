@@ -153,6 +153,7 @@ func assertRealProviderTrialWorkflowEqual(t *testing.T, phase string, expected, 
 func realProviderTrialRunMatches(run agentRunResponse, workflow workflowResponse, contentRef string) bool {
 	return run.RunID == workflow.AgentRunID &&
 		run.WorkflowID == workflow.ID &&
+		run.TaskID == workflow.ID &&
 		run.Status == string(runkit.StatusSucceeded) &&
 		run.Summary.Status == runkit.StatusSucceeded &&
 		run.Summary.ContentRef == contentRef &&
