@@ -55,13 +55,13 @@ go test -v -tags provideracceptance \
   -count=1 ./...
 ```
 
-On success, the test logs only `provider=openai_compatible`, the configured
-model identifier, and subtest status. Failure diagnostics are limited to
-non-sensitive tool metadata and stable error type/class/code. It does not log
-the endpoint, credential, prompt, model response, random observation nonce, or
-raw Provider error. Missing configuration produces `SKIP`, which is an
-environment blocker rather than a passing acceptance result. The deliberately
-invalid credential used by the negative subtest is a fixed synthetic value.
+On success, the test logs only subtest status. Failure diagnostics are limited
+to non-sensitive tool metadata and stable error type/class/code. It does not
+log the endpoint, model identifier, credential, prompt, model response, random
+observation nonce, or raw Provider error. Missing configuration produces
+`SKIP`, which is an environment blocker rather than a passing acceptance
+result. The deliberately invalid credential used by the negative subtest is a
+fixed synthetic value.
 
 ## Real Host local trial
 

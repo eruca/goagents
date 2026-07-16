@@ -78,7 +78,6 @@ func (recorder *realProviderCaptureRecorder) RecordOutcome(_ context.Context, ou
 
 func TestRealProviderMVPAcceptance(t *testing.T) {
 	config := requireRealProviderConfig(t)
-	t.Logf("provider=openai_compatible model=%s", config.Model)
 	provider := newRealProviderClient(t, config.BaseURL, config.Model, config.APIKey)
 
 	t.Run("text", func(t *testing.T) {

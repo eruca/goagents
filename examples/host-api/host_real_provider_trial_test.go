@@ -22,6 +22,35 @@ const (
 	realProviderTrialModelAlias   = "qwen-local-trial"
 )
 
+type realProviderTrialSensitiveValue struct {
+	label string
+	value string
+}
+
+func realProviderTrialSensitiveValues(config realProviderConfig, token string) []realProviderTrialSensitiveValue {
+	return []realProviderTrialSensitiveValue{
+		{label: "Provider API key", value: config.APIKey},
+		{label: "Provider endpoint", value: config.BaseURL},
+		{label: "normalized Provider endpoint", value: strings.TrimRight(config.BaseURL, "/")},
+		{label: "Provider model", value: config.Model},
+		{label: "OIDC bearer token", value: token},
+	}
+}
+
+func TestRealProviderTrialSensitiveValuesIncludesModel(t *testing.T) {
+	config := realProviderConfig{
+		BaseURL: "https://provider.invalid/v1",
+		Model:   "private-model-name",
+		APIKey:  "private-api-key",
+	}
+	for _, item := range realProviderTrialSensitiveValues(config, "private-token") {
+		if item.label == "Provider model" && item.value == config.Model {
+			return
+		}
+	}
+	t.Fatal("real Provider trial sensitive values do not include the configured model")
+}
+
 func TestHostAPIProcessRealProviderLocalTrial(t *testing.T) {
 	providerConfig := requireRealProviderConfig(t)
 	requireInteractiveLoginKeychain(t)
@@ -37,11 +66,10 @@ func TestHostAPIProcessRealProviderLocalTrial(t *testing.T) {
 		hostAPISkillRootEnv:     "",
 		"OPENAI_COMPAT_API_KEY": providerConfig.APIKey,
 	}
-	redactions := []string{
-		providerConfig.APIKey,
-		providerConfig.BaseURL,
-		strings.TrimRight(providerConfig.BaseURL, "/"),
-		token,
+	sensitiveValues := realProviderTrialSensitiveValues(providerConfig, token)
+	redactions := make([]string, 0, len(sensitiveValues))
+	for _, item := range sensitiveValues {
+		redactions = append(redactions, item.value)
 	}
 
 	first := startHostProcessWithEnvAndRedactions(t, binary, runtimeHome, oidc.issuer, keychainService, localApprovalKeyID, environment, redactions)
@@ -127,15 +155,7 @@ func TestHostAPIProcessRealProviderLocalTrial(t *testing.T) {
 	}
 	stopHostProcess(t, third)
 
-	for _, item := range []struct {
-		label string
-		value string
-	}{
-		{label: "Provider API key", value: providerConfig.APIKey},
-		{label: "Provider endpoint", value: providerConfig.BaseURL},
-		{label: "normalized Provider endpoint", value: strings.TrimRight(providerConfig.BaseURL, "/")},
-		{label: "OIDC bearer token", value: token},
-	} {
+	for _, item := range sensitiveValues {
 		if first.output.ContainsSensitive(item.value) || second.output.ContainsSensitive(item.value) || third.output.ContainsSensitive(item.value) {
 			t.Fatalf("host process output leaked %s", item.label)
 		}
