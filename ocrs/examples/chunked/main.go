@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/eruca/ocrs"
-	"github.com/eruca/ocrs/chunking"
+	"github.com/eruca/goagents/ocrs"
+	"github.com/eruca/goagents/ocrs/chunking"
 )
 
 type demoSplitter struct{}

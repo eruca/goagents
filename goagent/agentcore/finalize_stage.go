@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 
-	"github.com/eruca/goagent/ports"
-	"github.com/eruca/goagent/prompt"
-	"github.com/eruca/goagent/tools"
+	"github.com/eruca/goagents/goagent/ports"
+	"github.com/eruca/goagents/goagent/prompt"
+	"github.com/eruca/goagents/goagent/tools"
 )
 
 var ErrMaxIterations = errors.New("max iterations reached")

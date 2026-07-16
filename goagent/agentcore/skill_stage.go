@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/eruca/goagent/prompt"
+	"github.com/eruca/goagents/goagent/prompt"
 )
 
 type SkillStage struct {

@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eruca/goagent/policy"
-	"github.com/eruca/goagent/tools"
-	"github.com/eruca/mcpkit"
+	"github.com/eruca/goagents/goagent/policy"
+	"github.com/eruca/goagents/goagent/tools"
+	"github.com/eruca/goagents/mcpkit"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 

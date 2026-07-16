@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/eruca/artifactkit"
-	"github.com/eruca/llmkit/llmkit"
-	"github.com/eruca/runkit"
-	"github.com/eruca/workflowkit"
+	"github.com/eruca/goagents/artifactkit"
+	"github.com/eruca/goagents/llmkit/llmkit"
+	"github.com/eruca/goagents/runkit"
+	"github.com/eruca/goagents/workflowkit"
 )
 
 func TestRuntimeRunsAgentWorkflowWithArtifactsAuditAndLLMRouting(t *testing.T) {

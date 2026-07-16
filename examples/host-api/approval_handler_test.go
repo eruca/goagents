@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eruca/workflowkit"
+	"github.com/eruca/goagents/workflowkit"
 )
 
 func TestHostAPIRejectsUnauthenticatedApproval(t *testing.T) {

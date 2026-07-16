@@ -1,15 +1,16 @@
-module github.com/eruca/mcpkit/officialsdk
+module github.com/eruca/goagents/mcpkit/officialsdk
 
 go 1.26.1
 
 require (
-	github.com/eruca/goagent v0.0.0
-	github.com/eruca/mcpkit v0.0.0
+	github.com/eruca/goagents/goagent v0.1.0
+	github.com/eruca/goagents/mcpkit v0.1.0
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 )
 
 require (
 	github.com/google/jsonschema-go v0.4.3 // indirect
+	github.com/google/uuid v1.6.0 // indirect
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
@@ -18,7 +19,3 @@ require (
 	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
 )
-
-replace github.com/eruca/goagent => ../../goagent
-
-replace github.com/eruca/mcpkit => ..

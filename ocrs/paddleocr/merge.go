@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/eruca/ocrs"
+	"github.com/eruca/goagents/ocrs"
 )
 
 func MergeChunkResponses(results []ocrs.OCRResult) (ocrs.OCRResult, error) {

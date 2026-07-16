@@ -6,9 +6,9 @@ import (
 	"io"
 	"os"
 
-	"github.com/eruca/goagent/agentcore"
-	"github.com/eruca/workflowkit"
-	"github.com/eruca/workflowkit/agentstep"
+	"github.com/eruca/goagents/goagent/agentcore"
+	"github.com/eruca/goagents/workflowkit"
+	"github.com/eruca/goagents/workflowkit/agentstep"
 )
 
 type mockAgent struct {

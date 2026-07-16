@@ -6,8 +6,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/eruca/goagent/policy"
-	"github.com/eruca/goagent/tools"
+	"github.com/eruca/goagents/goagent/policy"
+	"github.com/eruca/goagents/goagent/tools"
 )
 
 func TestRegisterToolsMapsDescriptorsToGoagentTools(t *testing.T) {

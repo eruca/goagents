@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/eruca/goagent/agentcore"
-	"github.com/eruca/goagent/ports"
-	"github.com/eruca/goagent/prompt"
-	goagentadapter "github.com/eruca/llmkit/adapters/goagent"
-	"github.com/eruca/llmkit/llmkit"
+	"github.com/eruca/goagents/goagent/agentcore"
+	"github.com/eruca/goagents/goagent/ports"
+	"github.com/eruca/goagents/goagent/prompt"
+	goagentadapter "github.com/eruca/goagents/llmkit/adapters/goagent"
+	"github.com/eruca/goagents/llmkit/llmkit"
 )
 
 func main() {

@@ -10,7 +10,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/eruca/goagent/ports"
+	"github.com/eruca/goagents/goagent/ports"
 )
 
 type Config struct {

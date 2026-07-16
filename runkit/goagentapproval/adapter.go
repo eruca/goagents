@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/eruca/goagent/agentcore"
-	"github.com/eruca/runkit"
+	"github.com/eruca/goagents/goagent/agentcore"
+	"github.com/eruca/goagents/runkit"
 )
 
 var (

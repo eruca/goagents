@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/eruca/contextkit"
+	"github.com/eruca/goagents/contextkit"
 )
 
 func TestStandardCompressionPreservesSystemAndRecentMessages(t *testing.T) {

@@ -6,8 +6,8 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/eruca/goagent/extensions/providers/openaiapi"
-	"github.com/eruca/llmkit/llmkit"
+	"github.com/eruca/goagents/goagent/extensions/providers/openaiapi"
+	"github.com/eruca/goagents/llmkit/llmkit"
 )
 
 // DefaultErrorClassifier maps typed provider and network errors to stable

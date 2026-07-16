@@ -3,8 +3,8 @@ module github.com/eruca/goagents/examples/evalkit-goagent-regression
 go 1.26.1
 
 require (
-	github.com/eruca/evalkit v0.0.0
-	github.com/eruca/goagent v0.0.0
+	github.com/eruca/goagents/evalkit v0.1.0
+	github.com/eruca/goagents/goagent v0.1.0
 )
 
 require (
@@ -13,6 +13,6 @@ require (
 	golang.org/x/text v0.14.0 // indirect
 )
 
-replace github.com/eruca/evalkit => ../../evalkit
+replace github.com/eruca/goagents/evalkit => ../../evalkit
 
-replace github.com/eruca/goagent => ../../goagent
+replace github.com/eruca/goagents/goagent => ../../goagent

@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eruca/workflowkit"
-	"github.com/eruca/workflowkit/storetest"
+	"github.com/eruca/goagents/workflowkit"
+	"github.com/eruca/goagents/workflowkit/storetest"
 )
 
 func TestStoreConformance(t *testing.T) {

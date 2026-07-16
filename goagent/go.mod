@@ -1,4 +1,4 @@
-module github.com/eruca/goagent
+module github.com/eruca/goagents/goagent
 
 go 1.26.1
 

@@ -3,7 +3,7 @@ package runkit
 import (
 	"context"
 
-	"github.com/eruca/goagent/agentcore"
+	"github.com/eruca/goagents/goagent/agentcore"
 )
 
 type GoagentRunRecordBuilder func(agentcore.Event) RunRecord

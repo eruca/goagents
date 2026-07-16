@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eruca/runkit"
+	"github.com/eruca/goagents/runkit"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 

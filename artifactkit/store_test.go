@@ -3,8 +3,8 @@ package artifactkit_test
 import (
 	"testing"
 
-	"github.com/eruca/artifactkit"
-	"github.com/eruca/artifactkit/storetest"
+	"github.com/eruca/goagents/artifactkit"
+	"github.com/eruca/goagents/artifactkit/storetest"
 )
 
 func TestMemoryStoreConformance(t *testing.T) {

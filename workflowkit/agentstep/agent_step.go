@@ -3,8 +3,8 @@ package agentstep
 import (
 	"context"
 
-	"github.com/eruca/goagent/agentcore"
-	"github.com/eruca/workflowkit"
+	"github.com/eruca/goagents/goagent/agentcore"
+	"github.com/eruca/goagents/workflowkit"
 )
 
 type Runner interface {

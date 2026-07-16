@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/eruca/contextkit"
-	"github.com/eruca/contextkit/toolbudget"
+	"github.com/eruca/goagents/contextkit"
+	"github.com/eruca/goagents/contextkit/toolbudget"
 )
 
 type Config struct {

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/eruca/goagent/ports"
-	"github.com/eruca/goagent/tools"
+	"github.com/eruca/goagents/goagent/ports"
+	"github.com/eruca/goagents/goagent/tools"
 )
 
 // MutableToolRegistry is the per-run registry shape used by stages that both

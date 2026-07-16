@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/eruca/goagent/policy"
-	"github.com/eruca/goagent/ports"
-	"github.com/eruca/goagent/tools"
+	"github.com/eruca/goagents/goagent/policy"
+	"github.com/eruca/goagents/goagent/ports"
+	"github.com/eruca/goagents/goagent/tools"
 )
 
 // ToolDescriptor is the subset of an MCP tool descriptor needed to expose the

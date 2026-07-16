@@ -3,12 +3,11 @@ module github.com/eruca/goagents/examples/host-runtime
 go 1.26.1
 
 require (
-	github.com/eruca/artifactkit v0.0.0
-	github.com/eruca/goagent v0.0.0
-	github.com/eruca/llmkit v0.0.0
-	github.com/eruca/runkit v0.0.0
-	github.com/eruca/workflowkit v0.0.0
-	github.com/eruca/workflowkit/agentstep v0.0.0
+	github.com/eruca/goagents/artifactkit v0.1.0
+	github.com/eruca/goagents/goagent v0.1.0
+	github.com/eruca/goagents/llmkit v0.1.0
+	github.com/eruca/goagents/runkit v0.1.0
+	github.com/eruca/goagents/workflowkit v0.1.0
 )
 
 require (
@@ -18,14 +17,12 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/eruca/artifactkit => ../../artifactkit
+replace github.com/eruca/goagents/artifactkit => ../../artifactkit
 
-replace github.com/eruca/goagent => ../../goagent
+replace github.com/eruca/goagents/goagent => ../../goagent
 
-replace github.com/eruca/llmkit => ../../llmkit
+replace github.com/eruca/goagents/llmkit => ../../llmkit
 
-replace github.com/eruca/runkit => ../../runkit
+replace github.com/eruca/goagents/runkit => ../../runkit
 
-replace github.com/eruca/workflowkit => ../../workflowkit
-
-replace github.com/eruca/workflowkit/agentstep => ../../workflowkit/agentstep
+replace github.com/eruca/goagents/workflowkit => ../../workflowkit

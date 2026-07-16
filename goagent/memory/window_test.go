@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/eruca/goagent/ports"
+	"github.com/eruca/goagents/goagent/ports"
 )
 
 func TestWindowMemoryDropsOlderMessagesPastLimit(t *testing.T) {

@@ -20,8 +20,8 @@ assert_main_module_boundary() {
   printf '\n==> checking main module dependency boundary\n'
   local modules
   modules="$(cd "$ROOT" && GOWORK=off go list -m all)"
-  if grep -qE '^github.com/eruca/goagent([[:space:]]|$)' <<<"$modules" ||
-    grep -qE '^github.com/eruca/workflowkit/agentstep([[:space:]]|$)' <<<"$modules"; then
+  if grep -qE '^github.com/eruca/goagents/goagent([[:space:]]|$)' <<<"$modules" ||
+    grep -qE '^github.com/eruca/goagents/workflowkit/agentstep([[:space:]]|$)' <<<"$modules"; then
     printf 'main workflowkit module must not depend on goagent or agentstep\n' >&2
     printf '%s\n' "$modules" >&2
     return 1

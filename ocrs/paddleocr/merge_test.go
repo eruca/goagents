@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/eruca/ocrs"
+	"github.com/eruca/goagents/ocrs"
 )
 
 func TestMergeChunkResponses(t *testing.T) {

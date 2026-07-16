@@ -8,9 +8,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/eruca/evalkit"
-	"github.com/eruca/goagent/agentcore"
-	"github.com/eruca/goagent/ports"
+	"github.com/eruca/goagents/evalkit"
+	"github.com/eruca/goagents/goagent/agentcore"
+	"github.com/eruca/goagents/goagent/ports"
 )
 
 type deterministicLLM struct{}

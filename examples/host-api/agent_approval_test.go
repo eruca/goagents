@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eruca/artifactkit"
-	"github.com/eruca/runkit"
-	"github.com/eruca/workflowkit"
+	"github.com/eruca/goagents/artifactkit"
+	"github.com/eruca/goagents/runkit"
+	"github.com/eruca/goagents/workflowkit"
 )
 
 func TestResolveAgentApprovalKeychainConfig(t *testing.T) {

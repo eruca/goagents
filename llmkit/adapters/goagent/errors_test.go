@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/eruca/goagent/extensions/providers/openaiapi"
-	"github.com/eruca/llmkit/llmkit"
+	"github.com/eruca/goagents/goagent/extensions/providers/openaiapi"
+	"github.com/eruca/goagents/llmkit/llmkit"
 )
 
 func TestDefaultErrorClassifier(t *testing.T) {

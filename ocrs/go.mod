@@ -1,4 +1,4 @@
-module github.com/eruca/ocrs
+module github.com/eruca/goagents/ocrs
 
 go 1.26.1
 

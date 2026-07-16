@@ -3,7 +3,7 @@ package agentcore
 import (
 	"context"
 
-	"github.com/eruca/goagent/tools"
+	"github.com/eruca/goagents/goagent/tools"
 )
 
 type ActStage struct {

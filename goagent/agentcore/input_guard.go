@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/eruca/goagent/ports"
+	"github.com/eruca/goagents/goagent/ports"
 )
 
 var ErrInputRejected = errors.New("input rejected")

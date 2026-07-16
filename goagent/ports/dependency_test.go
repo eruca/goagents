@@ -11,9 +11,9 @@ import (
 
 func TestPortsDoesNotImportImplementationPackages(t *testing.T) {
 	banned := map[string]bool{
-		"github.com/eruca/goagent/policy": true,
-		"github.com/eruca/goagent/prompt": true,
-		"github.com/eruca/goagent/tools":  true,
+		"github.com/eruca/goagents/goagent/policy": true,
+		"github.com/eruca/goagents/goagent/prompt": true,
+		"github.com/eruca/goagents/goagent/tools":  true,
 	}
 
 	files, err := filepath.Glob("*.go")

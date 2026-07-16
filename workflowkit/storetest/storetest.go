@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eruca/workflowkit"
+	"github.com/eruca/goagents/workflowkit"
 )
 
 type NewStore func(*testing.T) workflowkit.Store

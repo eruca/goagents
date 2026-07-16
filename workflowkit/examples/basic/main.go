@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/eruca/workflowkit"
+	"github.com/eruca/goagents/workflowkit"
 )
 
 type prepareStep struct{}

@@ -19,10 +19,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eruca/runkit"
-	runsql "github.com/eruca/runkit/sqlitestore"
-	"github.com/eruca/workflowkit"
-	workflowsql "github.com/eruca/workflowkit/sqlitestore"
+	"github.com/eruca/goagents/runkit"
+	runsql "github.com/eruca/goagents/runkit/sqlitestore"
+	"github.com/eruca/goagents/workflowkit"
+	workflowsql "github.com/eruca/goagents/workflowkit/sqlitestore"
 )
 
 func TestHostAPIProcessToolApprovalSurvivesRestart(t *testing.T) {

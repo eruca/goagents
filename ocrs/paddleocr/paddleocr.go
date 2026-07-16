@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/eruca/ocrs"
-	"github.com/eruca/ocrs/retrypolicy"
+	"github.com/eruca/goagents/ocrs"
+	"github.com/eruca/goagents/ocrs/retrypolicy"
 )
 
 type Client struct {

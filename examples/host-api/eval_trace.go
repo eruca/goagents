@@ -6,9 +6,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/eruca/evalkit"
-	"github.com/eruca/runkit"
-	"github.com/eruca/workflowkit"
+	"github.com/eruca/goagents/evalkit"
+	"github.com/eruca/goagents/runkit"
+	"github.com/eruca/goagents/workflowkit"
 )
 
 // hostEvalFingerprint accepts only known non-secret version fields. Keeping

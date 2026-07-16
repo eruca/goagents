@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/eruca/runkit"
+	"github.com/eruca/goagents/runkit"
 )
 
 var _ runkit.CheckpointStore = (*Store)(nil)

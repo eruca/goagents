@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/eruca/ocrs"
+	"github.com/eruca/goagents/ocrs"
 )
 
 type Config struct {

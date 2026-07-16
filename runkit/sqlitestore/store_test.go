@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eruca/runkit"
-	"github.com/eruca/runkit/storetest"
+	"github.com/eruca/goagents/runkit"
+	"github.com/eruca/goagents/runkit/storetest"
 )
 
 func TestStoreConformance(t *testing.T) {

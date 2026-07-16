@@ -9,10 +9,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/eruca/goagent/agentcore"
-	"github.com/eruca/goagent/policy"
-	"github.com/eruca/goagent/ports"
-	"github.com/eruca/goagent/tools"
+	"github.com/eruca/goagents/goagent/agentcore"
+	"github.com/eruca/goagents/goagent/policy"
+	"github.com/eruca/goagents/goagent/ports"
+	"github.com/eruca/goagents/goagent/tools"
 )
 
 type mockLLM struct {

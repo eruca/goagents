@@ -12,9 +12,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/eruca/evalkit"
-	"github.com/eruca/goagent/ports"
-	"github.com/eruca/skillkit"
+	"github.com/eruca/goagents/evalkit"
+	"github.com/eruca/goagents/goagent/ports"
+	"github.com/eruca/goagents/skillkit"
 )
 
 const skillEvalAssertionsKey = "assertions"

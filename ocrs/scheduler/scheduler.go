@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/eruca/ocrs"
+	"github.com/eruca/goagents/ocrs"
 )
 
 var ErrNoEndpoint = errors.New("no endpoint configured")

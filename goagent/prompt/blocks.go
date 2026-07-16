@@ -1,6 +1,6 @@
 package prompt
 
-import "github.com/eruca/goagent/ports"
+import "github.com/eruca/goagents/goagent/ports"
 
 type Mode = ports.PromptMode
 

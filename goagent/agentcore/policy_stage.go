@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/eruca/goagent/policy"
-	"github.com/eruca/goagent/ports"
+	"github.com/eruca/goagents/goagent/policy"
+	"github.com/eruca/goagents/goagent/ports"
 )
 
 var ErrPolicyDenied = errors.New("policy denied")

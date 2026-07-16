@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/eruca/goagent/extensions/providers/openaiapi"
-	"github.com/eruca/llmkit/llmkit"
+	"github.com/eruca/goagents/goagent/extensions/providers/openaiapi"
+	"github.com/eruca/goagents/llmkit/llmkit"
 )
 
 // OpenAICompatibleProvidersFromConfig builds provider clients for configured

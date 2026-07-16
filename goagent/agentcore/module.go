@@ -3,8 +3,8 @@ package agentcore
 import (
 	"context"
 
-	"github.com/eruca/goagent/prompt"
-	"github.com/eruca/goagent/tools"
+	"github.com/eruca/goagents/goagent/prompt"
+	"github.com/eruca/goagents/goagent/tools"
 )
 
 type SystemPromptProvider interface {

@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eruca/llmkit/llmkit"
-	"github.com/eruca/runkit"
-	"github.com/eruca/workflowkit"
+	"github.com/eruca/goagents/llmkit/llmkit"
+	"github.com/eruca/goagents/runkit"
+	"github.com/eruca/goagents/workflowkit"
 )
 
 const (

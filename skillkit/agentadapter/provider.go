@@ -6,8 +6,8 @@ import (
 	"context"
 	"errors"
 
-	"github.com/eruca/goagent/agentcore"
-	"github.com/eruca/skillkit"
+	"github.com/eruca/goagents/goagent/agentcore"
+	"github.com/eruca/goagents/skillkit"
 )
 
 var (

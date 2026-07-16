@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/eruca/artifactkit"
+	"github.com/eruca/goagents/artifactkit"
 )
 
 type NewStore func(*testing.T) artifactkit.Store

@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/eruca/workflowkit"
+	"github.com/eruca/goagents/workflowkit"
 	_ "modernc.org/sqlite"
 )
 

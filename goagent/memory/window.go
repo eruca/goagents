@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/eruca/goagent/ports"
+	"github.com/eruca/goagents/goagent/ports"
 )
 
 type WindowMemory struct {

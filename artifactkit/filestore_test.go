@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/eruca/artifactkit"
-	"github.com/eruca/artifactkit/storetest"
+	"github.com/eruca/goagents/artifactkit"
+	"github.com/eruca/goagents/artifactkit/storetest"
 )
 
 func TestFileStoreConformance(t *testing.T) {

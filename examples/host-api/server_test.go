@@ -16,13 +16,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eruca/artifactkit"
-	"github.com/eruca/goagent/agentcore"
-	"github.com/eruca/goagent/ports"
-	"github.com/eruca/llmkit/llmkit"
-	"github.com/eruca/runkit"
-	"github.com/eruca/skillkit"
-	"github.com/eruca/workflowkit"
+	"github.com/eruca/goagents/artifactkit"
+	"github.com/eruca/goagents/goagent/agentcore"
+	"github.com/eruca/goagents/goagent/ports"
+	"github.com/eruca/goagents/llmkit/llmkit"
+	"github.com/eruca/goagents/runkit"
+	"github.com/eruca/goagents/skillkit"
+	"github.com/eruca/goagents/workflowkit"
 )
 
 type skillListPayload struct {

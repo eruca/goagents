@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/eruca/goagent/prompt"
+	"github.com/eruca/goagents/goagent/prompt"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/eruca/skillkit"
+	"github.com/eruca/goagents/skillkit"
 )
 
 func TestLoadHostSkillConfigDisabled(t *testing.T) {

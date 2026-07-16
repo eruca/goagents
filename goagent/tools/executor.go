@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"sync"
 
-	"github.com/eruca/goagent/ports"
+	"github.com/eruca/goagents/goagent/ports"
 )
 
 type Executor struct {

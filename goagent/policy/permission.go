@@ -1,6 +1,6 @@
 package policy
 
-import "github.com/eruca/goagent/ports"
+import "github.com/eruca/goagents/goagent/ports"
 
 type Permission = ports.Permission
 

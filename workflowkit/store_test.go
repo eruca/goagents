@@ -3,8 +3,8 @@ package workflowkit_test
 import (
 	"testing"
 
-	"github.com/eruca/workflowkit"
-	"github.com/eruca/workflowkit/storetest"
+	"github.com/eruca/goagents/workflowkit"
+	"github.com/eruca/goagents/workflowkit/storetest"
 )
 
 func TestMemoryStoreConformance(t *testing.T) {

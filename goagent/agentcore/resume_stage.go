@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/eruca/goagent/ports"
+	"github.com/eruca/goagents/goagent/ports"
 )
 
 // ResolvedApprovalStage verifies a complete host decision set before allowing a paused batch to execute.

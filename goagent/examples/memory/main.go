@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/eruca/goagent/agentcore"
-	"github.com/eruca/goagent/memory"
-	"github.com/eruca/goagent/ports"
+	"github.com/eruca/goagents/goagent/agentcore"
+	"github.com/eruca/goagents/goagent/memory"
+	"github.com/eruca/goagents/goagent/ports"
 )
 
 type recordingLLM struct {

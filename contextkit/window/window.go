@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/eruca/contextkit"
-	"github.com/eruca/contextkit/toolprojection"
+	"github.com/eruca/goagents/contextkit"
+	"github.com/eruca/goagents/contextkit/toolprojection"
 )
 
 type Config struct {

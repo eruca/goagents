@@ -3,8 +3,8 @@ package runkit_test
 import (
 	"testing"
 
-	"github.com/eruca/runkit"
-	"github.com/eruca/runkit/storetest"
+	"github.com/eruca/goagents/runkit"
+	"github.com/eruca/goagents/runkit/storetest"
 )
 
 func TestMemoryStoreConformance(t *testing.T) {

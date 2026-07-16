@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/eruca/ocrs/paddleocr"
+	"github.com/eruca/goagents/ocrs/paddleocr"
 )
 
 func main() {

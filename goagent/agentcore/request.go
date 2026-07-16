@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/eruca/goagent/policy"
-	"github.com/eruca/goagent/ports"
+	"github.com/eruca/goagents/goagent/policy"
+	"github.com/eruca/goagents/goagent/ports"
 )
 
 type RunRequest struct {

@@ -7,8 +7,8 @@ import (
 	"io"
 	"os"
 
-	"github.com/eruca/goagent/agentcore"
-	"github.com/eruca/goagent/ports"
+	"github.com/eruca/goagents/goagent/agentcore"
+	"github.com/eruca/goagents/goagent/ports"
 )
 
 type mockLLM struct {

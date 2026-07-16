@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/eruca/goagent/ports"
+	"github.com/eruca/goagents/goagent/ports"
 )
 
 func TestClientBuildsChatCompletionsRequest(t *testing.T) {

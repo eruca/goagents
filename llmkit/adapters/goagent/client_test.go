@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/eruca/goagent/extensions/providers/openaiapi"
-	"github.com/eruca/goagent/ports"
-	"github.com/eruca/llmkit/llmkit"
+	"github.com/eruca/goagents/goagent/extensions/providers/openaiapi"
+	"github.com/eruca/goagents/goagent/ports"
+	"github.com/eruca/goagents/llmkit/llmkit"
 )
 
 func TestClientImplementsGoagentLLMClient(t *testing.T) {

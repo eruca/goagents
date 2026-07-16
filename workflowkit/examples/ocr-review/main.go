@@ -8,12 +8,12 @@ import (
 	"os"
 	"strings"
 
-	"github.com/eruca/contextkit"
-	"github.com/eruca/contextkit/toolprojection"
-	"github.com/eruca/goagent/agentcore"
-	"github.com/eruca/ocrs"
-	"github.com/eruca/workflowkit"
-	"github.com/eruca/workflowkit/agentstep"
+	"github.com/eruca/goagents/contextkit"
+	"github.com/eruca/goagents/contextkit/toolprojection"
+	"github.com/eruca/goagents/goagent/agentcore"
+	"github.com/eruca/goagents/ocrs"
+	"github.com/eruca/goagents/workflowkit"
+	"github.com/eruca/goagents/workflowkit/agentstep"
 )
 
 type artifactStore struct {

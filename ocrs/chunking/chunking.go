@@ -8,7 +8,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/eruca/ocrs"
+	"github.com/eruca/goagents/ocrs"
 )
 
 var ErrInvalidConcurrency = errors.New("invalid chunk concurrency")

@@ -8,8 +8,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/eruca/goagent/ports"
-	"github.com/eruca/llmkit/llmkit"
+	"github.com/eruca/goagents/goagent/ports"
+	"github.com/eruca/goagents/llmkit/llmkit"
 )
 
 var _ ports.LLMClient = (*Client)(nil)

@@ -8,9 +8,9 @@ import (
 	"net/http/httptest"
 	"os"
 
-	"github.com/eruca/goagent/tools"
-	"github.com/eruca/mcpkit"
-	"github.com/eruca/mcpkit/officialsdk"
+	"github.com/eruca/goagents/goagent/tools"
+	"github.com/eruca/goagents/mcpkit"
+	"github.com/eruca/goagents/mcpkit/officialsdk"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 

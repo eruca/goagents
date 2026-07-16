@@ -6,8 +6,8 @@ import (
 	"log"
 	"time"
 
-	"github.com/eruca/runkit"
-	"github.com/eruca/workflowkit"
+	"github.com/eruca/goagents/runkit"
+	"github.com/eruca/goagents/workflowkit"
 )
 
 const agentApprovalExpiredReason = "agent tool approval expired"

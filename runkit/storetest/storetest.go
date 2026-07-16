@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eruca/runkit"
+	"github.com/eruca/goagents/runkit"
 )
 
 type NewStore func(*testing.T) runkit.Store

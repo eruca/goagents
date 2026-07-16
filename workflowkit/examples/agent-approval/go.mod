@@ -1,11 +1,11 @@
-module github.com/eruca/workflowkit/examples/agent-approval
+module github.com/eruca/goagents/workflowkit/examples/agent-approval
 
 go 1.26.1
 
 require (
-	github.com/eruca/goagent v0.0.0
-	github.com/eruca/workflowkit v0.0.0
-	github.com/eruca/workflowkit/agentstep v0.0.0
+	github.com/eruca/goagents/goagent v0.1.0
+	github.com/eruca/goagents/workflowkit v0.1.0
+	github.com/eruca/goagents/workflowkit/agentstep v0.1.0
 )
 
 require (
@@ -14,8 +14,8 @@ require (
 	golang.org/x/text v0.30.0 // indirect
 )
 
-replace github.com/eruca/goagent => ../../../goagent
+replace github.com/eruca/goagents/goagent => ../../../goagent
 
-replace github.com/eruca/workflowkit => ../..
+replace github.com/eruca/goagents/workflowkit => ../..
 
-replace github.com/eruca/workflowkit/agentstep => ../../agentstep
+replace github.com/eruca/goagents/workflowkit/agentstep => ../../agentstep

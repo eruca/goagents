@@ -6,8 +6,8 @@ import (
 	"io"
 	"os"
 
-	"github.com/eruca/workflowkit"
-	"github.com/eruca/workflowkit/sqlitestore"
+	"github.com/eruca/goagents/workflowkit"
+	"github.com/eruca/goagents/workflowkit/sqlitestore"
 )
 
 type approvalStep struct{}

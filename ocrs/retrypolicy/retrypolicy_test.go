@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eruca/ocrs"
+	"github.com/eruca/goagents/ocrs"
 )
 
 func TestRetryThenSuccess(t *testing.T) {

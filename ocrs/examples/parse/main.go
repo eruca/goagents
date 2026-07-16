@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/eruca/ocrs/paddleocr"
+	"github.com/eruca/goagents/ocrs/paddleocr"
 )
 
 func main() {

@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/eruca/goagent/agentcore"
-	"github.com/eruca/goagent/ports"
-	"github.com/eruca/skillkit"
+	"github.com/eruca/goagents/goagent/agentcore"
+	"github.com/eruca/goagents/goagent/ports"
+	"github.com/eruca/goagents/skillkit"
 )
 
 var _ agentcore.SkillProvider = Provider{}

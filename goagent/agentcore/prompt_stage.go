@@ -3,8 +3,8 @@ package agentcore
 import (
 	"context"
 
-	"github.com/eruca/goagent/ports"
-	"github.com/eruca/goagent/prompt"
+	"github.com/eruca/goagents/goagent/ports"
+	"github.com/eruca/goagents/goagent/prompt"
 )
 
 type PromptStage struct {

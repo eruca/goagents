@@ -21,9 +21,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eruca/runkit"
-	"github.com/eruca/workflowkit"
-	workflowsql "github.com/eruca/workflowkit/sqlitestore"
+	"github.com/eruca/goagents/runkit"
+	"github.com/eruca/goagents/workflowkit"
+	workflowsql "github.com/eruca/goagents/workflowkit/sqlitestore"
 )
 
 const (

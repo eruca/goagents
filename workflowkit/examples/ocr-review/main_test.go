@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/eruca/ocrs"
-	"github.com/eruca/workflowkit"
+	"github.com/eruca/goagents/ocrs"
+	"github.com/eruca/goagents/workflowkit"
 )
 
 func TestRunExample(t *testing.T) {

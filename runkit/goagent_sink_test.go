@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/eruca/goagent/agentcore"
+	"github.com/eruca/goagents/goagent/agentcore"
 )
 
 func TestGoagentEventSinkCreatesRunAndRecordsEvents(t *testing.T) {

@@ -1,6 +1,6 @@
 package tools
 
-import "github.com/eruca/goagent/ports"
+import "github.com/eruca/goagents/goagent/ports"
 
 type Tool = ports.Tool
 

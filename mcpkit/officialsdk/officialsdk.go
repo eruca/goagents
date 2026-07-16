@@ -10,7 +10,7 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/eruca/mcpkit"
+	"github.com/eruca/goagents/mcpkit"
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )

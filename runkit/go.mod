@@ -1,10 +1,10 @@
-module github.com/eruca/runkit
+module github.com/eruca/goagents/runkit
 
 go 1.26.1
 
 require (
 	github.com/99designs/go-keychain v0.0.0-20191008050251-8e49817e8af4
-	github.com/eruca/goagent v0.0.0
+	github.com/eruca/goagents/goagent v0.1.0
 	github.com/jackc/pgx/v5 v5.7.6
 	modernc.org/sqlite v1.50.0
 )
@@ -27,5 +27,3 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
-
-replace github.com/eruca/goagent => ../goagent

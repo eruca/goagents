@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/eruca/contextkit"
+	"github.com/eruca/goagents/contextkit"
 )
 
 func TestProjectToolMessageUsesStructuredObservation(t *testing.T) {

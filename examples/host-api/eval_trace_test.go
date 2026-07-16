@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eruca/evalkit"
-	"github.com/eruca/runkit"
-	"github.com/eruca/skillkit"
-	"github.com/eruca/workflowkit"
+	"github.com/eruca/goagents/evalkit"
+	"github.com/eruca/goagents/runkit"
+	"github.com/eruca/goagents/skillkit"
+	"github.com/eruca/goagents/workflowkit"
 )
 
 func TestHostEvalSuiteUsesPersistedTrajectoryAndOutcome(t *testing.T) {

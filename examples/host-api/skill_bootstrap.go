@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/eruca/skillkit"
+	"github.com/eruca/goagents/skillkit"
 )
 
 const (

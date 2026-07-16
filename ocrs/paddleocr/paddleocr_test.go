@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eruca/ocrs/retrypolicy"
+	"github.com/eruca/goagents/ocrs/retrypolicy"
 )
 
 func TestHandleSuccess(t *testing.T) {

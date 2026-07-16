@@ -8,5 +8,5 @@
 // environment variables, secret stores, or aliases.
 //
 // llmkit is an optional adapter/capability module in the goagents workspace. It
-// is not part of github.com/eruca/goagent core, and goagent must not import it.
+// is not part of github.com/eruca/goagents/goagent core, and goagent must not import it.
 package llmkit

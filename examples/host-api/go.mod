@@ -4,14 +4,13 @@ go 1.26.1
 
 require (
 	github.com/coreos/go-oidc/v3 v3.20.0
-	github.com/eruca/artifactkit v0.0.0
-	github.com/eruca/evalkit v0.0.0
-	github.com/eruca/goagent v0.0.0
-	github.com/eruca/llmkit v0.0.0
-	github.com/eruca/runkit v0.0.0
-	github.com/eruca/skillkit v0.0.0
-	github.com/eruca/workflowkit v0.0.0
-	github.com/eruca/workflowkit/agentstep v0.0.0
+	github.com/eruca/goagents/artifactkit v0.1.0
+	github.com/eruca/goagents/evalkit v0.1.0
+	github.com/eruca/goagents/goagent v0.1.0
+	github.com/eruca/goagents/llmkit v0.1.0
+	github.com/eruca/goagents/runkit v0.1.0
+	github.com/eruca/goagents/skillkit v0.1.0
+	github.com/eruca/goagents/workflowkit v0.1.0
 )
 
 require (
@@ -33,18 +32,16 @@ require (
 	modernc.org/sqlite v1.50.0 // indirect
 )
 
-replace github.com/eruca/artifactkit => ../../artifactkit
+replace github.com/eruca/goagents/artifactkit => ../../artifactkit
 
-replace github.com/eruca/evalkit => ../../evalkit
+replace github.com/eruca/goagents/evalkit => ../../evalkit
 
-replace github.com/eruca/goagent => ../../goagent
+replace github.com/eruca/goagents/goagent => ../../goagent
 
-replace github.com/eruca/llmkit => ../../llmkit
+replace github.com/eruca/goagents/llmkit => ../../llmkit
 
-replace github.com/eruca/runkit => ../../runkit
+replace github.com/eruca/goagents/runkit => ../../runkit
 
-replace github.com/eruca/skillkit => ../../skillkit
+replace github.com/eruca/goagents/skillkit => ../../skillkit
 
-replace github.com/eruca/workflowkit => ../../workflowkit
-
-replace github.com/eruca/workflowkit/agentstep => ../../workflowkit/agentstep
+replace github.com/eruca/goagents/workflowkit => ../../workflowkit

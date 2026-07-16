@@ -1,4 +1,4 @@
-module github.com/eruca/workflowkit
+module github.com/eruca/goagents/workflowkit
 
 go 1.26.1
 

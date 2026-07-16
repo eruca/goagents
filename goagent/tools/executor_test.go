@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eruca/goagent/policy"
+	"github.com/eruca/goagents/goagent/policy"
 )
 
 func TestExecutorPassesRawJSONAndSeparatesOutputs(t *testing.T) {
