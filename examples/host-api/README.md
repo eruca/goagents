@@ -63,6 +63,31 @@ raw Provider error. Missing configuration produces `SKIP`, which is an
 environment blocker rather than a passing acceptance result. The deliberately
 invalid credential used by the negative subtest is a fixed synthetic value.
 
+## Real Host local trial
+
+The opt-in composition gate combines a real OpenAI-compatible Provider with
+the actual Host binary, SQLite runtime state, loopback OIDC verification, and a
+temporary `.smoke.` Keychain item. It creates a workflow, rejects an invalid
+approval token, restarts at the persisted final-approval boundary, completes
+approval with a valid token, restarts again, and checks the workflow, AgentRun,
+route, and event evidence:
+
+```bash
+export OPENAI_COMPAT_BASE_URL=https://provider.example/v1
+export OPENAI_COMPAT_MODEL=provider-model
+export OPENAI_COMPAT_API_KEY=... # supply through the local shell or secret store
+
+go test -v -tags 'hostapisystemsmoke provideracceptance' \
+  -run '^TestHostAPIProcessRealProviderLocalTrial$' \
+  -count=1 ./...
+```
+
+This gate needs an interactive macOS login session with an unlocked Keychain.
+It does not enter default CI and it does not replace a production IdP test: the
+Provider is real, while OIDC discovery/JWKS and the bearer token are local and
+synthetic. Missing Provider configuration or Keychain access produces `SKIP`,
+which is an environment blocker rather than a passing trial.
+
 ## Single-host stability gate
 
 The stability gate targets an Apple M1 Pro with 10 CPU cores, 16 GiB RAM, and
