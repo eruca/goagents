@@ -54,15 +54,6 @@ func (s *Server) finalizeAgentApprovalShutdown(
 		if checkpoint.LeaseOwner != leaseOwner {
 			return nil
 		}
-		if err := s.agentApprovals.checkpoints.FailLease(ctx, runkit.CheckpointLeaseCompletion{
-			CheckpointID: approval.CheckpointID,
-			TenantID:     checkpoint.TenantID,
-			LeaseOwner:   leaseOwner,
-			FailureCode:  hostShutdownTimeoutCode,
-			Now:          time.Now(),
-		}); err != nil {
-			return err
-		}
 	case runkit.CheckpointConsumed:
 		// A consumed checkpoint cannot be replayed. Continue below so an
 		// incompletely persisted resume is made terminal.
@@ -86,6 +77,18 @@ func (s *Server) finalizeAgentApprovalShutdown(
 	}
 	if !workflowStillPending {
 		return nil
+	}
+
+	if checkpoint.Status == runkit.CheckpointLeased {
+		if err := s.agentApprovals.checkpoints.FailLease(ctx, runkit.CheckpointLeaseCompletion{
+			CheckpointID: approval.CheckpointID,
+			TenantID:     checkpoint.TenantID,
+			LeaseOwner:   leaseOwner,
+			FailureCode:  hostShutdownTimeoutCode,
+			Now:          time.Now(),
+		}); err != nil {
+			return err
+		}
 	}
 
 	agentRun, err := s.runs.Get(ctx, checkpoint.RunID)
