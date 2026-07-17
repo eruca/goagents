@@ -3,6 +3,7 @@ package hostkit
 import (
 	"bytes"
 	"errors"
+	"reflect"
 	"testing"
 )
 
@@ -41,18 +42,18 @@ func TestFailurePreservesCauseAndClassification(t *testing.T) {
 	}
 
 	result := resultFromError(err)
-	if result.Code != string(CodeListenFailed) || result.ExitCode != 3 {
+	if result.Code() != string(CodeListenFailed) || result.ExitCode() != 3 {
 		t.Fatalf("resultFromError(Fail(...)) = %+v, want listen_failed/3", result)
 	}
-	if result.Err != err {
+	if result.Err() != err {
 		t.Fatal("result error did not retain classified error")
 	}
 }
 
 func TestFailureExitCodeCannotBeCustomized(t *testing.T) {
 	result := resultFromError(Fail(CodeServeFailed, "safe serve failure", errors.New("raw cause")))
-	if result.ExitCode != 4 {
-		t.Fatalf("Fail-derived exit code = %d, want 4", result.ExitCode)
+	if result.ExitCode() != 4 {
+		t.Fatalf("Fail-derived exit code = %d, want 4", result.ExitCode())
 	}
 }
 
@@ -60,11 +61,46 @@ func TestFailureNormalizesUnclassifiedErrors(t *testing.T) {
 	err := errors.New("unclassified failure")
 	result := resultFromError(err)
 
-	if result.Code != string(CodeInternalError) || result.ExitCode != 1 {
+	if result.Code() != string(CodeInternalError) || result.ExitCode() != 1 {
 		t.Fatalf("resultFromError(unclassified) = %+v, want internal_error/1", result)
 	}
-	if result.Err != err {
-		t.Fatal("result error did not retain unclassified error")
+	if !errors.Is(result.Err(), err) {
+		t.Fatal("result error does not unwrap to unclassified cause")
+	}
+}
+
+func TestFailureNormalizesUnknownCode(t *testing.T) {
+	cause := errors.New("raw cause")
+	result := resultFromError(Fail(Code("unknown"), "safe message", cause))
+
+	if result.Code() != string(CodeInternalError) || result.ExitCode() != 1 {
+		t.Fatalf("resultFromError(Fail(unknown, ...)) = %+v, want internal_error/1", result)
+	}
+	if !errors.Is(result.Err(), cause) {
+		t.Fatal("normalized unknown-code error does not retain its cause")
+	}
+}
+
+func TestResultFromNilIsSuccess(t *testing.T) {
+	result := resultFromError(nil)
+	if result.ExitCode() != 0 || result.Code() != "" || result.Err() != nil {
+		t.Fatalf("resultFromError(nil) = %+v, want zero success Result", result)
+	}
+}
+
+func TestResultExposesOnlyReadOnlyMethods(t *testing.T) {
+	resultType := reflect.TypeOf(Result{})
+	for i := 0; i < resultType.NumField(); i++ {
+		field := resultType.Field(i)
+		if field.IsExported() {
+			t.Fatalf("Result exposes writable field %q", field.Name)
+		}
+	}
+
+	for _, method := range []string{"ExitCode", "Code", "Err"} {
+		if _, ok := resultType.MethodByName(method); !ok {
+			t.Fatalf("Result does not expose read-only %s method", method)
+		}
 	}
 }
 
@@ -104,5 +140,18 @@ func TestWriteErrorEscapesSpecialMessageCharacters(t *testing.T) {
 	}
 	if bytes.Count(output.Bytes(), []byte{'\n'}) != 1 {
 		t.Fatalf("WriteError() emitted multiple lines: %q", output.String())
+	}
+}
+
+func TestWriteErrorDoesNotExposeUnclassifiedCause(t *testing.T) {
+	result := resultFromError(errors.New("raw provider secret"))
+	var output bytes.Buffer
+
+	if err := WriteError(&output, result); err != nil {
+		t.Fatalf("WriteError() error = %v", err)
+	}
+	const want = "{\"level\":\"error\",\"event\":\"host_exit\",\"code\":\"internal_error\",\"message\":\"internal error\"}\n"
+	if got := output.String(); got != want {
+		t.Fatalf("WriteError() = %q, want %q", got, want)
 	}
 }

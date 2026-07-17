@@ -64,9 +64,11 @@ var exitCases = []struct {
 测试还必须证明：
 
 - `Fail(code, safeMessage, cause)` 可被 `errors.Is` 追溯到 cause；
-- 未分类 error 归一为 `internal_error/1`；
-- 调用方不能自定义 exit code；
-- `WriteError` 对 `ExitCode == 0` 不写任何字节；
+- 未分类 error 和未知 `Code` 都归一为 `internal_error/1`，未分类 cause 不得进入 JSON，
+  但 `errors.Is(result.Err(), cause)` 仍成立；
+- `Result` 只有私有 fields 和 `ExitCode()`、`Code()`、`Err()` 只读方法，调用方不能自定义
+  exit code、code 或注入 raw cause；
+- `WriteError` 对 canonical `Result` 的 `ExitCode() == 0` 不写任何字节；
 - 非零结果只写一行，例如 `{"level":"error","event":"host_exit","code":"listen_failed","message":"safe listen failure"}\n`；
 - message 中的 JSON 特殊字符被标准 encoder 正确转义，不产生第二行或嵌套 error。
 
@@ -94,16 +96,22 @@ const (
 )
 
 type Result struct {
-    ExitCode int
-    Code     string
-    Err      error
+    // fields are private
 }
+
+func (Result) ExitCode() int
+func (Result) Code() string
+func (Result) Err() error
 
 func Fail(code Code, safeMessage string, cause error) error
 func WriteError(w io.Writer, result Result) error
 ```
 
-`Fail` 返回的具体类型保持包内私有，`Error()` 只返回 `safeMessage`，`Unwrap()` 返回 cause。增加包内 `resultFromError(error) Result` 和穷尽的 `exitCode(Code) int`；分类必须用 `errors.As`，禁止解析错误字符串。
+`Fail` 返回的具体类型保持包内私有，`Error()` 只返回 `safeMessage`，`Unwrap()` 返回 cause。
+`Result` fields 保持私有；`resultFromError(error) Result` 和后续 `Run` 是非零 Result 的唯一构造
+路径，零值 Result 仅表示成功。增加包内穷尽的 `exitCode(Code) int`；分类必须用 `errors.As`，
+禁止解析错误字符串。未知 Code 与未分类 error 都构造 canonical `internal_error/1`，其中未分类
+error 使用固定安全 message 保留 cause；`WriteError` 只读取该 canonical Result。
 
 - [ ] **Step 5:** 运行：
 
@@ -807,7 +815,7 @@ func runHost() int {
 3. 构建 `hostAPIService`；
 4. 调用 `hostkit.Run`，options 为配置 drain timeout 和固定 `5s` cleanup；
 5. 仅非零结果调用 `hostkit.WriteError(stderr, result)`；
-6. 返回 `result.ExitCode`。
+6. 返回 `result.ExitCode()`。
 
 错误 message 在 Host 边界生成安全摘要；不得把完整 Provider response、环境值或 checkpoint 注入 message。
 

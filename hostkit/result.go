@@ -21,10 +21,19 @@ const (
 
 // Result is the normalized host process outcome.
 type Result struct {
-	ExitCode int
-	Code     string
-	Err      error
+	exitCode int
+	code     string
+	err      error
 }
+
+// ExitCode returns the process exit code selected by hostkit.
+func (r Result) ExitCode() int { return r.exitCode }
+
+// Code returns the normalized lifecycle failure code.
+func (r Result) Code() string { return r.code }
+
+// Err returns the classified error. It can be inspected with errors.Is.
+func (r Result) Err() error { return r.err }
 
 // failure keeps the host-safe message separate from the original cause.
 type failure struct {
@@ -43,16 +52,38 @@ func Fail(code Code, safeMessage string, cause error) error {
 }
 
 func resultFromError(err error) Result {
-	code := CodeInternalError
+	if err == nil {
+		return Result{}
+	}
+
 	var classified *failure
-	if errors.As(err, &classified) {
-		code = classified.code
+	if errors.As(err, &classified) && isKnownCode(classified.code) {
+		return Result{
+			exitCode: exitCode(classified.code),
+			code:     string(classified.code),
+			err:      err,
+		}
 	}
 
 	return Result{
-		ExitCode: exitCode(code),
-		Code:     string(code),
-		Err:      err,
+		exitCode: exitCode(CodeInternalError),
+		code:     string(CodeInternalError),
+		err:      Fail(CodeInternalError, "internal error", err),
+	}
+}
+
+func isKnownCode(code Code) bool {
+	switch code {
+	case CodeInternalError,
+		CodeConfigFailed,
+		CodeInitializationFailed,
+		CodeListenFailed,
+		CodeServeFailed,
+		CodeShutdownTimeout,
+		CodeShutdownCleanupTimeout:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -75,13 +106,13 @@ func exitCode(code Code) int {
 
 // WriteError emits one JSON error line for a non-successful host result.
 func WriteError(w io.Writer, result Result) error {
-	if result.ExitCode == 0 {
+	if result.exitCode == 0 {
 		return nil
 	}
 
 	message := ""
-	if result.Err != nil {
-		message = result.Err.Error()
+	if result.err != nil {
+		message = result.err.Error()
 	}
 	return json.NewEncoder(w).Encode(struct {
 		Level   string `json:"level"`
@@ -91,7 +122,7 @@ func WriteError(w io.Writer, result Result) error {
 	}{
 		Level:   "error",
 		Event:   "host_exit",
-		Code:    result.Code,
+		Code:    result.code,
 		Message: message,
 	})
 }

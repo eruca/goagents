@@ -92,10 +92,12 @@ type Options struct {
 }
 
 type Result struct {
-    ExitCode int
-    Code     string
-    Err      error
+    // fields are private
 }
+
+func (Result) ExitCode() int
+func (Result) Code() string
+func (Result) Err() error
 
 func Run(
     ctx context.Context,
@@ -121,10 +123,14 @@ func WriteError(w io.Writer, result Result) error
 事件 channel；Host CLI 把 `SIGINT/SIGTERM` 转换成事件。`hostkit` 不直接依赖 Unix signal
 常量，因此单元测试可以确定性驱动第一次和第二次中断。
 
-`hostkit` 还提供受限的 `Code` 常量和带 cause 的 `Failure` 构造函数。退出码由 `Code`
+`hostkit` 还提供受限的 `Code` 常量和带 cause 的 `Fail` 构造函数。`Result` 的 fields
+保持私有，调用方只能通过 `ExitCode()`、`Code()` 和 `Err()` 读取；`Run`（以及包内
+`resultFromError`）是非零 `Result` 的唯一构造路径，零值只表示成功。退出码由 `Code`
 唯一映射，调用方不能为同一个 code 指定另一个退出码。`Run` 使用 `errors.As` 读取
-`Failure`；未分类错误统一降级为 `internal_error`，禁止解析 `err.Error()` 文本决定分类。
-`WriteError` 只负责把非零 `Result` 编码为固定 JSON schema。
+`Fail` 返回的私有错误类型；未分类错误和未知 `Code` 都统一归一为 `internal_error/1`，
+并使用固定安全 message，同时仍可通过 `errors.Is(result.Err(), cause)` 追溯原始 cause。
+禁止解析 `err.Error()` 文本决定分类。`WriteError` 只读取库内生成的 canonical `Result`，
+把非零结果编码为固定 JSON schema，绝不把未分类 cause 的文本写入 JSON。
 
 不增加 participant 注册表、依赖图、插件系统、自动启动排序或任意 callback 列表。一个
 `hostkit.Run` 只协调一个 `Service`，具体 Host 在 adapter 内自行组合其组件。
