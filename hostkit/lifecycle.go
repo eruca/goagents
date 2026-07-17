@@ -40,17 +40,40 @@ func Run(
 	}
 
 	done := service.Done()
-	select {
-	case <-ctx.Done():
-		return drain(ctx, service, done, interrupts, options)
-	case <-interrupts:
-		return drain(ctx, service, done, interrupts, options)
-	case err := <-done:
-		if err == nil {
-			err = errors.New("hostkit: service stopped without an error")
+	shutdownRequested := false
+	for {
+		// Done has priority over a shutdown request that was already selected.
+		// Keeping the request as state and checking Done again avoids losing an
+		// error when both channels were ready in the same select.
+		select {
+		case err := <-done:
+			if err == nil {
+				err = errors.New("hostkit: service stopped without an error")
+			}
+			return cleanup(ctx, service, options.CleanupTimeout, true, err)
+		default:
 		}
-		return cleanup(ctx, service, options.CleanupTimeout, true, err)
+		if shutdownRequested {
+			return drain(ctx, service, done, interrupts, options)
+		}
+
+		select {
+		case err := <-done:
+			if err == nil {
+				err = errors.New("hostkit: service stopped without an error")
+			}
+			return cleanup(ctx, service, options.CleanupTimeout, true, err)
+		case <-ctx.Done():
+			shutdownRequested = true
+		case <-interrupts:
+			shutdownRequested = true
+		}
 	}
+}
+
+type drainTerminal struct {
+	force   bool
+	outcome error
 }
 
 func drain(
@@ -69,57 +92,53 @@ func drain(
 		drainResult <- service.Drain(drainCtx)
 	}()
 
-	var serveErr error
+	var terminal *drainTerminal
 	for {
+		// A lower-priority terminal event is first retained as state. This
+		// priority phase then consumes an already-observable Done result before
+		// cleanup starts, including when Drain and Done became ready together.
 		select {
 		case err := <-done:
-			// Done(nil) is the expected serve termination during graceful drain.
-			// Disable Done after its one terminal observation to avoid a closed
-			// channel spinning this state.
 			done = nil
 			if err != nil {
-				serveErr = err
+				cancelDrain()
+				terminal = &drainTerminal{force: true, outcome: err}
+			}
+		default:
+		}
+		if terminal != nil {
+			cancelDrain()
+			return cleanup(
+				parent,
+				service,
+				options.CleanupTimeout,
+				terminal.force,
+				terminal.outcome,
+			)
+		}
+
+		select {
+		case err := <-done:
+			// Done(nil) is expected while draining. A non-nil result is a
+			// serve failure and therefore forces cleanup even if Drain succeeds.
+			done = nil
+			if err != nil {
+				cancelDrain()
+				terminal = &drainTerminal{force: true, outcome: err}
 			}
 		case err := <-drainResult:
-			if drainCtx.Err() == context.DeadlineExceeded {
-				cancelDrain()
-				return cleanup(
-					parent,
-					service,
-					options.CleanupTimeout,
-					true,
-					preferServeError(serveErr, shutdownTimeoutError()),
-				)
-			}
 			cancelDrain()
-			if err == nil {
-				return cleanup(parent, service, options.CleanupTimeout, false, serveErr)
+			if drainCtx.Err() == context.DeadlineExceeded {
+				terminal = &drainTerminal{force: true, outcome: shutdownTimeoutError()}
+			} else {
+				terminal = &drainTerminal{force: err != nil, outcome: err}
 			}
-			return cleanup(
-				parent,
-				service,
-				options.CleanupTimeout,
-				true,
-				preferServeError(serveErr, err),
-			)
 		case <-drainCtx.Done():
 			cancelDrain()
-			return cleanup(
-				parent,
-				service,
-				options.CleanupTimeout,
-				true,
-				preferServeError(serveErr, shutdownTimeoutError()),
-			)
+			terminal = &drainTerminal{force: true, outcome: shutdownTimeoutError()}
 		case <-interrupts:
 			cancelDrain()
-			return cleanup(
-				parent,
-				service,
-				options.CleanupTimeout,
-				true,
-				preferServeError(serveErr, shutdownTimeoutError()),
-			)
+			terminal = &drainTerminal{force: true, outcome: shutdownTimeoutError()}
 		}
 	}
 }
@@ -139,7 +158,7 @@ func cleanup(
 		if timedOut {
 			return cleanupTimeoutResult()
 		}
-		if err != nil {
+		if err != nil && outcome == nil {
 			outcome = err
 		}
 	}
@@ -172,13 +191,6 @@ func runCleanupHook(
 	case <-ctx.Done():
 		return nil, true
 	}
-}
-
-func preferServeError(serveErr, fallback error) error {
-	if serveErr != nil {
-		return serveErr
-	}
-	return fallback
 }
 
 func shutdownTimeoutError() error {

@@ -23,29 +23,32 @@ type fakeService struct {
 	closeErr error
 	done     chan error
 
-	drainStarted chan struct{}
-	allowDrain   chan struct{}
-	forceStarted chan struct{}
-	allowForce   chan struct{}
-	closeStarted chan struct{}
-	allowClose   chan struct{}
+	drainStarted  chan struct{}
+	allowDrain    chan struct{}
+	forceStarted  chan struct{}
+	allowForce    chan struct{}
+	forceFinished chan struct{}
+	closeStarted  chan struct{}
+	allowClose    chan struct{}
 
-	mu            sync.Mutex
-	calls         []string
-	doneCalls     int
-	forceDeadline time.Time
-	closeDeadline time.Time
+	mu                 sync.Mutex
+	calls              []string
+	doneCalls          int
+	ignoreForceContext bool
+	forceDeadline      time.Time
+	closeDeadline      time.Time
 }
 
 func newFakeService() *fakeService {
 	return &fakeService{
-		done:         make(chan error, 1),
-		drainStarted: make(chan struct{}, 1),
-		allowDrain:   make(chan struct{}),
-		forceStarted: make(chan struct{}, 1),
-		allowForce:   make(chan struct{}),
-		closeStarted: make(chan struct{}, 1),
-		allowClose:   make(chan struct{}),
+		done:          make(chan error, 1),
+		drainStarted:  make(chan struct{}, 1),
+		allowDrain:    make(chan struct{}),
+		forceStarted:  make(chan struct{}, 1),
+		allowForce:    make(chan struct{}),
+		forceFinished: make(chan struct{}, 1),
+		closeStarted:  make(chan struct{}, 1),
+		allowClose:    make(chan struct{}),
 	}
 }
 
@@ -74,12 +77,19 @@ func (f *fakeService) Drain(ctx context.Context) error {
 
 func (f *fakeService) ForceStop(ctx context.Context) error {
 	f.record("force_stop")
+	defer func() {
+		f.forceFinished <- struct{}{}
+	}()
 	if deadline, ok := ctx.Deadline(); ok {
 		f.mu.Lock()
 		f.forceDeadline = deadline
 		f.mu.Unlock()
 	}
 	f.forceStarted <- struct{}{}
+	if f.ignoreForceContext {
+		<-f.allowForce
+		return f.forceErr
+	}
 	select {
 	case <-f.allowForce:
 		return f.forceErr
@@ -294,6 +304,28 @@ func TestRunCleanupTimeoutWinsOverServeFailure(t *testing.T) {
 	assertCalls(t, service, []string{"start", "drain", "force_stop", "close"})
 }
 
+func TestRunCleanupDeadlineDoesNotCloseWhileForceStopBlocked(t *testing.T) {
+	service := newFakeService()
+	service.ignoreForceContext = true
+	interrupts := make(chan struct{}, 2)
+	interrupts <- struct{}{}
+	result := runAsync(context.Background(), service, interrupts, Options{
+		DrainTimeout:   time.Hour,
+		CleanupTimeout: 20 * time.Millisecond,
+	})
+
+	waitSignal(t, service.drainStarted, "Drain")
+	interrupts <- struct{}{}
+
+	assertResult(t, waitResult(t, result), CodeShutdownCleanupTimeout, nil)
+	assertCalls(t, service, []string{"start", "drain", "force_stop"})
+
+	// Release the deliberately non-conforming hook so the test itself does not
+	// leave its service goroutine behind.
+	close(service.allowForce)
+	waitSignal(t, service.forceFinished, "ForceStop return")
+}
+
 func TestRunStartFailureStillCloses(t *testing.T) {
 	startCause := errors.New("start cause")
 	startErr := Fail(CodeInitializationFailed, "start failed", startCause)
@@ -336,6 +368,68 @@ func TestRunUnexpectedDoneErrorForcesThenPreservesServeFailure(t *testing.T) {
 
 	assertResult(t, result, CodeServeFailed, serveCause)
 	assertCalls(t, service, []string{"start", "force_stop", "close"})
+}
+
+func TestRunDoneErrorWinsOverReadyInterrupt(t *testing.T) {
+	for range 200 {
+		serveCause := errors.New("serve cause")
+		service := newFakeService()
+		close(service.allowDrain)
+		close(service.allowForce)
+		close(service.allowClose)
+		service.done <- Fail(CodeServeFailed, "serve failed", serveCause)
+		interrupts := make(chan struct{}, 1)
+		interrupts <- struct{}{}
+
+		result := Run(context.Background(), service, interrupts, defaultRunOptions)
+
+		assertResult(t, result, CodeServeFailed, serveCause)
+		assertCalls(t, service, []string{"start", "force_stop", "close"})
+	}
+}
+
+func TestRunDoneErrorWinsOverReadyDrainSuccess(t *testing.T) {
+	serveCause := errors.New("serve cause")
+	service := newFakeService()
+	close(service.allowForce)
+	close(service.allowClose)
+	interrupts := make(chan struct{}, 1)
+	interrupts <- struct{}{}
+	result := runAsync(context.Background(), service, interrupts, defaultRunOptions)
+
+	waitSignal(t, service.drainStarted, "Drain")
+	service.done <- Fail(CodeServeFailed, "serve failed", serveCause)
+	close(service.allowDrain)
+
+	assertResult(t, waitResult(t, result), CodeServeFailed, serveCause)
+	assertCalls(t, service, []string{"start", "drain", "force_stop", "close"})
+}
+
+func TestRunServeFailureWinsOverForceStopFailure(t *testing.T) {
+	serveCause := errors.New("serve cause")
+	service := newFakeService()
+	service.done = make(chan error)
+	service.forceErr = errors.New("force cause")
+	close(service.allowForce)
+	close(service.allowClose)
+	interrupts := make(chan struct{}, 2)
+	interrupts <- struct{}{}
+	result := runAsync(context.Background(), service, interrupts, Options{
+		DrainTimeout:   time.Hour,
+		CleanupTimeout: time.Second,
+	})
+
+	waitSignal(t, service.drainStarted, "Drain")
+	doneSent := make(chan struct{})
+	go func() {
+		service.done <- Fail(CodeServeFailed, "serve failed", serveCause)
+		close(doneSent)
+	}()
+	waitSignal(t, doneSent, "Done receive")
+	interrupts <- struct{}{}
+
+	assertResult(t, waitResult(t, result), CodeServeFailed, serveCause)
+	assertCalls(t, service, []string{"start", "drain", "force_stop", "close"})
 }
 
 func TestRunUnexpectedNilDoneIsInternalError(t *testing.T) {
@@ -443,7 +537,7 @@ func TestRunClassifiedDrainFailureForcesThenPreservesFailure(t *testing.T) {
 	assertCalls(t, service, []string{"start", "drain", "force_stop", "close"})
 }
 
-func TestRunClassifiedForceStopFailureIsPreserved(t *testing.T) {
+func TestRunExistingShutdownOutcomeWinsOverClassifiedForceStopFailure(t *testing.T) {
 	forceCause := errors.New("force cause")
 	service := newFakeService()
 	service.forceErr = Fail(CodeServeFailed, "force failed", forceCause)
@@ -459,7 +553,11 @@ func TestRunClassifiedForceStopFailureIsPreserved(t *testing.T) {
 	waitSignal(t, service.drainStarted, "Drain")
 	interrupts <- struct{}{}
 
-	assertResult(t, waitResult(t, result), CodeServeFailed, forceCause)
+	got := waitResult(t, result)
+	assertResult(t, got, CodeShutdownTimeout, nil)
+	if errors.Is(got.Err(), forceCause) {
+		t.Fatal("ForceStop failure replaced the existing shutdown outcome")
+	}
 	assertCalls(t, service, []string{"start", "drain", "force_stop", "close"})
 }
 
