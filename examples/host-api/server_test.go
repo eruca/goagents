@@ -741,6 +741,81 @@ func TestQueuedWorkerWaitReturnsAfterIntakeStops(t *testing.T) {
 	}
 }
 
+func TestQueuedWorkerReleasesClaimWhenIntakeStopsBeforeExecutionRegistration(t *testing.T) {
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+	queue := newClaimBarrierQueueLeaseStore(server.queue)
+	server.queue = queue
+	step := newSingleSlotStep(make(chan struct{}), 1)
+	server.executor = workflowkit.NewExecutor(server.workflows, []workflowkit.Step{step})
+	savePendingWorkflow(t, server.workflows, "wf-claim-intake-stopped", time.Now().UTC())
+
+	intakeCtx, cancelIntake := context.WithCancel(t.Context())
+	server.StartQueuedWorkerWithContexts(intakeCtx, t.Context())
+	waitForQueuedWorkerSignal(t, queue.claimed, "queue claim")
+	cancelIntake()
+	close(queue.returnClaim)
+	waitForQueuedWorkerSignal(t, queue.leaseReleased, "lease release")
+
+	waitCtx, cancelWait := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancelWait()
+	if err := server.WaitQueuedWorker(waitCtx); err != nil {
+		t.Fatalf("WaitQueuedWorker returned error: %v", err)
+	}
+
+	workflow, err := server.workflows.Get(t.Context(), "wf-claim-intake-stopped")
+	if err != nil {
+		t.Fatalf("Get workflow returned error: %v", err)
+	}
+	if workflow.Status != workflowkit.StatusPending || workflow.LeaseOwner != "" || !workflow.LeaseUntil.IsZero() {
+		t.Fatalf("workflow = %+v, want pending with released lease", workflow)
+	}
+	_, counts := step.snapshot()
+	if counts[workflow.ID] != 0 {
+		t.Fatalf("workflow execution count = %d, want 0", counts[workflow.ID])
+	}
+}
+
+func TestQueuedWorkerReleasesClaimWhenExecutionRegistryRejectsBegin(t *testing.T) {
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+	queue := newClaimBarrierQueueLeaseStore(server.queue)
+	server.queue = queue
+	step := newSingleSlotStep(make(chan struct{}), 1)
+	server.executor = workflowkit.NewExecutor(server.workflows, []workflowkit.Step{step})
+	savePendingWorkflow(t, server.workflows, "wf-claim-registry-draining", time.Now().UTC())
+	server.executions.BeginDrain()
+
+	intakeCtx, cancelIntake := context.WithCancel(t.Context())
+	server.StartQueuedWorkerWithContexts(intakeCtx, t.Context())
+	waitForQueuedWorkerSignal(t, queue.claimed, "queue claim")
+	close(queue.returnClaim)
+	waitForQueuedWorkerSignal(t, queue.leaseReleased, "lease release after registry rejection")
+	cancelIntake()
+
+	waitCtx, cancelWait := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancelWait()
+	if err := server.WaitQueuedWorker(waitCtx); err != nil {
+		t.Fatalf("WaitQueuedWorker returned error: %v", err)
+	}
+
+	workflow, err := server.workflows.Get(t.Context(), "wf-claim-registry-draining")
+	if err != nil {
+		t.Fatalf("Get workflow returned error: %v", err)
+	}
+	if workflow.Status != workflowkit.StatusPending || workflow.LeaseOwner != "" || !workflow.LeaseUntil.IsZero() {
+		t.Fatalf("workflow = %+v, want pending with released lease", workflow)
+	}
+	_, counts := step.snapshot()
+	if counts[workflow.ID] != 0 {
+		t.Fatalf("workflow execution count = %d, want 0", counts[workflow.ID])
+	}
+}
+
 func testHostAPIQueuedWorkerSingleExecutionSlot(t *testing.T, starts int) {
 	t.Helper()
 	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
@@ -1910,6 +1985,71 @@ type slowApprovalStep struct {
 	delay time.Duration
 }
 
+type claimBarrierQueueLeaseStore struct {
+	delegate      workflowkit.QueueLeaseStore
+	claimed       chan struct{}
+	returnClaim   chan struct{}
+	leaseReleased chan struct{}
+}
+
+func newClaimBarrierQueueLeaseStore(delegate workflowkit.QueueLeaseStore) *claimBarrierQueueLeaseStore {
+	return &claimBarrierQueueLeaseStore{
+		delegate:      delegate,
+		claimed:       make(chan struct{}),
+		returnClaim:   make(chan struct{}),
+		leaseReleased: make(chan struct{}),
+	}
+}
+
+func (s *claimBarrierQueueLeaseStore) Save(ctx context.Context, run workflowkit.WorkflowRun) error {
+	return s.delegate.Save(ctx, run)
+}
+
+func (s *claimBarrierQueueLeaseStore) Get(ctx context.Context, id string) (workflowkit.WorkflowRun, error) {
+	return s.delegate.Get(ctx, id)
+}
+
+func (s *claimBarrierQueueLeaseStore) Update(
+	ctx context.Context,
+	id string,
+	mutate func(workflowkit.WorkflowRun) (workflowkit.WorkflowRun, error),
+) (workflowkit.WorkflowRun, error) {
+	return s.delegate.Update(ctx, id, mutate)
+}
+
+func (s *claimBarrierQueueLeaseStore) ClaimRunnable(
+	ctx context.Context,
+	workerID string,
+	lease time.Duration,
+) (workflowkit.WorkflowRun, error) {
+	run, err := s.delegate.ClaimRunnable(ctx, workerID, lease)
+	if err != nil {
+		return run, err
+	}
+	s.claimed <- struct{}{}
+	<-s.returnClaim
+	return run, nil
+}
+
+func (s *claimBarrierQueueLeaseStore) ExtendLease(
+	ctx context.Context,
+	id string,
+	workerID string,
+	lease time.Duration,
+) (workflowkit.WorkflowRun, error) {
+	return s.delegate.ExtendLease(ctx, id, workerID, lease)
+}
+
+func (s *claimBarrierQueueLeaseStore) ReleaseLease(
+	ctx context.Context,
+	id string,
+	workerID string,
+) (workflowkit.WorkflowRun, error) {
+	run, err := s.delegate.ReleaseLease(ctx, id, workerID)
+	s.leaseReleased <- struct{}{}
+	return run, err
+}
+
 type singleSlotStep struct {
 	mu           sync.Mutex
 	active       int
@@ -1971,6 +2111,15 @@ func (s *singleSlotStep) snapshot() (int, map[string]int) {
 		counts[id] = count
 	}
 	return s.maxActive, counts
+}
+
+func waitForQueuedWorkerSignal(t *testing.T, signal <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for %s", name)
+	}
 }
 
 func (s slowApprovalStep) Name() string {
