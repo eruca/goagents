@@ -59,6 +59,7 @@ type Server struct {
 	queries                 workflowkit.WorkflowQueryStore
 	queue                   workflowkit.QueueLeaseStore
 	executor                *workflowkit.Executor
+	executions              *executionRegistry
 	health                  *llmkit.MemoryHealthStore
 	llmHome                 string
 	models                  []llmkit.Candidate
@@ -493,6 +494,7 @@ func NewServer(config Config) (*Server, error) {
 		workflows:               workflows,
 		queries:                 workflows,
 		queue:                   workflows,
+		executions:              newExecutionRegistry(),
 		health:                  health,
 		llmHome:                 resolved.LLMKitHome,
 		models:                  models,

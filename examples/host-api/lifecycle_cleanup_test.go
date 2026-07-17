@@ -1,0 +1,239 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"reflect"
+	"testing"
+	"time"
+
+	"github.com/eruca/goagents/workflowkit"
+)
+
+func TestFinalizeWorkflowShutdownFailsActiveWorkflow(t *testing.T) {
+	for _, status := range []workflowkit.Status{workflowkit.StatusPending, workflowkit.StatusRunning} {
+		t.Run(string(status), func(t *testing.T) {
+			server, store := newLifecycleTestServer()
+			saveLifecycleTestRun(t, store, workflowkit.WorkflowRun{
+				ID:     "wf-active-" + string(status),
+				Status: status,
+			})
+
+			if err := server.finalizeWorkflowShutdown(t.Context(), "wf-active-"+string(status)); err != nil {
+				t.Fatalf("finalizeWorkflowShutdown() error = %v", err)
+			}
+
+			run := getLifecycleTestRun(t, store, "wf-active-"+string(status))
+			if run.Status != workflowkit.StatusFailed {
+				t.Fatalf("status = %q, want %q", run.Status, workflowkit.StatusFailed)
+			}
+			if run.Error != hostShutdownTimeoutCode {
+				t.Fatalf("error = %q, want %q", run.Error, hostShutdownTimeoutCode)
+			}
+		})
+	}
+}
+
+func TestFinalizeWorkflowShutdownClearsQueuedLease(t *testing.T) {
+	server, store := newLifecycleTestServer()
+	saveLifecycleTestRun(t, store, workflowkit.WorkflowRun{
+		ID:         "wf-queued",
+		Status:     workflowkit.StatusPending,
+		LeaseOwner: "worker-1",
+		LeaseUntil: time.Now().Add(time.Minute),
+	})
+
+	if err := server.finalizeWorkflowShutdown(t.Context(), "wf-queued"); err != nil {
+		t.Fatalf("finalizeWorkflowShutdown() error = %v", err)
+	}
+
+	run := getLifecycleTestRun(t, store, "wf-queued")
+	if run.LeaseOwner != "" {
+		t.Fatalf("lease owner = %q, want empty", run.LeaseOwner)
+	}
+	if !run.LeaseUntil.IsZero() {
+		t.Fatalf("lease until = %v, want zero", run.LeaseUntil)
+	}
+}
+
+func TestFinalizeWorkflowShutdownPreservesTerminalWorkflow(t *testing.T) {
+	for _, status := range []workflowkit.Status{
+		workflowkit.StatusSucceeded,
+		workflowkit.StatusFailed,
+		workflowkit.StatusCancelled,
+	} {
+		t.Run(string(status), func(t *testing.T) {
+			server, store := newLifecycleTestServer()
+			saveLifecycleTestRun(t, store, workflowkit.WorkflowRun{
+				ID:         "wf-terminal-" + string(status),
+				Status:     status,
+				Error:      "existing terminal result",
+				LeaseOwner: "existing-owner",
+				LeaseUntil: time.Now().Add(time.Minute),
+			})
+			before := getLifecycleTestRun(t, store, "wf-terminal-"+string(status))
+
+			if err := server.finalizeWorkflowShutdown(t.Context(), before.ID); err != nil {
+				t.Fatalf("finalizeWorkflowShutdown() error = %v", err)
+			}
+
+			after := getLifecycleTestRun(t, store, before.ID)
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("terminal workflow changed:\nbefore=%+v\nafter=%+v", before, after)
+			}
+		})
+	}
+}
+
+func TestFinalizeWorkflowShutdownPreservesStableWaitingApproval(t *testing.T) {
+	server, store := newLifecycleTestServer()
+	saveLifecycleTestRun(t, store, workflowkit.WorkflowRun{
+		ID:            "wf-waiting",
+		Status:        workflowkit.StatusWaitingApproval,
+		ApprovalRef:   "approval:wf-waiting",
+		WaitingReason: "operator approval required",
+		OutputRef:     "artifact:waiting-output",
+	})
+	before := getLifecycleTestRun(t, store, "wf-waiting")
+
+	if err := server.finalizeWorkflowShutdown(t.Context(), before.ID); err != nil {
+		t.Fatalf("finalizeWorkflowShutdown() error = %v", err)
+	}
+
+	after := getLifecycleTestRun(t, store, before.ID)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("waiting workflow changed:\nbefore=%+v\nafter=%+v", before, after)
+	}
+}
+
+func TestFinalizeWorkflowShutdownPreservesHistoryAndReferences(t *testing.T) {
+	server, store := newLifecycleTestServer()
+	records := []workflowkit.StepRecord{{
+		Name:       "agent_review",
+		Status:     workflowkit.StatusSucceeded,
+		Attempt:    1,
+		OutputRef:  "artifact:step-output",
+		AgentRunID: "agent-step-1",
+		AuditRef:   "audit:step-1",
+	}}
+	saveLifecycleTestRun(t, store, workflowkit.WorkflowRun{
+		ID:             "wf-history",
+		Status:         workflowkit.StatusRunning,
+		OutputRef:      "artifact:workflow-output",
+		AgentRunID:     "agent-workflow-1",
+		AuditRef:       "audit:workflow-1",
+		CompletedSteps: []string{"ingest", "agent_review"},
+		StepRecords:    records,
+	})
+
+	if err := server.finalizeWorkflowShutdown(t.Context(), "wf-history"); err != nil {
+		t.Fatalf("finalizeWorkflowShutdown() error = %v", err)
+	}
+
+	run := getLifecycleTestRun(t, store, "wf-history")
+	if run.OutputRef != "artifact:workflow-output" || run.AgentRunID != "agent-workflow-1" || run.AuditRef != "audit:workflow-1" {
+		t.Fatalf("workflow references changed: %+v", run)
+	}
+	if !reflect.DeepEqual(run.CompletedSteps, []string{"ingest", "agent_review"}) {
+		t.Fatalf("completed steps = %v, want preserved history", run.CompletedSteps)
+	}
+	if !reflect.DeepEqual(run.StepRecords, records) {
+		t.Fatalf("step records = %+v, want %+v", run.StepRecords, records)
+	}
+}
+
+func TestFinalizeWorkflowShutdownIsIdempotent(t *testing.T) {
+	server, store := newLifecycleTestServer()
+	saveLifecycleTestRun(t, store, workflowkit.WorkflowRun{
+		ID:         "wf-idempotent",
+		Status:     workflowkit.StatusRunning,
+		LeaseOwner: "worker-1",
+		LeaseUntil: time.Now().Add(time.Minute),
+	})
+
+	if err := server.finalizeWorkflowShutdown(t.Context(), "wf-idempotent"); err != nil {
+		t.Fatalf("first finalizeWorkflowShutdown() error = %v", err)
+	}
+	afterFirst := getLifecycleTestRun(t, store, "wf-idempotent")
+	if err := server.finalizeWorkflowShutdown(t.Context(), "wf-idempotent"); err != nil {
+		t.Fatalf("second finalizeWorkflowShutdown() error = %v", err)
+	}
+	afterSecond := getLifecycleTestRun(t, store, "wf-idempotent")
+
+	if !reflect.DeepEqual(afterSecond, afterFirst) {
+		t.Fatalf("second cleanup changed workflow:\nfirst=%+v\nsecond=%+v", afterFirst, afterSecond)
+	}
+}
+
+func TestFinalizeWorkflowShutdownWaitsBeforeExecutionCleanup(t *testing.T) {
+	operationDone := make(chan struct{})
+	cleanupCalled := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		result <- waitAndCleanupExecutions(context.Background(), []executionSnapshot{{
+			workflowID: "wf-wait",
+			kind:       executionSyncWorkflow,
+			done:       operationDone,
+			cleanup: func(context.Context) error {
+				close(cleanupCalled)
+				return nil
+			},
+		}})
+	}()
+
+	select {
+	case <-cleanupCalled:
+		t.Fatal("cleanup ran before the operation completed")
+	default:
+	}
+
+	close(operationDone)
+	if err := <-result; err != nil {
+		t.Fatalf("waitAndCleanupExecutions() error = %v", err)
+	}
+	<-cleanupCalled
+}
+
+func TestFinalizeWorkflowShutdownStopsCleanupWhenContextExpires(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cleanupCalled := false
+
+	err := waitAndCleanupExecutions(ctx, []executionSnapshot{{
+		workflowID: "wf-cancelled",
+		kind:       executionQueuedWorkflow,
+		done:       make(chan struct{}),
+		cleanup: func(context.Context) error {
+			cleanupCalled = true
+			return nil
+		},
+	}})
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("waitAndCleanupExecutions() error = %v, want context.Canceled", err)
+	}
+	if cleanupCalled {
+		t.Fatal("cleanup ran after the context expired")
+	}
+}
+
+func newLifecycleTestServer() (*Server, *workflowkit.MemoryStore) {
+	store := workflowkit.NewMemoryStore()
+	return &Server{workflows: store}, store
+}
+
+func saveLifecycleTestRun(t *testing.T, store workflowkit.Store, run workflowkit.WorkflowRun) {
+	t.Helper()
+	if err := store.Save(t.Context(), run); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+}
+
+func getLifecycleTestRun(t *testing.T, store workflowkit.Store, id string) workflowkit.WorkflowRun {
+	t.Helper()
+	run, err := store.Get(t.Context(), id)
+	if err != nil {
+		t.Fatalf("Get(%q) error = %v", id, err)
+	}
+	return run
+}
