@@ -72,7 +72,10 @@ type Server struct {
 	workerCfg               queuedWorkerConfig
 	workerWake              chan struct{}
 	workerStart             sync.Once
+	workerDone              chan struct{}
 	agentApprovalJanitorCfg agentApprovalJanitorConfig
+	janitorStart            sync.Once
+	janitorDone             chan struct{}
 }
 
 type createWorkflowRequest struct {
@@ -501,7 +504,9 @@ func NewServer(config Config) (*Server, error) {
 		providers:               providers,
 		workerCfg:               workerCfg,
 		workerWake:              make(chan struct{}, 1),
+		workerDone:              make(chan struct{}),
 		agentApprovalJanitorCfg: agentApprovalJanitorCfg,
+		janitorDone:             make(chan struct{}),
 		approvalAuthenticator:   config.ApprovalAuthenticator,
 		agentApprovals:          agentApprovals,
 		skillCatalog:            config.SkillCatalog,
@@ -746,24 +751,41 @@ func (s *Server) signalQueuedWorker() {
 
 // StartQueuedWorker starts the host-owned in-process worker loop for pending workflows.
 func (s *Server) StartQueuedWorker(ctx context.Context) {
+	s.StartQueuedWorkerWithContexts(ctx, ctx)
+}
+
+func (s *Server) StartQueuedWorkerWithContexts(intakeCtx context.Context, executionCtx context.Context) {
 	s.workerStart.Do(func() {
 		s.worker.markStarted(queuedWorkerID)
-		go s.runQueuedWorkerLoop(ctx)
+		go s.runQueuedWorkerLoop(intakeCtx, executionCtx)
 	})
 }
 
-func (s *Server) runQueuedWorkerLoop(ctx context.Context) {
+func (s *Server) WaitQueuedWorker(ctx context.Context) error {
+	select {
+	case <-s.workerDone:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *Server) runQueuedWorkerLoop(intakeCtx context.Context, executionCtx context.Context) {
+	defer close(s.workerDone)
 	for {
-		if ctx.Err() != nil {
+		if intakeCtx.Err() != nil {
 			return
 		}
-		ran, _ := s.runOneQueuedWorkflow(ctx)
+		ran, keepRunning, _ := s.runOneQueuedWorkflow(intakeCtx, executionCtx)
+		if !keepRunning {
+			return
+		}
 		if ran {
 			continue
 		}
 		timer := time.NewTimer(queuedPollInterval)
 		select {
-		case <-ctx.Done():
+		case <-intakeCtx.Done():
 			timer.Stop()
 			return
 		case <-s.workerWake:
@@ -778,33 +800,58 @@ func (s *Server) runQueuedWorkerLoop(ctx context.Context) {
 	}
 }
 
-func (s *Server) runOneQueuedWorkflow(ctx context.Context) (bool, error) {
+func (s *Server) runOneQueuedWorkflow(intakeCtx context.Context, executionCtx context.Context) (bool, bool, error) {
 	if s.queue == nil {
-		return false, nil
+		return false, true, nil
 	}
 	s.worker.recordClaimAttempt()
-	claimed, err := s.queue.ClaimRunnable(ctx, queuedWorkerID, s.queuedLeaseDuration())
+	claimed, err := s.queue.ClaimRunnable(intakeCtx, queuedWorkerID, s.queuedLeaseDuration())
 	if err != nil {
 		if errors.Is(err, workflowkit.ErrNoRunnableWorkflow) {
 			s.worker.recordIdle()
 		} else {
 			s.worker.recordError(err)
 		}
-		return false, err
+		return false, intakeCtx.Err() == nil, err
 	}
 	s.worker.recordClaimed(claimed.ID)
-	stopHeartbeat := s.startQueuedLeaseHeartbeat(ctx, claimed.ID)
+	if intakeCtx.Err() != nil {
+		s.releaseQueuedWorkflowLease(claimed.ID)
+		return false, false, nil
+	}
+	handle, ok := s.executions.Begin(claimed.ID, executionQueuedWorkflow, func(ctx context.Context) error {
+		return s.finalizeWorkflowShutdown(ctx, claimed.ID)
+	})
+	if !ok {
+		s.releaseQueuedWorkflowLease(claimed.ID)
+		return false, false, nil
+	}
+	defer handle.Done()
+	if intakeCtx.Err() != nil {
+		s.releaseQueuedWorkflowLease(claimed.ID)
+		return false, false, nil
+	}
+
+	stopHeartbeat := s.startQueuedLeaseHeartbeat(executionCtx, claimed.ID)
 	defer func() {
 		stopHeartbeat()
-		_, _ = s.queue.ReleaseLease(context.Background(), claimed.ID, queuedWorkerID)
+		s.releaseQueuedWorkflowLease(claimed.ID)
 	}()
-	_, err = s.executor.Run(ctx, claimed)
+	_, err = s.executor.Run(executionCtx, claimed)
 	if err != nil {
 		s.worker.recordWorkflowError(claimed.ID, err)
-		return true, err
+		return true, true, err
 	}
 	s.worker.recordCompleted(claimed.ID)
-	return true, err
+	return true, true, nil
+}
+
+func (s *Server) releaseQueuedWorkflowLease(workflowID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), hostCleanupTimeout)
+	defer cancel()
+	if _, err := s.queue.ReleaseLease(ctx, workflowID, queuedWorkerID); err != nil {
+		s.worker.recordError(fmt.Errorf("release lease for workflow %s: %w", workflowID, err))
+	}
 }
 
 func (s *Server) startQueuedLeaseHeartbeat(ctx context.Context, workflowID string) func() {

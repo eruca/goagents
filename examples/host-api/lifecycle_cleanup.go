@@ -9,6 +9,7 @@ import (
 )
 
 const hostShutdownTimeoutCode = "host_shutdown_timeout"
+const hostCleanupTimeout = 5 * time.Second
 
 var errWorkflowShutdownUnchanged = errors.New("workflow shutdown state unchanged")
 

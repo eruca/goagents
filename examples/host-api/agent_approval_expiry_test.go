@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -154,6 +155,90 @@ func TestHostAPIAgentApprovalJanitorReconcilesExpiredWorkflow(t *testing.T) {
 	}
 }
 
+func TestAgentApprovalJanitorWaitsForCurrentScan(t *testing.T) {
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+	server.agentApprovalJanitorCfg.interval = time.Hour
+	checkpoints := newControlledExpiryCheckpointStore(server.agentApprovals.checkpoints)
+	server.agentApprovals.checkpoints = checkpoints
+
+	ctx, cancel := context.WithCancel(t.Context())
+	server.StartAgentApprovalJanitor(ctx)
+	waitForJanitorSignal(t, checkpoints.started, "current scan start")
+	cancel()
+	waitForJanitorSignal(t, checkpoints.canceled, "current scan cancellation")
+
+	waitParent, cancelWait := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancelWait()
+	waitCtx := newObservedDoneContext(waitParent)
+	waitResult := make(chan error, 1)
+	go func() {
+		waitResult <- server.WaitAgentApprovalJanitor(waitCtx)
+	}()
+	waitForJanitorSignal(t, waitCtx.observed, "janitor wait start")
+	select {
+	case err := <-waitResult:
+		t.Fatalf("WaitAgentApprovalJanitor returned before the current scan stopped: %v", err)
+	default:
+	}
+
+	close(checkpoints.release)
+	if err := <-waitResult; err != nil {
+		t.Fatalf("WaitAgentApprovalJanitor returned error: %v", err)
+	}
+}
+
+func TestAgentApprovalJanitorDoesNotStartScanAfterIntakeCancellation(t *testing.T) {
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+	checkpoints := newControlledExpiryCheckpointStore(server.agentApprovals.checkpoints)
+	server.agentApprovals.checkpoints = checkpoints
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	server.StartAgentApprovalJanitor(ctx)
+
+	waitCtx, cancelWait := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancelWait()
+	if err := server.WaitAgentApprovalJanitor(waitCtx); err != nil {
+		t.Fatalf("WaitAgentApprovalJanitor returned error: %v", err)
+	}
+	if calls := checkpoints.callCount(); calls != 0 {
+		t.Fatalf("expiry scan calls = %d, want 0 after intake cancellation", calls)
+	}
+}
+
+func TestAgentApprovalJanitorStartsOnlyOnce(t *testing.T) {
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+	server.agentApprovalJanitorCfg.interval = time.Hour
+	checkpoints := newControlledExpiryCheckpointStore(server.agentApprovals.checkpoints)
+	server.agentApprovals.checkpoints = checkpoints
+
+	ctx, cancel := context.WithCancel(t.Context())
+	server.StartAgentApprovalJanitor(ctx)
+	server.StartAgentApprovalJanitor(ctx)
+	waitForJanitorSignal(t, checkpoints.started, "janitor scan start")
+	cancel()
+	waitForJanitorSignal(t, checkpoints.canceled, "janitor scan cancellation")
+	close(checkpoints.release)
+
+	waitCtx, cancelWait := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancelWait()
+	if err := server.WaitAgentApprovalJanitor(waitCtx); err != nil {
+		t.Fatalf("WaitAgentApprovalJanitor returned error: %v", err)
+	}
+	if calls := checkpoints.callCount(); calls != 1 {
+		t.Fatalf("expiry scan calls = %d, want 1 after repeated Start", calls)
+	}
+}
+
 func TestHostAPIAgentApprovalExpiryIgnoresUnrelatedCheckpoint(t *testing.T) {
 	server, err := NewServer(Config{
 		LLMKitHome:            t.TempDir(),
@@ -188,5 +273,58 @@ func TestHostAPIAgentApprovalExpiryIgnoresUnrelatedCheckpoint(t *testing.T) {
 	}
 	if workflow.Status != workflowkit.StatusWaitingApproval {
 		t.Fatalf("unrelated workflow status = %q, want waiting_approval", workflow.Status)
+	}
+}
+
+type controlledExpiryCheckpointStore struct {
+	runkit.CheckpointStore
+
+	mu           sync.Mutex
+	calls        int
+	started      chan struct{}
+	canceled     chan struct{}
+	release      chan struct{}
+	cancelSignal sync.Once
+}
+
+func newControlledExpiryCheckpointStore(store runkit.CheckpointStore) *controlledExpiryCheckpointStore {
+	return &controlledExpiryCheckpointStore{
+		CheckpointStore: store,
+		started:         make(chan struct{}, 2),
+		canceled:        make(chan struct{}),
+		release:         make(chan struct{}),
+	}
+}
+
+func (s *controlledExpiryCheckpointStore) ExpireCheckpoints(ctx context.Context, _ time.Time) (int, error) {
+	s.mu.Lock()
+	s.calls++
+	s.mu.Unlock()
+	s.started <- struct{}{}
+
+	select {
+	case <-ctx.Done():
+		s.cancelSignal.Do(func() {
+			close(s.canceled)
+		})
+		<-s.release
+		return 0, ctx.Err()
+	case <-s.release:
+		return 0, nil
+	}
+}
+
+func (s *controlledExpiryCheckpointStore) callCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
+func waitForJanitorSignal(t *testing.T, signal <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for %s", name)
 	}
 }

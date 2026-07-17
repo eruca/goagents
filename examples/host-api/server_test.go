@@ -616,6 +616,131 @@ func TestHostAPIQueuedWorkerStartsOnce(t *testing.T) {
 	testHostAPIQueuedWorkerSingleExecutionSlot(t, 2)
 }
 
+func TestQueuedWorkerDrainFinishesCurrentWorkflowWithoutClaimingNext(t *testing.T) {
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+	release := make(chan struct{})
+	step := newSingleSlotStep(release, 2)
+	step.resultStatus = workflowkit.StatusSucceeded
+	server.executor = workflowkit.NewExecutor(server.workflows, []workflowkit.Step{step})
+
+	base := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	savePendingWorkflow(t, server.workflows, "wf-drain-current", base)
+	savePendingWorkflow(t, server.workflows, "wf-drain-next", base.Add(time.Second))
+
+	intakeCtx, cancelIntake := context.WithCancel(t.Context())
+	executionCtx, cancelExecution := context.WithCancel(t.Context())
+	t.Cleanup(cancelExecution)
+	server.StartQueuedWorkerWithContexts(intakeCtx, executionCtx)
+
+	select {
+	case <-step.started:
+	case <-t.Context().Done():
+		t.Fatal("queued worker did not start the current workflow")
+	}
+	server.executions.BeginDrain()
+	cancelIntake()
+	close(release)
+
+	waitCtx, cancelWait := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancelWait()
+	if err := server.WaitQueuedWorker(waitCtx); err != nil {
+		t.Fatalf("WaitQueuedWorker returned error: %v", err)
+	}
+	if err := server.executions.Wait(waitCtx); err != nil {
+		t.Fatalf("execution registry Wait returned error: %v", err)
+	}
+
+	current, err := server.workflows.Get(t.Context(), "wf-drain-current")
+	if err != nil {
+		t.Fatalf("Get current workflow returned error: %v", err)
+	}
+	if current.Status != workflowkit.StatusSucceeded || current.LeaseOwner != "" || !current.LeaseUntil.IsZero() {
+		t.Fatalf("current workflow = %+v, want succeeded with released lease", current)
+	}
+	next, err := server.workflows.Get(t.Context(), "wf-drain-next")
+	if err != nil {
+		t.Fatalf("Get next workflow returned error: %v", err)
+	}
+	if next.Status != workflowkit.StatusPending || next.LeaseOwner != "" || !next.LeaseUntil.IsZero() {
+		t.Fatalf("next workflow = %+v, want unclaimed pending workflow", next)
+	}
+	_, counts := step.snapshot()
+	if counts["wf-drain-current"] != 1 || counts["wf-drain-next"] != 0 {
+		t.Fatalf("workflow execution counts = %+v, want current=1 and next=0", counts)
+	}
+}
+
+func TestQueuedWorkerForceContextCancelsCurrentWorkflow(t *testing.T) {
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+	step := newSingleSlotStep(make(chan struct{}), 1)
+	step.resultStatus = workflowkit.StatusSucceeded
+	server.executor = workflowkit.NewExecutor(server.workflows, []workflowkit.Step{step})
+	savePendingWorkflow(t, server.workflows, "wf-force-current", time.Now().UTC())
+
+	intakeCtx, cancelIntake := context.WithCancel(t.Context())
+	executionCtx, cancelExecution := context.WithCancel(t.Context())
+	server.StartQueuedWorkerWithContexts(intakeCtx, executionCtx)
+
+	select {
+	case <-step.started:
+	case <-t.Context().Done():
+		t.Fatal("queued worker did not start the current workflow")
+	}
+	server.executions.BeginDrain()
+	snapshots := server.executions.Snapshot()
+	cancelIntake()
+	cancelExecution()
+
+	waitCtx, cancelWait := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancelWait()
+	if err := server.WaitQueuedWorker(waitCtx); err != nil {
+		t.Fatalf("WaitQueuedWorker returned error: %v", err)
+	}
+	if err := server.executions.Wait(waitCtx); err != nil {
+		t.Fatalf("execution registry Wait returned error: %v", err)
+	}
+	if err := waitAndCleanupExecutions(waitCtx, snapshots); err != nil {
+		t.Fatalf("waitAndCleanupExecutions returned error: %v", err)
+	}
+
+	current, err := server.workflows.Get(t.Context(), "wf-force-current")
+	if err != nil {
+		t.Fatalf("Get current workflow returned error: %v", err)
+	}
+	if current.Status != workflowkit.StatusFailed || current.Error != hostShutdownTimeoutCode {
+		t.Fatalf("current workflow = %+v, want force-stop cleanup failure", current)
+	}
+	if current.LeaseOwner != "" || !current.LeaseUntil.IsZero() {
+		t.Fatalf("current workflow lease = (%q, %s), want released", current.LeaseOwner, current.LeaseUntil)
+	}
+	worker := server.worker.snapshot()
+	if !strings.Contains(worker.LastError, context.Canceled.Error()) || worker.LastErrorWorkflowID != current.ID {
+		t.Fatalf("worker status = %+v, want current execution canceled by execution context", worker)
+	}
+}
+
+func TestQueuedWorkerWaitReturnsAfterIntakeStops(t *testing.T) {
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+	intakeCtx, cancelIntake := context.WithCancel(t.Context())
+	server.StartQueuedWorkerWithContexts(intakeCtx, t.Context())
+	cancelIntake()
+
+	waitCtx, cancelWait := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancelWait()
+	if err := server.WaitQueuedWorker(waitCtx); err != nil {
+		t.Fatalf("WaitQueuedWorker returned error: %v", err)
+	}
+}
+
 func testHostAPIQueuedWorkerSingleExecutionSlot(t *testing.T, starts int) {
 	t.Helper()
 	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
@@ -706,6 +831,17 @@ func postQueuedWorkflow(handler http.Handler, workflowID string) error {
 		return fmt.Errorf("POST workflow %s status = %d, want 202; body=%s", workflowID, response.Code, response.Body.String())
 	}
 	return nil
+}
+
+func savePendingWorkflow(t *testing.T, store workflowkit.Store, workflowID string, createdAt time.Time) {
+	t.Helper()
+	if err := store.Save(t.Context(), workflowkit.WorkflowRun{
+		ID:        workflowID,
+		Status:    workflowkit.StatusPending,
+		CreatedAt: createdAt,
+	}); err != nil {
+		t.Fatalf("Save pending workflow %s returned error: %v", workflowID, err)
+	}
 }
 
 func TestHostAPIQueuedWorkerExtendsLeaseWhileWorkflowRuns(t *testing.T) {
@@ -1775,19 +1911,21 @@ type slowApprovalStep struct {
 }
 
 type singleSlotStep struct {
-	mu        sync.Mutex
-	active    int
-	maxActive int
-	counts    map[string]int
-	started   chan struct{}
-	release   <-chan struct{}
+	mu           sync.Mutex
+	active       int
+	maxActive    int
+	counts       map[string]int
+	started      chan struct{}
+	release      <-chan struct{}
+	resultStatus workflowkit.Status
 }
 
 func newSingleSlotStep(release <-chan struct{}, capacity int) *singleSlotStep {
 	return &singleSlotStep{
-		counts:  make(map[string]int),
-		started: make(chan struct{}, capacity),
-		release: release,
+		counts:       make(map[string]int),
+		started:      make(chan struct{}, capacity),
+		release:      release,
+		resultStatus: workflowkit.StatusWaitingApproval,
 	}
 }
 
@@ -1813,7 +1951,7 @@ func (s *singleSlotStep) Run(ctx context.Context, run workflowkit.WorkflowRun) (
 	}
 	s.finish()
 	return workflowkit.StepResult{
-		Status:        workflowkit.StatusWaitingApproval,
+		Status:        s.resultStatus,
 		ApprovalRef:   "approval:" + run.ID,
 		WaitingReason: "single-slot test completed",
 	}, nil

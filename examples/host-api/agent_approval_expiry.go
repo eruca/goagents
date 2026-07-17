@@ -16,15 +16,35 @@ const agentApprovalExpiredReason = "agent tool approval expired"
 // separate from queued workflow execution because it only reconciles terminal
 // tool-approval state.
 func (s *Server) StartAgentApprovalJanitor(ctx context.Context) {
-	interval := s.agentApprovalJanitorCfg.interval
-	if interval <= 0 {
-		interval = defaultAgentApprovalSweepInterval
+	s.janitorStart.Do(func() {
+		interval := s.agentApprovalJanitorCfg.interval
+		if interval <= 0 {
+			interval = defaultAgentApprovalSweepInterval
+		}
+		go func() {
+			defer close(s.janitorDone)
+			s.runAgentApprovalJanitor(ctx, interval)
+		}()
+	})
+}
+
+func (s *Server) WaitAgentApprovalJanitor(ctx context.Context) error {
+	select {
+	case <-s.janitorDone:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	go s.runAgentApprovalJanitor(ctx, interval)
 }
 
 func (s *Server) runAgentApprovalJanitor(ctx context.Context, interval time.Duration) {
+	if ctx.Err() != nil {
+		return
+	}
 	s.reconcileExpiredAgentApprovalsNow(ctx)
+	if ctx.Err() != nil {
+		return
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -32,6 +52,9 @@ func (s *Server) runAgentApprovalJanitor(ctx context.Context, interval time.Dura
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if ctx.Err() != nil {
+				return
+			}
 			s.reconcileExpiredAgentApprovalsNow(ctx)
 		}
 	}
