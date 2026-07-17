@@ -3,17 +3,19 @@ package main
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
 
 	"github.com/eruca/goagents/workflowkit"
+	workflowsqlite "github.com/eruca/goagents/workflowkit/sqlitestore"
 )
 
 func TestFinalizeWorkflowShutdownFailsActiveWorkflow(t *testing.T) {
 	for _, status := range []workflowkit.Status{workflowkit.StatusPending, workflowkit.StatusRunning} {
 		t.Run(string(status), func(t *testing.T) {
-			server, store := newLifecycleTestServer()
+			server, store := newSQLiteLifecycleTestServer(t)
 			saveLifecycleTestRun(t, store, workflowkit.WorkflowRun{
 				ID:     "wf-active-" + string(status),
 				Status: status,
@@ -35,7 +37,7 @@ func TestFinalizeWorkflowShutdownFailsActiveWorkflow(t *testing.T) {
 }
 
 func TestFinalizeWorkflowShutdownClearsQueuedLease(t *testing.T) {
-	server, store := newLifecycleTestServer()
+	server, store := newSQLiteLifecycleTestServer(t)
 	saveLifecycleTestRun(t, store, workflowkit.WorkflowRun{
 		ID:         "wf-queued",
 		Status:     workflowkit.StatusPending,
@@ -63,7 +65,7 @@ func TestFinalizeWorkflowShutdownPreservesTerminalWorkflow(t *testing.T) {
 		workflowkit.StatusCancelled,
 	} {
 		t.Run(string(status), func(t *testing.T) {
-			server, store := newLifecycleTestServer()
+			server, store := newSQLiteLifecycleTestServer(t)
 			saveLifecycleTestRun(t, store, workflowkit.WorkflowRun{
 				ID:         "wf-terminal-" + string(status),
 				Status:     status,
@@ -86,7 +88,7 @@ func TestFinalizeWorkflowShutdownPreservesTerminalWorkflow(t *testing.T) {
 }
 
 func TestFinalizeWorkflowShutdownPreservesStableWaitingApproval(t *testing.T) {
-	server, store := newLifecycleTestServer()
+	server, store := newSQLiteLifecycleTestServer(t)
 	saveLifecycleTestRun(t, store, workflowkit.WorkflowRun{
 		ID:            "wf-waiting",
 		Status:        workflowkit.StatusWaitingApproval,
@@ -119,11 +121,17 @@ func TestFinalizeWorkflowShutdownPreservesHistoryAndReferences(t *testing.T) {
 	saveLifecycleTestRun(t, store, workflowkit.WorkflowRun{
 		ID:             "wf-history",
 		Status:         workflowkit.StatusRunning,
+		InputRef:       "artifact:workflow-input",
 		OutputRef:      "artifact:workflow-output",
 		AgentRunID:     "agent-workflow-1",
 		AuditRef:       "audit:workflow-1",
+		ApprovalRef:    "approval:wf-history",
+		WaitingReason:  "existing waiting reason",
+		CurrentStep:    "finalize",
 		CompletedSteps: []string{"ingest", "agent_review"},
+		StepAttempts:   map[string]int{"ingest": 1, "agent_review": 2},
 		StepRecords:    records,
+		Metadata:       map[string]any{"run_mode": "queued", "tenant": "demo"},
 	})
 
 	if err := server.finalizeWorkflowShutdown(t.Context(), "wf-history"); err != nil {
@@ -131,7 +139,10 @@ func TestFinalizeWorkflowShutdownPreservesHistoryAndReferences(t *testing.T) {
 	}
 
 	run := getLifecycleTestRun(t, store, "wf-history")
-	if run.OutputRef != "artifact:workflow-output" || run.AgentRunID != "agent-workflow-1" || run.AuditRef != "audit:workflow-1" {
+	if run.InputRef != "artifact:workflow-input" || run.OutputRef != "artifact:workflow-output" ||
+		run.AgentRunID != "agent-workflow-1" || run.AuditRef != "audit:workflow-1" ||
+		run.ApprovalRef != "approval:wf-history" || run.WaitingReason != "existing waiting reason" ||
+		run.CurrentStep != "finalize" {
 		t.Fatalf("workflow references changed: %+v", run)
 	}
 	if !reflect.DeepEqual(run.CompletedSteps, []string{"ingest", "agent_review"}) {
@@ -139,6 +150,12 @@ func TestFinalizeWorkflowShutdownPreservesHistoryAndReferences(t *testing.T) {
 	}
 	if !reflect.DeepEqual(run.StepRecords, records) {
 		t.Fatalf("step records = %+v, want %+v", run.StepRecords, records)
+	}
+	if !reflect.DeepEqual(run.StepAttempts, map[string]int{"ingest": 1, "agent_review": 2}) {
+		t.Fatalf("step attempts = %+v, want preserved attempts", run.StepAttempts)
+	}
+	if !reflect.DeepEqual(run.Metadata, map[string]any{"run_mode": "queued", "tenant": "demo"}) {
+		t.Fatalf("metadata = %+v, want preserved metadata", run.Metadata)
 	}
 }
 
@@ -165,36 +182,42 @@ func TestFinalizeWorkflowShutdownIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestFinalizeWorkflowShutdownWaitsBeforeExecutionCleanup(t *testing.T) {
+func TestWaitAndCleanupExecutionsWaitsBeforeDoneAndPropagatesCleanupError(t *testing.T) {
 	operationDone := make(chan struct{})
-	cleanupCalled := make(chan struct{})
+	cleanupStarted := make(chan struct{})
+	cleanupContext := make(chan context.Context, 1)
+	cleanupErr := errors.New("cleanup failed")
+	ctx := newObservedDoneContext(t.Context())
 	result := make(chan error, 1)
 	go func() {
-		result <- waitAndCleanupExecutions(context.Background(), []executionSnapshot{{
+		result <- waitAndCleanupExecutions(ctx, []executionSnapshot{{
 			workflowID: "wf-wait",
 			kind:       executionSyncWorkflow,
 			done:       operationDone,
-			cleanup: func(context.Context) error {
-				close(cleanupCalled)
-				return nil
+			cleanup: func(got context.Context) error {
+				close(cleanupStarted)
+				cleanupContext <- got
+				return cleanupErr
 			},
 		}})
 	}()
-
 	select {
-	case <-cleanupCalled:
-		t.Fatal("cleanup ran before the operation completed")
-	default:
+	case <-ctx.observed:
+	case <-cleanupStarted:
+		t.Fatal("cleanup ran before waitAndCleanupExecutions observed operation completion")
 	}
 
 	close(operationDone)
-	if err := <-result; err != nil {
-		t.Fatalf("waitAndCleanupExecutions() error = %v", err)
+	if err := <-result; err != cleanupErr {
+		t.Fatalf("waitAndCleanupExecutions() error = %v, want cleanup sentinel", err)
 	}
-	<-cleanupCalled
+	if got := <-cleanupContext; got != ctx {
+		t.Fatalf("cleanup context = %p, want original %p", got, ctx)
+	}
+	<-cleanupStarted
 }
 
-func TestFinalizeWorkflowShutdownStopsCleanupWhenContextExpires(t *testing.T) {
+func TestWaitAndCleanupExecutionsStopsCleanupWhenContextExpires(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	cleanupCalled := false
@@ -219,6 +242,20 @@ func TestFinalizeWorkflowShutdownStopsCleanupWhenContextExpires(t *testing.T) {
 
 func newLifecycleTestServer() (*Server, *workflowkit.MemoryStore) {
 	store := workflowkit.NewMemoryStore()
+	return &Server{workflows: store}, store
+}
+
+func newSQLiteLifecycleTestServer(t *testing.T) (*Server, workflowkit.Store) {
+	t.Helper()
+	store, err := workflowsqlite.Open(filepath.Join(t.TempDir(), "workflow.db"))
+	if err != nil {
+		t.Fatalf("Open SQLite workflow store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("Close SQLite workflow store: %v", err)
+		}
+	})
 	return &Server{workflows: store}, store
 }
 

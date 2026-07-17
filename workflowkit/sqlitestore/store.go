@@ -16,6 +16,11 @@ type Store struct {
 	db *sql.DB
 }
 
+type runQueryExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
 const SchemaVersion = 2
 
 func Open(path string) (*Store, error) {
@@ -44,6 +49,10 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) Save(ctx context.Context, run workflowkit.WorkflowRun) error {
+	return saveRun(ctx, s.db, run)
+}
+
+func saveRun(ctx context.Context, db runQueryExecer, run workflowkit.WorkflowRun) error {
 	if run.CreatedAt.IsZero() {
 		run.CreatedAt = time.Now()
 	}
@@ -52,7 +61,7 @@ func (s *Store) Save(ctx context.Context, run workflowkit.WorkflowRun) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `
+	_, err = db.ExecContext(ctx, `
 INSERT INTO workflow_runs (
 	id, status, input_ref, output_ref, agent_run_id, audit_ref, error,
 	approval_ref, waiting_reason, current_step, completed_steps_json,
@@ -85,8 +94,12 @@ ON CONFLICT(id) DO UPDATE SET
 }
 
 func (s *Store) Get(ctx context.Context, id string) (workflowkit.WorkflowRun, error) {
+	return getRun(ctx, s.db, id)
+}
+
+func getRun(ctx context.Context, db runQueryExecer, id string) (workflowkit.WorkflowRun, error) {
 	row := runRow{}
-	err := s.db.QueryRowContext(ctx, `
+	err := db.QueryRowContext(ctx, `
 SELECT id, status, input_ref, output_ref, agent_run_id, audit_ref, error,
 	approval_ref, waiting_reason, current_step, completed_steps_json,
 	step_attempts_json, step_records_json, metadata_json, lease_owner, lease_until,
@@ -107,7 +120,13 @@ WHERE id = ?
 }
 
 func (s *Store) Update(ctx context.Context, id string, mutate func(workflowkit.WorkflowRun) (workflowkit.WorkflowRun, error)) (workflowkit.WorkflowRun, error) {
-	current, err := s.Get(ctx, id)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return workflowkit.WorkflowRun{}, err
+	}
+	defer tx.Rollback()
+
+	current, err := getRun(ctx, tx, id)
 	if err != nil {
 		return workflowkit.WorkflowRun{}, err
 	}
@@ -118,10 +137,17 @@ func (s *Store) Update(ctx context.Context, id string, mutate func(workflowkit.W
 	if updated.CreatedAt.IsZero() {
 		updated.CreatedAt = current.CreatedAt
 	}
-	if err := s.Save(ctx, updated); err != nil {
+	if err := saveRun(ctx, tx, updated); err != nil {
 		return workflowkit.WorkflowRun{}, err
 	}
-	return s.Get(ctx, updated.ID)
+	persisted, err := getRun(ctx, tx, updated.ID)
+	if err != nil {
+		return workflowkit.WorkflowRun{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return workflowkit.WorkflowRun{}, err
+	}
+	return persisted, nil
 }
 
 func (s *Store) ListWorkflows(ctx context.Context, query workflowkit.WorkflowQuery) ([]workflowkit.WorkflowRun, error) {

@@ -261,6 +261,13 @@ ForceStop 先取得 active 快照，再取消执行 root，等待每项返回，
 - 不自动 requeue；
 - 不删除已持久化的 step history、AgentRunID、AuditRef 或 output ref。
 
+`workflowkit.Store.Update` 公共 contract 保持不变，但 `workflowkit/sqlitestore` 的实现必须在
+同一事务中完成 read → mutate → write → readback。Host composition 对 workflow 只持有
+同一个 SQLite Store 实例；该 Store 已将连接数限制为 1，因此 Update 持有事务期间，同一
+Store 的 Save/Update 不能越过 callback 并发写入。Host shutdown cleanup 依赖这一原子
+Update 保证“重新检查当前状态后再条件式修改”不会覆盖并发终态或稳定 approval wait。
+这个保证不扩展为多个独立 Store 实例之间的进程级串行化声明。
+
 “稳定 waiting approval”要求其对应 approval/checkpoint 已经完整持久化。若 agent tool
 approval/resume 仍处在外部副作用与 checkpoint 提交之间，必须走该操作专属 cleanup，而
 不能只看 workflow status。
@@ -399,6 +406,8 @@ external side effect committed
 - 未终态 workflow 收口为 `failed/host_shutdown_timeout`；
 - queued lease 清空；
 - terminal 和稳定 waiting approval 不被覆盖；
+- 真实 SQLite Store 的 Update 在同一事务中完成 read/mutate/write/readback，同一 Store
+  的并发 Save 在 callback barrier 内无法成功插入；
 - checkpoint、AgentRun 与 workflow 状态一致；
 - worker、janitor、execution registry 和 stores 只停止/关闭一次；
 - goroutine 回落；
@@ -499,6 +508,9 @@ examples/host-api may import hostkit and existing composition modules
 ```bash
 (cd hostkit && go test ./... -count=1)
 (cd hostkit && go test -race ./... -count=1)
+(cd workflowkit && go test ./... -count=1)
+(cd workflowkit && go test -race ./sqlitestore -count=1)
+(cd workflowkit && go vet ./...)
 (cd examples/host-api && go test ./... -count=1)
 (cd examples/host-api && go test -race ./... -count=1)
 (cd examples/host-api && go vet ./...)

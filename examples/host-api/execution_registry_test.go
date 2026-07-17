@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
 )
 
@@ -12,20 +14,46 @@ func TestExecutionRegistryBeginAndWait(t *testing.T) {
 		t.Fatal("Begin() rejected while registry was accepting")
 	}
 
+	ctx := newObservedDoneContext(t.Context())
 	waitResult := make(chan error, 1)
 	go func() {
-		waitResult <- registry.Wait(context.Background())
+		waitResult <- registry.Wait(ctx)
 	}()
-
 	select {
+	case <-ctx.observed:
 	case err := <-waitResult:
-		t.Fatalf("Wait() returned before the execution completed: %v", err)
-	default:
+		t.Fatalf("Wait() returned before observing an active execution: %v", err)
 	}
 
 	handle.Done()
 	if err := <-waitResult; err != nil {
 		t.Fatalf("Wait() error = %v, want nil", err)
+	}
+}
+
+func TestExecutionRegistryWaitBlocksWhileExecutionIsActive(t *testing.T) {
+	registry := newExecutionRegistry()
+	handle, ok := registry.Begin("wf-blocked", executionSyncWorkflow, nil)
+	if !ok {
+		t.Fatal("Begin() rejected while registry was accepting")
+	}
+	defer handle.Done()
+
+	parent, cancel := context.WithCancel(t.Context())
+	ctx := newObservedDoneContext(parent)
+	waitResult := make(chan error, 1)
+	go func() {
+		waitResult <- registry.Wait(ctx)
+	}()
+	select {
+	case <-ctx.observed:
+	case err := <-waitResult:
+		t.Fatalf("Wait() returned while execution was active: %v", err)
+	}
+
+	cancel()
+	if err := <-waitResult; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Wait() error = %v, want context.Canceled while execution remains active", err)
 	}
 }
 
@@ -51,12 +79,18 @@ func TestExecutionRegistrySnapshotSurvivesConcurrentDone(t *testing.T) {
 		t.Fatalf("Snapshot() length = %d, want 1", len(snapshots))
 	}
 
+	doneStarted := make(chan struct{})
+	releaseDone := make(chan struct{})
 	doneReturned := make(chan struct{})
 	go func() {
+		close(doneStarted)
+		<-releaseDone
 		handle.Done()
 		close(doneReturned)
 	}()
 
+	<-doneStarted
+	close(releaseDone)
 	<-snapshots[0].done
 	<-doneReturned
 	if snapshots[0].workflowID != "wf-1" {
@@ -140,4 +174,24 @@ func TestExecutionRegistryNewServerInitializesRegistry(t *testing.T) {
 	if server.executions == nil {
 		t.Fatal("NewServer() executions is nil")
 	}
+}
+
+type observedDoneContext struct {
+	context.Context
+	observed chan struct{}
+	once     sync.Once
+}
+
+func newObservedDoneContext(parent context.Context) *observedDoneContext {
+	return &observedDoneContext{
+		Context:  parent,
+		observed: make(chan struct{}),
+	}
+}
+
+func (c *observedDoneContext) Done() <-chan struct{} {
+	c.once.Do(func() {
+		close(c.observed)
+	})
+	return c.Context.Done()
 }

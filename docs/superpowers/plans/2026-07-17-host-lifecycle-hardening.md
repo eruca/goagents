@@ -268,6 +268,8 @@ git commit -m "feat(hostkit): 实现可强制收口的生命周期状态机"
 - Create: `examples/host-api/lifecycle_cleanup.go`
 - Create: `examples/host-api/lifecycle_cleanup_test.go`
 - Modify: `examples/host-api/server.go`
+- Modify: `workflowkit/sqlitestore/store.go`
+- Modify: `workflowkit/sqlitestore/store_test.go`
 
 **Interfaces:**
 - Consumes: workflow ID、operation kind、当前 workflow store 状态。
@@ -332,7 +334,31 @@ func (r *executionRegistry) Wait(context.Context) error
 
 预期全部退出 0。
 
-- [ ] **Step 4:** 在 `lifecycle_cleanup_test.go` 先写 workflow 收口失败测试：
+- [ ] **Step 4:** 先为 SQLite Store.Update 写真实并发 RED，再做最小事务化实现：
+
+```text
+TestStoreUpdateSerializesConcurrentSave
+TestStoreUpdateRollsBackCallbackError
+TestStoreUpdatePropagatesContextCancellation
+```
+
+并发测试使用 callback barrier 和带 deadline 的并发 Save，不使用 sleep。旧实现的 RED
+必须证明同一 Store 的 Save 可以在 callback 阻塞时成功，随后被 Update 的旧快照覆盖。
+实现时保持 `workflowkit.Store.Update` 公共 contract 不变，提取 tx-compatible 私有
+get/save helper，并在同一事务中完成 read → mutate → write → readback → commit。
+callback error 必须 rollback；context cancellation 和 commit error 原样传播。
+
+该原子性依赖 Host 持有同一个 Store 实例以及当前 `SetMaxOpenConns(1)`；不得宣称覆盖多个
+独立 Store 实例。
+
+运行：
+
+```bash
+(cd workflowkit && go test ./sqlitestore -run 'Test.*Update' -count=1)
+(cd workflowkit && go test -race ./sqlitestore -count=1)
+```
+
+- [ ] **Step 5:** 在 `lifecycle_cleanup_test.go` 先写 workflow 收口失败测试：
 
 ```text
 TestFinalizeWorkflowShutdownFailsActiveWorkflow
@@ -352,9 +378,11 @@ run.LeaseOwner = ""
 run.LeaseUntil = time.Time{}
 ```
 
-同时断言 step history、`AgentRunID`、`AuditRef` 和 output ref 原样保留。
+同时断言 step history、`InputRef`、`OutputRef`、`AgentRunID`、`AuditRef`、
+`CurrentStep`、`StepAttempts` 和 `Metadata` 原样保留。terminal 与稳定
+`waiting_approval` 必须补真实 SQLite Store 证据。
 
-- [ ] **Step 5:** 在 `lifecycle_cleanup.go` 实现：
+- [ ] **Step 6:** 在 `lifecycle_cleanup.go` 实现：
 
 ```go
 const hostShutdownTimeoutCode = "host_shutdown_timeout"
@@ -363,9 +391,12 @@ func (s *Server) finalizeWorkflowShutdown(ctx context.Context, workflowID string
 func waitAndCleanupExecutions(ctx context.Context, snapshots []executionSnapshot) error
 ```
 
-`finalizeWorkflowShutdown` 必须重新读取持久化状态并通过 `workflowkit.Store.Update` 做条件式更新；终态与稳定 approval wait 返回 nil。`waitAndCleanupExecutions` 必须先等对应 operation 的 done，再调用其 cleanup，context 到期立即返回且不关闭 store。
+`finalizeWorkflowShutdown` 必须重新读取持久化状态并通过原子
+`workflowkit.Store.Update` 做条件式更新；终态与稳定 approval wait 返回 nil。
+`waitAndCleanupExecutions` 必须先等对应 operation 的 done，再以同一个 context 调用其
+cleanup；context 到期立即返回且不关闭 store，cleanup error 原样传播。
 
-- [ ] **Step 6:** 在 `Server` 增加由 `NewServer` 初始化的 registry：
+- [ ] **Step 7:** 在 `Server` 增加由 `NewServer` 初始化的 registry：
 
 ```go
 executions *executionRegistry
@@ -375,20 +406,28 @@ executions *executionRegistry
 
 仅使用 `NewServer` 初始化；现有只构造 `hostAgentStep` 的窄单元测试不应被迫创建完整 lifecycle。
 
-- [ ] **Step 7:** 运行：
+- [ ] **Step 8:** 运行：
 
 ```bash
-(cd examples/host-api && go test ./... -run 'Test(ExecutionRegistry|FinalizeWorkflowShutdown)' -count=1)
-(cd examples/host-api && go test -race ./... -run 'Test(ExecutionRegistry|FinalizeWorkflowShutdown)' -count=1)
+(cd workflowkit && go test ./sqlitestore -run 'Test.*Update' -count=1)
+(cd workflowkit && go test -race ./sqlitestore -count=1)
+(cd examples/host-api && go test ./... -run 'Test(ExecutionRegistry|FinalizeWorkflowShutdown|WaitAndCleanup)' -count=1)
+(cd examples/host-api && go test -race ./... -run 'Test(ExecutionRegistry|FinalizeWorkflowShutdown|WaitAndCleanup)' -count=1)
+(cd workflowkit && go test ./... -count=1)
+(cd examples/host-api && go test ./... -count=1)
+(cd workflowkit && go vet ./...)
+(cd examples/host-api && go vet ./...)
+git diff --check
 ```
 
-- [ ] **Step 8:** 提交：
+- [ ] **Step 9:** 提交 Task 3 原子性 follow-up：
 
 ```bash
-git add examples/host-api/execution_registry.go examples/host-api/execution_registry_test.go \
-  examples/host-api/lifecycle_cleanup.go examples/host-api/lifecycle_cleanup_test.go \
-  examples/host-api/server.go
-git commit -m "feat(host-api): 登记活动执行并支持条件式收口"
+git add workflowkit/sqlitestore/store.go workflowkit/sqlitestore/store_test.go \
+  examples/host-api/execution_registry_test.go examples/host-api/lifecycle_cleanup_test.go \
+  docs/superpowers/specs/2026-07-17-host-lifecycle-hardening-design.md \
+  docs/superpowers/plans/2026-07-17-host-lifecycle-hardening.md
+git commit -m "fix(workflowkit): 事务化工作流条件更新"
 ```
 
 ---
