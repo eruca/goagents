@@ -97,6 +97,8 @@ paths:
                 $ref: '#/components/schemas/WorkflowResponse'
         '400':
           $ref: '#/components/responses/ErrorResponse'
+        '503':
+          $ref: '#/components/responses/HostDrainingResponse'
         '500':
           $ref: '#/components/responses/ErrorResponse'
   /workflows/{id}:
@@ -196,6 +198,8 @@ paths:
           $ref: '#/components/responses/ErrorResponse'
         '404':
           $ref: '#/components/responses/ErrorResponse'
+        '503':
+          $ref: '#/components/responses/HostDrainingResponse'
         '500':
           $ref: '#/components/responses/ErrorResponse'
   /workflows/{id}/agent-approve:
@@ -245,6 +249,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          $ref: '#/components/responses/HostDrainingResponse'
         '500':
           $ref: '#/components/responses/ErrorResponse'
   /workflows/{id}/llm-routes:
@@ -341,6 +347,29 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
+    HostDrainingResponse:
+      description: The host is draining and cannot accept a new long-running execution.
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required:
+              - error
+            properties:
+              error:
+                type: object
+                additionalProperties: false
+                required:
+                  - code
+                  - message
+                properties:
+                  code:
+                    type: string
+                    const: host_draining
+                  message:
+                    type: string
+                    const: host is draining
   schemas:
     CreateWorkflowRequest:
       type: object

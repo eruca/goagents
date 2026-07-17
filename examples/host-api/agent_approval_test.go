@@ -7,11 +7,13 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/eruca/goagents/artifactkit"
+	"github.com/eruca/goagents/goagent/agentcore"
 	"github.com/eruca/goagents/runkit"
 	"github.com/eruca/goagents/workflowkit"
 )
@@ -531,6 +533,121 @@ func TestHostAPIAgentToolApprovalRejectsCallerSuppliedFreeFormReason(t *testing.
 	}
 	if checkpoint.Status != runkit.CheckpointPending || checkpoint.Approval != nil {
 		t.Fatalf("checkpoint after invalid request = %#v", checkpoint)
+	}
+}
+
+func TestApproveAgentToolRejectedWhileDraining(t *testing.T) {
+	server, err := NewServer(Config{
+		RuntimeHome:           t.TempDir(),
+		AgentApprovalCipher:   &testApprovalCipher{},
+		ApprovalAuthenticator: testApprovalAuthenticator{identity: ApprovalIdentity{Subject: "operator-draining"}},
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	created := createToolApprovalWorkflow(t, server, "wf-agent-approval-draining")
+	pending := created.AgentApproval.Tools[0]
+	beforeWorkflow, err := server.workflows.Get(t.Context(), created.ID)
+	if err != nil {
+		t.Fatalf("Get workflow before drain: %v", err)
+	}
+	beforeRun, err := server.runs.Get(t.Context(), created.AgentRunID)
+	if err != nil {
+		t.Fatalf("Get agent run before drain: %v", err)
+	}
+	checkpoints := server.runs.(runkit.CheckpointStore)
+	beforeCheckpoint, err := checkpoints.GetCheckpoint(t.Context(), created.AgentApproval.CheckpointID, localApprovalTenant)
+	if err != nil {
+		t.Fatalf("Get checkpoint before drain: %v", err)
+	}
+	server.executions.BeginDrain()
+
+	response := agentApprovalRequestForTest(t, server.Handler(), created.ID, map[string]any{
+		"resolutions": []map[string]any{{
+			"index":        pending.Index,
+			"tool_call_id": pending.ToolCallID,
+			"tool":         pending.Tool,
+			"allowed":      true,
+		}},
+	}, "Bearer test-operator")
+	assertHostDrainingResponse(t, response)
+
+	afterWorkflow, err := server.workflows.Get(t.Context(), created.ID)
+	if err != nil {
+		t.Fatalf("Get workflow after drain rejection: %v", err)
+	}
+	afterRun, err := server.runs.Get(t.Context(), created.AgentRunID)
+	if err != nil {
+		t.Fatalf("Get agent run after drain rejection: %v", err)
+	}
+	afterCheckpoint, err := checkpoints.GetCheckpoint(t.Context(), created.AgentApproval.CheckpointID, localApprovalTenant)
+	if err != nil {
+		t.Fatalf("Get checkpoint after drain rejection: %v", err)
+	}
+	if !reflect.DeepEqual(afterWorkflow, beforeWorkflow) || !reflect.DeepEqual(afterRun, beforeRun) || !reflect.DeepEqual(afterCheckpoint, beforeCheckpoint) {
+		t.Fatalf("drain rejection changed persisted state:\nworkflow before=%+v after=%+v\nrun before=%+v after=%+v\ncheckpoint before=%+v after=%+v",
+			beforeWorkflow, afterWorkflow, beforeRun, afterRun, beforeCheckpoint, afterCheckpoint)
+	}
+	if snapshots := server.executions.Snapshot(); len(snapshots) != 0 {
+		t.Fatalf("active executions after rejection = %+v, want none", snapshots)
+	}
+}
+
+func TestHostAgentApprovalServiceUsesExplicitLeaseOwner(t *testing.T) {
+	server, err := NewServer(Config{
+		RuntimeHome:           t.TempDir(),
+		AgentApprovalCipher:   &testApprovalCipher{},
+		ApprovalAuthenticator: testApprovalAuthenticator{identity: ApprovalIdentity{Subject: "operator-owner"}},
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	created := createToolApprovalWorkflow(t, server, "wf-agent-approval-owner")
+	pending := created.AgentApproval.Tools[0]
+	persistedCheckpoints := server.runs.(runkit.CheckpointStore)
+	barrier := &blockingFirstLeaseCheckpointStore{
+		CheckpointStore: server.agentApprovals.checkpoints,
+		acquired:        make(chan struct{}),
+		release:         make(chan struct{}),
+	}
+	server.agentApprovals.checkpoints = barrier
+	const leaseOwner = "host-api:explicit-owner"
+
+	resumeDone := make(chan error, 1)
+	go func() {
+		_, _, err := server.agentApprovals.ApproveAndResume(
+			t.Context(),
+			created.ID,
+			*created.AgentApproval,
+			"operator-owner",
+			[]agentcore.ToolApprovalResolution{{
+				Index:      pending.Index,
+				ToolCallID: pending.ToolCallID,
+				Tool:       pending.Tool,
+				Allowed:    true,
+			}},
+			leaseOwner,
+		)
+		resumeDone <- err
+	}()
+
+	select {
+	case <-barrier.acquired:
+	case <-t.Context().Done():
+		t.Fatal("approval service did not acquire checkpoint lease")
+	}
+	checkpoint, err := persistedCheckpoints.GetCheckpoint(t.Context(), created.AgentApproval.CheckpointID, localApprovalTenant)
+	if err != nil {
+		close(barrier.release)
+		t.Fatalf("GetCheckpoint while leased: %v", err)
+	}
+	if checkpoint.Status != runkit.CheckpointLeased || checkpoint.LeaseOwner != leaseOwner {
+		close(barrier.release)
+		t.Fatalf("leased checkpoint = %+v, want explicit owner %q", checkpoint, leaseOwner)
+	}
+	close(barrier.release)
+	if err := <-resumeDone; err != nil {
+		t.Fatalf("ApproveAndResume: %v", err)
 	}
 }
 

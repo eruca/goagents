@@ -1631,6 +1631,86 @@ func TestHostAPIReturnsJSONErrors(t *testing.T) {
 	}
 }
 
+func TestCreateSyncWorkflowRejectedWhileDraining(t *testing.T) {
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+	server.executions.BeginDrain()
+
+	response := workflowRequestForTest(t, server.Handler(), http.MethodPost, "/workflows", map[string]string{
+		"id":    "wf-sync-draining",
+		"input": "Do not start this workflow.",
+	})
+	assertHostDrainingResponse(t, response)
+	if _, err := server.workflows.Get(t.Context(), "wf-sync-draining"); !errors.Is(err, workflowkit.ErrRunNotFound) {
+		t.Fatalf("rejected workflow Get() error = %v, want workflow not found", err)
+	}
+	if _, err := server.artifacts.Get(t.Context(), "artifact:wf-sync-draining:input"); !errors.Is(err, artifactkit.ErrArtifactNotFound) {
+		t.Fatalf("rejected workflow input artifact error = %v, want artifact not found", err)
+	}
+	if snapshots := server.executions.Snapshot(); len(snapshots) != 0 {
+		t.Fatalf("active executions after rejection = %+v, want none", snapshots)
+	}
+}
+
+func TestCreateQueuedWorkflowRemainsShortHandlerTransaction(t *testing.T) {
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+	server.executions.BeginDrain()
+
+	response := workflowRequestForTest(t, server.Handler(), http.MethodPost, "/workflows", map[string]string{
+		"id":       "wf-queued-while-draining",
+		"input":    "Queue this workflow without executing it.",
+		"run_mode": "queued",
+	})
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("queued create status = %d, want 202; body=%s", response.Code, response.Body.String())
+	}
+	run, err := server.workflows.Get(t.Context(), "wf-queued-while-draining")
+	if err != nil {
+		t.Fatalf("Get queued workflow: %v", err)
+	}
+	if run.Status != workflowkit.StatusPending {
+		t.Fatalf("queued workflow status = %q, want pending", run.Status)
+	}
+	if snapshots := server.executions.Snapshot(); len(snapshots) != 0 {
+		t.Fatalf("queued create active executions = %+v, want none", snapshots)
+	}
+}
+
+func TestRequeueWorkflowRemainsShortHandlerTransaction(t *testing.T) {
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+	if err := server.workflows.Save(t.Context(), workflowkit.WorkflowRun{
+		ID:     "wf-requeue-while-draining",
+		Status: workflowkit.StatusFailed,
+		Error:  "retryable failure",
+	}); err != nil {
+		t.Fatalf("Save failed workflow: %v", err)
+	}
+	server.executions.BeginDrain()
+
+	response := workflowRequestForTest(t, server.Handler(), http.MethodPost, "/workflows/wf-requeue-while-draining/requeue", nil)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("requeue status = %d, want 202; body=%s", response.Code, response.Body.String())
+	}
+	run, err := server.workflows.Get(t.Context(), "wf-requeue-while-draining")
+	if err != nil {
+		t.Fatalf("Get requeued workflow: %v", err)
+	}
+	if run.Status != workflowkit.StatusPending {
+		t.Fatalf("requeued workflow status = %q, want pending", run.Status)
+	}
+	if snapshots := server.executions.Snapshot(); len(snapshots) != 0 {
+		t.Fatalf("requeue active executions = %+v, want none", snapshots)
+	}
+}
+
 func TestHostAPIRunModeSyncAndQueuedSemantics(t *testing.T) {
 	server, err := NewServer(Config{
 		LLMKitHome: t.TempDir(),
@@ -1788,6 +1868,19 @@ models:
 
 func doJSON[T any](t *testing.T, handler http.Handler, method, path string, body any) T {
 	t.Helper()
+	response := workflowRequestForTest(t, handler, method, path, body)
+	if response.Code < 200 || response.Code >= 300 {
+		t.Fatalf("%s %s status = %d; body=%s", method, path, response.Code, response.Body.String())
+	}
+	var out T
+	if err := json.Unmarshal(response.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response %s %s: %v; body=%s", method, path, err, response.Body.String())
+	}
+	return out
+}
+
+func workflowRequestForTest(t *testing.T, handler http.Handler, method, path string, body any) *httptest.ResponseRecorder {
+	t.Helper()
 	var payload *bytes.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -1804,14 +1897,23 @@ func doJSON[T any](t *testing.T, handler http.Handler, method, path string, body
 	}
 	resp := httptest.NewRecorder()
 	handler.ServeHTTP(resp, req)
-	if resp.Code < 200 || resp.Code >= 300 {
-		t.Fatalf("%s %s status = %d; body=%s", method, path, resp.Code, resp.Body.String())
+	return resp
+}
+
+func assertHostDrainingResponse(t *testing.T, response *httptest.ResponseRecorder) {
+	t.Helper()
+	var body struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
 	}
-	var out T
-	if err := json.Unmarshal(resp.Body.Bytes(), &out); err != nil {
-		t.Fatalf("decode response %s %s: %v; body=%s", method, path, err, resp.Body.String())
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode host draining response: %v; body=%s", err, response.Body.String())
 	}
-	return out
+	if response.Code != http.StatusServiceUnavailable || body.Error.Code != "host_draining" || body.Error.Message != "host is draining" {
+		t.Fatalf("host draining response status=%d body=%#v, want 503 host_draining", response.Code, body)
+	}
 }
 
 func hasModel(models []modelResponse, alias string) bool {

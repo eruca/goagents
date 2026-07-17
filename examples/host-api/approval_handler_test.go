@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
@@ -93,6 +94,37 @@ func TestHostAPIApprovalRejectsCallerSuppliedApprover(t *testing.T) {
 	}
 	if body.Error != "invalid_json" {
 		t.Fatalf("error response = %#v", body)
+	}
+}
+
+func TestApproveFinalWorkflowRejectedWhileDraining(t *testing.T) {
+	server, err := NewServer(Config{
+		RuntimeHome: t.TempDir(),
+		ApprovalAuthenticator: testApprovalAuthenticator{
+			identity: ApprovalIdentity{Subject: "operator-draining"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	createWaitingWorkflow(t, server, "wf-final-approval-draining")
+	before, err := server.workflows.Get(t.Context(), "wf-final-approval-draining")
+	if err != nil {
+		t.Fatalf("Get workflow before drain: %v", err)
+	}
+	server.executions.BeginDrain()
+
+	response := approveWorkflowRequestForTest(t, server.Handler(), before.ID, map[string]string{"note": "must not continue"}, "Bearer test-operator")
+	assertHostDrainingResponse(t, response)
+	after, err := server.workflows.Get(t.Context(), before.ID)
+	if err != nil {
+		t.Fatalf("Get workflow after drain rejection: %v", err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("workflow changed after drain rejection:\nbefore=%+v\nafter=%+v", before, after)
+	}
+	if snapshots := server.executions.Snapshot(); len(snapshots) != 0 {
+		t.Fatalf("active executions after rejection = %+v, want none", snapshots)
 	}
 }
 

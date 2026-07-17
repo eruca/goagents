@@ -434,6 +434,15 @@ type errorResponse struct {
 	Message string `json:"message,omitempty"`
 }
 
+type hostDrainingResponse struct {
+	Error hostDrainingError `json:"error"`
+}
+
+type hostDrainingError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
 func NewServer(config Config) (*Server, error) {
 	approvalKeychain, err := resolveAgentApprovalKeychainConfig(
 		config.AgentApprovalKeychainService,
@@ -669,6 +678,16 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_skill_refs", err.Error())
 		return
+	}
+	if runMode == RunModeSync {
+		handle, accepted := s.executions.Begin(req.ID, executionSyncWorkflow, func(ctx context.Context) error {
+			return s.finalizeWorkflowShutdown(ctx, req.ID)
+		})
+		if !accepted {
+			writeHostDraining(w)
+			return
+		}
+		defer handle.Done()
 	}
 	inputRef := "artifact:" + req.ID + ":input"
 	if err := putTextArtifact(r.Context(), s.artifacts, inputRef, req.Input); err != nil {
@@ -968,6 +987,14 @@ func (s *Server) handleApproveWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
+	handle, accepted := s.executions.Begin(id, executionFinalApproval, func(ctx context.Context) error {
+		return s.finalizeWorkflowShutdown(ctx, id)
+	})
+	if !accepted {
+		writeHostDraining(w)
+		return
+	}
+	defer handle.Done()
 	run, err := s.executor.Approve(r.Context(), id, workflowkit.Approval{
 		AuditRef: "audit:" + id + ":approval",
 		Metadata: map[string]any{
@@ -1032,7 +1059,17 @@ func (s *Server) handleApproveAgentTool(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	next, result, resumeErr := s.agentApprovals.ApproveAndResume(r.Context(), workflowID, *approval, identity.Subject, resolutions)
+	approvalToResume := *approval
+	leaseOwner := "host-api:" + agentcore.NewRunID().String()
+	handle, accepted := s.executions.Begin(workflowID, executionAgentApproval, func(ctx context.Context) error {
+		return s.finalizeAgentApprovalShutdown(ctx, workflowID, approvalToResume, leaseOwner)
+	})
+	if !accepted {
+		writeHostDraining(w)
+		return
+	}
+	defer handle.Done()
+	next, result, resumeErr := s.agentApprovals.ApproveAndResume(r.Context(), workflowID, approvalToResume, identity.Subject, resolutions, leaseOwner)
 	if errors.Is(resumeErr, runkit.ErrCheckpointNotClaimable) {
 		writeError(w, http.StatusConflict, "approval_conflict", "agent tool approval is already being processed")
 		return
@@ -2337,4 +2374,13 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, errorResponse{Error: code, Message: message})
+}
+
+func writeHostDraining(w http.ResponseWriter) {
+	writeJSON(w, http.StatusServiceUnavailable, hostDrainingResponse{
+		Error: hostDrainingError{
+			Code:    "host_draining",
+			Message: "host is draining",
+		},
+	})
 }

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eruca/goagents/runkit"
 	"github.com/eruca/goagents/workflowkit"
 	workflowsqlite "github.com/eruca/goagents/workflowkit/sqlitestore"
 )
@@ -229,6 +230,215 @@ func TestFinalizeWorkflowShutdownIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestFinalizeAgentApprovalShutdownBeforeLeaseIsNoOp(t *testing.T) {
+	server, created, checkpoints := newAgentApprovalLifecycleFixture(t, "wf-agent-cleanup-pending")
+	beforeCheckpoint := getLifecycleCheckpoint(t, checkpoints, created.AgentApproval.CheckpointID)
+	beforeRun := getLifecycleAgentRun(t, server.runs, created.AgentRunID)
+	beforeWorkflow := getLifecycleTestRun(t, server.workflows, created.ID)
+
+	if err := server.finalizeAgentApprovalShutdown(t.Context(), created.ID, *created.AgentApproval, "host-api:not-acquired"); err != nil {
+		t.Fatalf("finalizeAgentApprovalShutdown() error = %v", err)
+	}
+
+	afterCheckpoint := getLifecycleCheckpoint(t, checkpoints, created.AgentApproval.CheckpointID)
+	afterRun := getLifecycleAgentRun(t, server.runs, created.AgentRunID)
+	afterWorkflow := getLifecycleTestRun(t, server.workflows, created.ID)
+	if !reflect.DeepEqual(afterCheckpoint, beforeCheckpoint) || !reflect.DeepEqual(afterRun, beforeRun) || !reflect.DeepEqual(afterWorkflow, beforeWorkflow) {
+		t.Fatalf("cleanup before lease changed state:\ncheckpoint before=%+v after=%+v\nrun before=%+v after=%+v\nworkflow before=%+v after=%+v",
+			beforeCheckpoint, afterCheckpoint, beforeRun, afterRun, beforeWorkflow, afterWorkflow)
+	}
+}
+
+func TestFinalizeAgentApprovalShutdownFailsOwnedLeaseAndRunningAgentRun(t *testing.T) {
+	server, created, checkpoints := newAgentApprovalLifecycleFixture(t, "wf-agent-cleanup-owned")
+	const leaseOwner = "host-api:owned-cleanup"
+	leaseLifecycleCheckpoint(t, checkpoints, *created.AgentApproval, leaseOwner)
+
+	if err := server.finalizeAgentApprovalShutdown(t.Context(), created.ID, *created.AgentApproval, leaseOwner); err != nil {
+		t.Fatalf("finalizeAgentApprovalShutdown() error = %v", err)
+	}
+
+	checkpoint := getLifecycleCheckpoint(t, checkpoints, created.AgentApproval.CheckpointID)
+	if checkpoint.Status != runkit.CheckpointFailed || checkpoint.FailureCode != hostShutdownTimeoutCode ||
+		checkpoint.LeaseOwner != "" || !checkpoint.LeaseUntil.IsZero() {
+		t.Fatalf("checkpoint after cleanup = %+v, want failed shutdown checkpoint without lease", checkpoint)
+	}
+	run := getLifecycleAgentRun(t, server.runs, created.AgentRunID)
+	if run.Status != runkit.StatusFailed || run.Summary.Status != runkit.StatusFailed || run.Summary.AbortReason != hostShutdownTimeoutCode {
+		t.Fatalf("agent run after cleanup = %+v, want failed shutdown summary", run)
+	}
+	workflow := getLifecycleTestRun(t, server.workflows, created.ID)
+	if workflow.Status != workflowkit.StatusFailed || workflow.Error != hostShutdownTimeoutCode ||
+		workflow.ApprovalRef != "" || workflow.WaitingReason != "" || agentApprovalFromMetadata(workflow.Metadata) != nil {
+		t.Fatalf("workflow after cleanup = %+v, want failed without pending approval", workflow)
+	}
+}
+
+func TestFinalizeAgentApprovalShutdownLeavesCompetingLeaseUntouched(t *testing.T) {
+	server, created, checkpoints := newAgentApprovalLifecycleFixture(t, "wf-agent-cleanup-competing")
+	leaseLifecycleCheckpoint(t, checkpoints, *created.AgentApproval, "host-api:competitor")
+	beforeCheckpoint := getLifecycleCheckpoint(t, checkpoints, created.AgentApproval.CheckpointID)
+	beforeRun := getLifecycleAgentRun(t, server.runs, created.AgentRunID)
+	beforeWorkflow := getLifecycleTestRun(t, server.workflows, created.ID)
+
+	if err := server.finalizeAgentApprovalShutdown(t.Context(), created.ID, *created.AgentApproval, "host-api:loser"); err != nil {
+		t.Fatalf("finalizeAgentApprovalShutdown() error = %v", err)
+	}
+
+	afterCheckpoint := getLifecycleCheckpoint(t, checkpoints, created.AgentApproval.CheckpointID)
+	afterRun := getLifecycleAgentRun(t, server.runs, created.AgentRunID)
+	afterWorkflow := getLifecycleTestRun(t, server.workflows, created.ID)
+	if !reflect.DeepEqual(afterCheckpoint, beforeCheckpoint) || !reflect.DeepEqual(afterRun, beforeRun) || !reflect.DeepEqual(afterWorkflow, beforeWorkflow) {
+		t.Fatalf("competing cleanup changed state:\ncheckpoint before=%+v after=%+v\nrun before=%+v after=%+v\nworkflow before=%+v after=%+v",
+			beforeCheckpoint, afterCheckpoint, beforeRun, afterRun, beforeWorkflow, afterWorkflow)
+	}
+}
+
+func TestFinalizeAgentApprovalShutdownKeepsConsumedCheckpointConsumed(t *testing.T) {
+	server, created, checkpoints := newAgentApprovalLifecycleFixture(t, "wf-agent-cleanup-consumed")
+	const leaseOwner = "host-api:consumed-cleanup"
+	leaseLifecycleCheckpoint(t, checkpoints, *created.AgentApproval, leaseOwner)
+	if err := checkpoints.CompleteLease(t.Context(), runkit.CheckpointLeaseCompletion{
+		CheckpointID: created.AgentApproval.CheckpointID,
+		TenantID:     localApprovalTenant,
+		LeaseOwner:   leaseOwner,
+		Now:          time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CompleteLease: %v", err)
+	}
+	beforeCheckpoint := getLifecycleCheckpoint(t, checkpoints, created.AgentApproval.CheckpointID)
+
+	if err := server.finalizeAgentApprovalShutdown(t.Context(), created.ID, *created.AgentApproval, leaseOwner); err != nil {
+		t.Fatalf("finalizeAgentApprovalShutdown() error = %v", err)
+	}
+
+	afterCheckpoint := getLifecycleCheckpoint(t, checkpoints, created.AgentApproval.CheckpointID)
+	if !reflect.DeepEqual(afterCheckpoint, beforeCheckpoint) || afterCheckpoint.Status != runkit.CheckpointConsumed {
+		t.Fatalf("consumed checkpoint changed:\nbefore=%+v\nafter=%+v", beforeCheckpoint, afterCheckpoint)
+	}
+	run := getLifecycleAgentRun(t, server.runs, created.AgentRunID)
+	if run.Status != runkit.StatusFailed || run.Summary.AbortReason != hostShutdownTimeoutCode {
+		t.Fatalf("incomplete consumed agent run = %+v, want failed shutdown summary", run)
+	}
+	workflow := getLifecycleTestRun(t, server.workflows, created.ID)
+	if workflow.Status != workflowkit.StatusFailed || workflow.Error != hostShutdownTimeoutCode || agentApprovalFromMetadata(workflow.Metadata) != nil {
+		t.Fatalf("incomplete consumed workflow = %+v, want failed without pending approval", workflow)
+	}
+}
+
+func TestFinalizeAgentApprovalShutdownPreservesCompletedResume(t *testing.T) {
+	server, created, checkpoints := newAgentApprovalLifecycleFixture(t, "wf-agent-cleanup-complete")
+	pending := created.AgentApproval.Tools[0]
+	response := agentApprovalRequestForTest(t, server.Handler(), created.ID, map[string]any{
+		"resolutions": []map[string]any{{
+			"index":        pending.Index,
+			"tool_call_id": pending.ToolCallID,
+			"tool":         pending.Tool,
+			"allowed":      true,
+		}},
+	}, "Bearer test-operator")
+	if response.Code != 200 {
+		t.Fatalf("agent approval status = %d; body=%s", response.Code, response.Body.String())
+	}
+	beforeCheckpoint := getLifecycleCheckpoint(t, checkpoints, created.AgentApproval.CheckpointID)
+	beforeRun := getLifecycleAgentRun(t, server.runs, created.AgentRunID)
+	beforeWorkflow := getLifecycleTestRun(t, server.workflows, created.ID)
+	if beforeCheckpoint.Status != runkit.CheckpointConsumed || beforeRun.Status != runkit.StatusSucceeded ||
+		beforeWorkflow.Status != workflowkit.StatusWaitingApproval || agentApprovalFromMetadata(beforeWorkflow.Metadata) != nil {
+		t.Fatalf("completed resume fixture is not stable: checkpoint=%+v run=%+v workflow=%+v", beforeCheckpoint, beforeRun, beforeWorkflow)
+	}
+
+	if err := server.finalizeAgentApprovalShutdown(t.Context(), created.ID, *created.AgentApproval, "host-api:completed-cleanup"); err != nil {
+		t.Fatalf("finalizeAgentApprovalShutdown() error = %v", err)
+	}
+
+	afterCheckpoint := getLifecycleCheckpoint(t, checkpoints, created.AgentApproval.CheckpointID)
+	afterRun := getLifecycleAgentRun(t, server.runs, created.AgentRunID)
+	afterWorkflow := getLifecycleTestRun(t, server.workflows, created.ID)
+	if !reflect.DeepEqual(afterCheckpoint, beforeCheckpoint) || !reflect.DeepEqual(afterRun, beforeRun) || !reflect.DeepEqual(afterWorkflow, beforeWorkflow) {
+		t.Fatalf("completed resume changed:\ncheckpoint before=%+v after=%+v\nrun before=%+v after=%+v\nworkflow before=%+v after=%+v",
+			beforeCheckpoint, afterCheckpoint, beforeRun, afterRun, beforeWorkflow, afterWorkflow)
+	}
+}
+
+func TestFinalizeAgentApprovalShutdownPreservesCompletedPauseReplacement(t *testing.T) {
+	server, created, checkpoints := newAgentApprovalLifecycleFixture(t, "wf-agent-cleanup-next-pause")
+	const leaseOwner = "host-api:next-pause-cleanup"
+	leaseLifecycleCheckpoint(t, checkpoints, *created.AgentApproval, leaseOwner)
+	if err := checkpoints.CompleteLease(t.Context(), runkit.CheckpointLeaseCompletion{
+		CheckpointID: created.AgentApproval.CheckpointID,
+		TenantID:     localApprovalTenant,
+		LeaseOwner:   leaseOwner,
+		Now:          time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CompleteLease: %v", err)
+	}
+	nextApproval := agentApprovalResponse{
+		CheckpointID: "checkpoint-next-pause",
+		Tools:        append([]agentApprovalPendingTool(nil), created.AgentApproval.Tools...),
+	}
+	if err := checkpoints.CreateCheckpoint(t.Context(), runkit.ApprovalCheckpoint{
+		ID:             nextApproval.CheckpointID,
+		RunID:          created.AgentRunID,
+		TenantID:       localApprovalTenant,
+		DefinitionHash: hostAgentDefinitionHash,
+		Ciphertext:     []byte("opaque-next-pause"),
+		ExpiresAt:      time.Now().UTC().Add(agentApprovalLifetime),
+	}); err != nil {
+		t.Fatalf("CreateCheckpoint(next): %v", err)
+	}
+	current := getLifecycleTestRun(t, server.workflows, created.ID)
+	if _, err := server.replacePendingAgentApproval(t.Context(), current, created.AgentApproval.CheckpointID, nextApproval); err != nil {
+		t.Fatalf("replacePendingAgentApproval: %v", err)
+	}
+	beforeOldCheckpoint := getLifecycleCheckpoint(t, checkpoints, created.AgentApproval.CheckpointID)
+	beforeNextCheckpoint := getLifecycleCheckpoint(t, checkpoints, nextApproval.CheckpointID)
+	beforeRun := getLifecycleAgentRun(t, server.runs, created.AgentRunID)
+	beforeWorkflow := getLifecycleTestRun(t, server.workflows, created.ID)
+
+	if err := server.finalizeAgentApprovalShutdown(t.Context(), created.ID, *created.AgentApproval, leaseOwner); err != nil {
+		t.Fatalf("finalizeAgentApprovalShutdown() error = %v", err)
+	}
+
+	afterOldCheckpoint := getLifecycleCheckpoint(t, checkpoints, created.AgentApproval.CheckpointID)
+	afterNextCheckpoint := getLifecycleCheckpoint(t, checkpoints, nextApproval.CheckpointID)
+	afterRun := getLifecycleAgentRun(t, server.runs, created.AgentRunID)
+	afterWorkflow := getLifecycleTestRun(t, server.workflows, created.ID)
+	if !reflect.DeepEqual(afterOldCheckpoint, beforeOldCheckpoint) ||
+		!reflect.DeepEqual(afterNextCheckpoint, beforeNextCheckpoint) ||
+		!reflect.DeepEqual(afterRun, beforeRun) ||
+		!reflect.DeepEqual(afterWorkflow, beforeWorkflow) {
+		t.Fatalf("stable replacement pause changed:\nold checkpoint before=%+v after=%+v\nnext checkpoint before=%+v after=%+v\nrun before=%+v after=%+v\nworkflow before=%+v after=%+v",
+			beforeOldCheckpoint, afterOldCheckpoint, beforeNextCheckpoint, afterNextCheckpoint, beforeRun, afterRun, beforeWorkflow, afterWorkflow)
+	}
+}
+
+func TestFinalizeAgentApprovalShutdownIsIdempotent(t *testing.T) {
+	server, created, checkpoints := newAgentApprovalLifecycleFixture(t, "wf-agent-cleanup-idempotent")
+	const leaseOwner = "host-api:idempotent-cleanup"
+	leaseLifecycleCheckpoint(t, checkpoints, *created.AgentApproval, leaseOwner)
+
+	if err := server.finalizeAgentApprovalShutdown(t.Context(), created.ID, *created.AgentApproval, leaseOwner); err != nil {
+		t.Fatalf("first finalizeAgentApprovalShutdown() error = %v", err)
+	}
+	afterFirstCheckpoint := getLifecycleCheckpoint(t, checkpoints, created.AgentApproval.CheckpointID)
+	afterFirstRun := getLifecycleAgentRun(t, server.runs, created.AgentRunID)
+	afterFirstWorkflow := getLifecycleTestRun(t, server.workflows, created.ID)
+
+	if err := server.finalizeAgentApprovalShutdown(t.Context(), created.ID, *created.AgentApproval, leaseOwner); err != nil {
+		t.Fatalf("second finalizeAgentApprovalShutdown() error = %v", err)
+	}
+	afterSecondCheckpoint := getLifecycleCheckpoint(t, checkpoints, created.AgentApproval.CheckpointID)
+	afterSecondRun := getLifecycleAgentRun(t, server.runs, created.AgentRunID)
+	afterSecondWorkflow := getLifecycleTestRun(t, server.workflows, created.ID)
+	if !reflect.DeepEqual(afterSecondCheckpoint, afterFirstCheckpoint) ||
+		!reflect.DeepEqual(afterSecondRun, afterFirstRun) ||
+		!reflect.DeepEqual(afterSecondWorkflow, afterFirstWorkflow) {
+		t.Fatalf("second cleanup changed state:\ncheckpoint first=%+v second=%+v\nrun first=%+v second=%+v\nworkflow first=%+v second=%+v",
+			afterFirstCheckpoint, afterSecondCheckpoint, afterFirstRun, afterSecondRun, afterFirstWorkflow, afterSecondWorkflow)
+	}
+}
+
 func TestWaitAndCleanupExecutionsWaitsBeforeDoneAndPropagatesCleanupError(t *testing.T) {
 	operationDone := make(chan struct{})
 	cleanupStarted := make(chan struct{})
@@ -318,6 +528,55 @@ func getLifecycleTestRun(t *testing.T, store workflowkit.Store, id string) workf
 	run, err := store.Get(t.Context(), id)
 	if err != nil {
 		t.Fatalf("Get(%q) error = %v", id, err)
+	}
+	return run
+}
+
+func newAgentApprovalLifecycleFixture(t *testing.T, workflowID string) (*Server, workflowResponse, runkit.CheckpointStore) {
+	t.Helper()
+	server, err := NewServer(Config{
+		RuntimeHome:           t.TempDir(),
+		AgentApprovalCipher:   &testApprovalCipher{},
+		ApprovalAuthenticator: testApprovalAuthenticator{identity: ApprovalIdentity{Subject: "operator-cleanup"}},
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	created := createToolApprovalWorkflow(t, server, workflowID)
+	return server, created, server.runs.(runkit.CheckpointStore)
+}
+
+func leaseLifecycleCheckpoint(t *testing.T, checkpoints runkit.CheckpointStore, approval agentApprovalResponse, leaseOwner string) {
+	t.Helper()
+	if _, err := checkpoints.ApproveAndLease(t.Context(), runkit.ApprovalLeaseRequest{
+		CheckpointID:   approval.CheckpointID,
+		TenantID:       localApprovalTenant,
+		DefinitionHash: hostAgentDefinitionHash,
+		ApproverID:     "operator-cleanup",
+		AuditRef:       "audit:lifecycle-cleanup:" + approval.CheckpointID,
+		ReasonCode:     "operator_approved",
+		LeaseOwner:     leaseOwner,
+		LeaseDuration:  agentApprovalLifetime,
+		Now:            time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("ApproveAndLease: %v", err)
+	}
+}
+
+func getLifecycleCheckpoint(t *testing.T, checkpoints runkit.CheckpointStore, checkpointID string) runkit.ApprovalCheckpoint {
+	t.Helper()
+	checkpoint, err := checkpoints.GetCheckpoint(t.Context(), checkpointID, localApprovalTenant)
+	if err != nil {
+		t.Fatalf("GetCheckpoint(%q): %v", checkpointID, err)
+	}
+	return checkpoint
+}
+
+func getLifecycleAgentRun(t *testing.T, store runkit.Store, runID string) runkit.RunRecord {
+	t.Helper()
+	run, err := store.Get(t.Context(), runID)
+	if err != nil {
+		t.Fatalf("Get agent run %q: %v", runID, err)
 	}
 	return run
 }

@@ -160,7 +160,7 @@ func (s *hostAgentApprovalService) adapter() (*goagentapproval.Adapter, error) {
 	return goagentapproval.New(s.checkpoints, cipher, s.runner)
 }
 
-func (s *hostAgentApprovalService) ApproveAndResume(ctx context.Context, workflowID string, approval agentApprovalResponse, approverID string, resolutions []agentcore.ToolApprovalResolution) (agentApprovalResponse, *agentcore.RunResult, error) {
+func (s *hostAgentApprovalService) ApproveAndResume(ctx context.Context, workflowID string, approval agentApprovalResponse, approverID string, resolutions []agentcore.ToolApprovalResolution, leaseOwner string) (agentApprovalResponse, *agentcore.RunResult, error) {
 	adapter, err := s.adapter()
 	if err != nil {
 		return agentApprovalResponse{}, nil, err
@@ -174,7 +174,7 @@ func (s *hostAgentApprovalService) ApproveAndResume(ctx context.Context, workflo
 			ApproverID:     approverID,
 			AuditRef:       "audit:" + workflowID + ":agent-approval:" + approval.CheckpointID,
 			ReasonCode:     "operator_approved",
-			LeaseOwner:     "host-api:" + agentcore.NewRunID().String(),
+			LeaseOwner:     leaseOwner,
 			LeaseDuration:  agentApprovalLifetime,
 			Now:            time.Now().UTC(),
 		},
