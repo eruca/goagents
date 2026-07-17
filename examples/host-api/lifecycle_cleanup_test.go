@@ -80,6 +80,9 @@ func TestFinalizeWorkflowShutdownPreservesTerminalWorkflow(t *testing.T) {
 			}
 
 			after := getLifecycleTestRun(t, store, before.ID)
+			if !after.UpdatedAt.Equal(before.UpdatedAt) {
+				t.Fatalf("terminal workflow UpdatedAt changed: before=%v after=%v", before.UpdatedAt, after.UpdatedAt)
+			}
 			if !reflect.DeepEqual(after, before) {
 				t.Fatalf("terminal workflow changed:\nbefore=%+v\nafter=%+v", before, after)
 			}
@@ -103,13 +106,57 @@ func TestFinalizeWorkflowShutdownPreservesStableWaitingApproval(t *testing.T) {
 	}
 
 	after := getLifecycleTestRun(t, store, before.ID)
+	if !after.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Fatalf("waiting workflow UpdatedAt changed: before=%v after=%v", before.UpdatedAt, after.UpdatedAt)
+	}
 	if !reflect.DeepEqual(after, before) {
 		t.Fatalf("waiting workflow changed:\nbefore=%+v\nafter=%+v", before, after)
 	}
 }
 
+func TestFinalizeWorkflowShutdownRollsBackWhenWorkflowStabilizesBeforeUpdate(t *testing.T) {
+	for _, status := range []workflowkit.Status{
+		workflowkit.StatusWaitingApproval,
+		workflowkit.StatusSucceeded,
+		workflowkit.StatusFailed,
+		workflowkit.StatusCancelled,
+	} {
+		t.Run(string(status), func(t *testing.T) {
+			updatedAt := time.Date(2026, 7, 18, 8, 0, 0, 0, time.UTC)
+			store := &workflowShutdownRaceStore{
+				outer: workflowkit.WorkflowRun{
+					ID:        "wf-stabilized",
+					Status:    workflowkit.StatusRunning,
+					UpdatedAt: updatedAt.Add(-time.Minute),
+				},
+				current: workflowkit.WorkflowRun{
+					ID:        "wf-stabilized",
+					Status:    status,
+					OutputRef: "artifact:stable-output",
+					UpdatedAt: updatedAt,
+				},
+			}
+			server := &Server{workflows: store}
+
+			if err := server.finalizeWorkflowShutdown(t.Context(), "wf-stabilized"); err != nil {
+				t.Fatalf("finalizeWorkflowShutdown() error = %v", err)
+			}
+
+			if store.wrote {
+				t.Fatalf("Update wrote stable %q workflow instead of rolling back", status)
+			}
+			if !store.current.UpdatedAt.Equal(updatedAt) {
+				t.Fatalf("stable %q UpdatedAt changed: got %v want %v", status, store.current.UpdatedAt, updatedAt)
+			}
+			if store.updateCalls != 1 {
+				t.Fatalf("Update calls = %d, want 1", store.updateCalls)
+			}
+		})
+	}
+}
+
 func TestFinalizeWorkflowShutdownPreservesHistoryAndReferences(t *testing.T) {
-	server, store := newLifecycleTestServer()
+	server, store := newSQLiteLifecycleTestServer(t)
 	records := []workflowkit.StepRecord{{
 		Name:       "agent_review",
 		Status:     workflowkit.StatusSucceeded,
@@ -273,4 +320,45 @@ func getLifecycleTestRun(t *testing.T, store workflowkit.Store, id string) workf
 		t.Fatalf("Get(%q) error = %v", id, err)
 	}
 	return run
+}
+
+type workflowShutdownRaceStore struct {
+	outer       workflowkit.WorkflowRun
+	current     workflowkit.WorkflowRun
+	updateCalls int
+	wrote       bool
+}
+
+func (s *workflowShutdownRaceStore) Save(ctx context.Context, run workflowkit.WorkflowRun) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.current = run
+	return nil
+}
+
+func (s *workflowShutdownRaceStore) Get(ctx context.Context, _ string) (workflowkit.WorkflowRun, error) {
+	if err := ctx.Err(); err != nil {
+		return workflowkit.WorkflowRun{}, err
+	}
+	return s.outer, nil
+}
+
+func (s *workflowShutdownRaceStore) Update(
+	ctx context.Context,
+	_ string,
+	mutate func(workflowkit.WorkflowRun) (workflowkit.WorkflowRun, error),
+) (workflowkit.WorkflowRun, error) {
+	if err := ctx.Err(); err != nil {
+		return workflowkit.WorkflowRun{}, err
+	}
+	s.updateCalls++
+	updated, err := mutate(s.current)
+	if err != nil {
+		return workflowkit.WorkflowRun{}, err
+	}
+	updated.UpdatedAt = s.current.UpdatedAt.Add(time.Second)
+	s.current = updated
+	s.wrote = true
+	return updated, nil
 }

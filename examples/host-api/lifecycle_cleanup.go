@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/eruca/goagents/workflowkit"
 )
 
 const hostShutdownTimeoutCode = "host_shutdown_timeout"
+
+var errWorkflowShutdownUnchanged = errors.New("workflow shutdown state unchanged")
 
 func (s *Server) finalizeWorkflowShutdown(ctx context.Context, workflowID string) error {
 	run, err := s.workflows.Get(ctx, workflowID)
@@ -20,7 +23,7 @@ func (s *Server) finalizeWorkflowShutdown(ctx context.Context, workflowID string
 
 	_, err = s.workflows.Update(ctx, workflowID, func(current workflowkit.WorkflowRun) (workflowkit.WorkflowRun, error) {
 		if current.Status != workflowkit.StatusPending && current.Status != workflowkit.StatusRunning {
-			return current, nil
+			return current, errWorkflowShutdownUnchanged
 		}
 		current.Status = workflowkit.StatusFailed
 		current.Error = hostShutdownTimeoutCode
@@ -28,6 +31,9 @@ func (s *Server) finalizeWorkflowShutdown(ctx context.Context, workflowID string
 		current.LeaseUntil = time.Time{}
 		return current, nil
 	})
+	if errors.Is(err, errWorkflowShutdownUnchanged) {
+		return nil
+	}
 	return err
 }
 

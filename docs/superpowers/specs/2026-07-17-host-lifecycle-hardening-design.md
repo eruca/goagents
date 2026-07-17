@@ -268,6 +268,10 @@ Store 的 Save/Update 不能越过 callback 并发写入。Host shutdown cleanup
 Update 保证“重新检查当前状态后再条件式修改”不会覆盖并发终态或稳定 approval wait。
 这个保证不扩展为多个独立 Store 实例之间的进程级串行化声明。
 
+若 cleanup 的 outer read 看到 active，但事务内 callback 重新读取时已经是 terminal 或稳定
+`waiting_approval`，callback 必须返回 Host 私有 unchanged sentinel，使事务 rollback；
+外层把该 sentinel 归一为成功。该 no-op 不得执行 upsert，也不得刷新 `UpdatedAt`。
+
 “稳定 waiting approval”要求其对应 approval/checkpoint 已经完整持久化。若 agent tool
 approval/resume 仍处在外部副作用与 checkpoint 提交之间，必须走该操作专属 cleanup，而
 不能只看 workflow status。

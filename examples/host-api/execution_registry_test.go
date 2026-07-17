@@ -67,40 +67,105 @@ func TestExecutionRegistryRejectsBeginAfterDrain(t *testing.T) {
 }
 
 func TestExecutionRegistrySnapshotSurvivesConcurrentDone(t *testing.T) {
-	registry := newExecutionRegistry()
-	cleanup := func(context.Context) error { return nil }
-	handle, ok := registry.Begin("wf-1", executionFinalApproval, cleanup)
-	if !ok {
-		t.Fatal("Begin() rejected while registry was accepting")
+	for range 1000 {
+		registry := newExecutionRegistry()
+		cleanupErr := errors.New("cleanup sentinel")
+		cleanup := func(context.Context) error { return cleanupErr }
+		handle, ok := registry.Begin("wf-1", executionFinalApproval, cleanup)
+		if !ok {
+			t.Fatal("Begin() rejected while registry was accepting")
+		}
+
+		registry.mu.Lock()
+		start := make(chan struct{})
+		snapshotStarted := make(chan struct{})
+		doneStarted := make(chan struct{})
+		snapshotResult := make(chan []executionSnapshot, 1)
+		doneReturned := make(chan struct{})
+		go func() {
+			<-start
+			close(snapshotStarted)
+			snapshotResult <- registry.Snapshot()
+		}()
+		go func() {
+			<-start
+			close(doneStarted)
+			handle.Done()
+			close(doneReturned)
+		}()
+
+		close(start)
+		<-snapshotStarted
+		<-doneStarted
+		registry.mu.Unlock()
+
+		snapshots := <-snapshotResult
+		<-doneReturned
+		if len(snapshots) == 0 {
+			continue
+		}
+		if len(snapshots) != 1 {
+			t.Fatalf("Snapshot() length = %d, want 0 or 1", len(snapshots))
+		}
+		snapshot := snapshots[0]
+		<-snapshot.done
+		if snapshot.workflowID != "wf-1" {
+			t.Fatalf("snapshot workflowID = %q, want wf-1", snapshot.workflowID)
+		}
+		if snapshot.kind != executionFinalApproval {
+			t.Fatalf("snapshot kind = %q, want %q", snapshot.kind, executionFinalApproval)
+		}
+		if snapshot.cleanup == nil {
+			t.Fatal("snapshot cleanup is nil")
+		}
+		if err := snapshot.cleanup(t.Context()); err != cleanupErr {
+			t.Fatalf("snapshot cleanup error = %v, want sentinel", err)
+		}
+	}
+}
+
+func TestExecutionRegistryWaitAndBeginOverlap(t *testing.T) {
+	type beginResult struct {
+		handle *executionHandle
+		ok     bool
 	}
 
-	snapshots := registry.Snapshot()
-	if len(snapshots) != 1 {
-		t.Fatalf("Snapshot() length = %d, want 1", len(snapshots))
-	}
+	for range 1000 {
+		registry := newExecutionRegistry()
+		registry.mu.Lock()
+		start := make(chan struct{})
+		waitStarted := make(chan struct{})
+		beginStarted := make(chan struct{})
+		waitResult := make(chan error, 1)
+		beginReturned := make(chan beginResult, 1)
+		go func() {
+			<-start
+			close(waitStarted)
+			waitResult <- registry.Wait(t.Context())
+		}()
+		go func() {
+			<-start
+			close(beginStarted)
+			handle, ok := registry.Begin("wf-overlap", executionSyncWorkflow, nil)
+			beginReturned <- beginResult{handle: handle, ok: ok}
+		}()
 
-	doneStarted := make(chan struct{})
-	releaseDone := make(chan struct{})
-	doneReturned := make(chan struct{})
-	go func() {
-		close(doneStarted)
-		<-releaseDone
-		handle.Done()
-		close(doneReturned)
-	}()
+		close(start)
+		<-waitStarted
+		<-beginStarted
+		registry.mu.Unlock()
 
-	<-doneStarted
-	close(releaseDone)
-	<-snapshots[0].done
-	<-doneReturned
-	if snapshots[0].workflowID != "wf-1" {
-		t.Fatalf("snapshot workflowID = %q, want wf-1", snapshots[0].workflowID)
-	}
-	if snapshots[0].kind != executionFinalApproval {
-		t.Fatalf("snapshot kind = %q, want %q", snapshots[0].kind, executionFinalApproval)
-	}
-	if snapshots[0].cleanup == nil {
-		t.Fatal("snapshot cleanup is nil")
+		began := <-beginReturned
+		if !began.ok || began.handle == nil {
+			t.Fatalf("Begin() = (%v, %v), want non-nil handle and true", began.handle, began.ok)
+		}
+		began.handle.Done()
+		if err := <-waitResult; err != nil {
+			t.Fatalf("Wait() error = %v, want nil", err)
+		}
+		if err := registry.Wait(t.Context()); err != nil {
+			t.Fatalf("final Wait() error = %v, want nil", err)
+		}
 	}
 }
 

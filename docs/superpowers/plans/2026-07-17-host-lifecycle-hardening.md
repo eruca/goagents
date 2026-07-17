@@ -393,6 +393,8 @@ func waitAndCleanupExecutions(ctx context.Context, snapshots []executionSnapshot
 
 `finalizeWorkflowShutdown` 必须重新读取持久化状态并通过原子
 `workflowkit.Store.Update` 做条件式更新；终态与稳定 approval wait 返回 nil。
+若 outer Get 后状态已并发稳定，Update callback 必须返回 Host 私有 unchanged sentinel
+触发事务 rollback，外层将 sentinel 归一为 nil；禁止 no-op upsert 或刷新 `UpdatedAt`。
 `waitAndCleanupExecutions` 必须先等对应 operation 的 done，再以同一个 context 调用其
 cleanup；context 到期立即返回且不关闭 store，cleanup error 原样传播。
 
