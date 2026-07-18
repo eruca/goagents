@@ -4,8 +4,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -24,10 +22,22 @@ import (
 	"github.com/eruca/goagents/llmkit/llmkit"
 )
 
+const (
+	realProviderPromptSentinelEnv      = "GOAGENTS_RELEASE_PROMPT_SENTINEL"
+	realProviderObservationSentinelEnv = "GOAGENTS_RELEASE_OBSERVATION_SENTINEL"
+	realProviderResponseSentinelEnv    = "GOAGENTS_RELEASE_RESPONSE_SENTINEL"
+)
+
 type realProviderConfig struct {
 	BaseURL string
 	Model   string
 	APIKey  string
+}
+
+type realProviderSentinels struct {
+	prompt      string
+	observation string
+	response    string
 }
 
 type realProviderProbeTool struct {
@@ -78,6 +88,7 @@ func (recorder *realProviderCaptureRecorder) RecordOutcome(_ context.Context, ou
 
 func TestRealProviderMVPAcceptance(t *testing.T) {
 	config := requireRealProviderConfig(t)
+	sentinels := requireRealProviderSentinels(t)
 	provider := newRealProviderClient(t, config.BaseURL, config.Model, config.APIKey)
 
 	t.Run("text", func(t *testing.T) {
@@ -92,7 +103,8 @@ func TestRealProviderMVPAcceptance(t *testing.T) {
 			}}),
 		)
 		result, err := agent.RunDetailed(ctx, agentcore.RunRequest{
-			Input: "Reply with a short confirmation that the provider is reachable.",
+			Input: "Request marker: " + sentinels.prompt + ". " +
+				"Reply with this exact response marker: " + sentinels.response,
 		})
 		if err != nil {
 			t.Fatalf("real provider text request failed with %T", err)
@@ -100,12 +112,15 @@ func TestRealProviderMVPAcceptance(t *testing.T) {
 		if result == nil || strings.TrimSpace(result.Content) == "" || result.ExecutionSummary.LLMCalls != 1 {
 			t.Fatalf("real provider text result did not contain one completed LLM response")
 		}
+		if !strings.Contains(result.Content, sentinels.response) {
+			t.Fatal("real provider text response did not contain the required response sentinel")
+		}
 	})
 
 	t.Run("tool_observation", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
-		marker := newRealProviderObservationMarker(t)
+		marker := sentinels.observation
 		registry := tools.NewRegistry()
 		registry.Register(realProviderProbeTool{marker: marker})
 		agent := newRealProviderAgent(t,
@@ -115,11 +130,12 @@ func TestRealProviderMVPAcceptance(t *testing.T) {
 				Name: "mvp-tool-smoke",
 				Mode: prompt.ModeCacheable,
 				Content: "For this request, call verification_probe exactly once before answering. " +
-					"After the tool result, return its exact marker unchanged in the final answer.",
+					"After the tool result, return its exact marker and this exact response marker: " +
+					sentinels.response,
 			}}),
 		)
 		result, err := agent.RunDetailed(ctx, agentcore.RunRequest{
-			Input:              "Run the verification probe and report its exact marker.",
+			Input:              "Request marker: " + sentinels.prompt + ". Run the verification probe and report the required markers.",
 			AllowedPermissions: []policy.Permission{policy.PermissionRead},
 		})
 		if err != nil {
@@ -133,6 +149,9 @@ func TestRealProviderMVPAcceptance(t *testing.T) {
 		}
 		if !strings.Contains(result.Content, marker) {
 			t.Fatal("real provider final answer did not contain the tool observation marker")
+		}
+		if !strings.Contains(result.Content, sentinels.response) {
+			t.Fatal("real provider tool response did not contain the required response sentinel")
 		}
 	})
 
@@ -200,13 +219,31 @@ func TestRealProviderMVPAcceptance(t *testing.T) {
 	})
 }
 
-func newRealProviderObservationMarker(t *testing.T) string {
-	t.Helper()
-	nonce := make([]byte, 16)
-	if _, err := rand.Read(nonce); err != nil {
-		t.Fatalf("generate tool observation nonce: %v", err)
+func loadRealProviderSentinels(getenv func(string) string) (realProviderSentinels, error) {
+	sentinels := realProviderSentinels{
+		prompt:      strings.TrimSpace(getenv(realProviderPromptSentinelEnv)),
+		observation: strings.TrimSpace(getenv(realProviderObservationSentinelEnv)),
+		response:    strings.TrimSpace(getenv(realProviderResponseSentinelEnv)),
 	}
-	return "MVP_TOOL_OBSERVATION_" + hex.EncodeToString(nonce)
+	if sentinels.prompt == "" {
+		return realProviderSentinels{}, errors.New("real Provider prompt sentinel is required")
+	}
+	if sentinels.observation == "" {
+		return realProviderSentinels{}, errors.New("real Provider observation sentinel is required")
+	}
+	if sentinels.response == "" {
+		return realProviderSentinels{}, errors.New("real Provider response sentinel is required")
+	}
+	return sentinels, nil
+}
+
+func requireRealProviderSentinels(t *testing.T) realProviderSentinels {
+	t.Helper()
+	sentinels, err := loadRealProviderSentinels(os.Getenv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sentinels
 }
 
 func requireRealProviderConfig(t *testing.T) realProviderConfig {

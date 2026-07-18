@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eruca/goagents/artifactkit"
 	"github.com/eruca/goagents/llmkit/llmkit"
 	"github.com/eruca/goagents/runkit"
 	"github.com/eruca/goagents/workflowkit"
@@ -27,13 +28,16 @@ type realProviderTrialSensitiveValue struct {
 	value string
 }
 
-func realProviderTrialSensitiveValues(config realProviderConfig, token string) []realProviderTrialSensitiveValue {
+func realProviderTrialSensitiveValues(config realProviderConfig, token string, sentinels realProviderSentinels) []realProviderTrialSensitiveValue {
 	return []realProviderTrialSensitiveValue{
 		{label: "Provider API key", value: config.APIKey},
 		{label: "Provider endpoint", value: config.BaseURL},
 		{label: "normalized Provider endpoint", value: strings.TrimRight(config.BaseURL, "/")},
 		{label: "Provider model", value: config.Model},
 		{label: "OIDC bearer token", value: token},
+		{label: "prompt sentinel", value: sentinels.prompt},
+		{label: "tool observation sentinel", value: sentinels.observation},
+		{label: "model response sentinel", value: sentinels.response},
 	}
 }
 
@@ -43,7 +47,12 @@ func TestRealProviderTrialSensitiveValuesIncludesModel(t *testing.T) {
 		Model:   "private-model-name",
 		APIKey:  "private-api-key",
 	}
-	for _, item := range realProviderTrialSensitiveValues(config, "private-token") {
+	sentinels := realProviderSentinels{
+		prompt:      "prompt-value",
+		observation: "observation-value",
+		response:    "response-value",
+	}
+	for _, item := range realProviderTrialSensitiveValues(config, "private-token", sentinels) {
 		if item.label == "Provider model" && item.value == config.Model {
 			return
 		}
@@ -53,6 +62,7 @@ func TestRealProviderTrialSensitiveValuesIncludesModel(t *testing.T) {
 
 func TestHostAPIProcessRealProviderLocalTrial(t *testing.T) {
 	providerConfig := requireRealProviderConfig(t)
+	sentinels := requireRealProviderSentinels(t)
 	requireInteractiveLoginKeychain(t)
 	oidc := newOIDCTestProvider(t)
 	binary := buildHostBinary(t)
@@ -66,7 +76,7 @@ func TestHostAPIProcessRealProviderLocalTrial(t *testing.T) {
 		hostAPISkillRootEnv:     "",
 		"OPENAI_COMPAT_API_KEY": providerConfig.APIKey,
 	}
-	sensitiveValues := realProviderTrialSensitiveValues(providerConfig, token)
+	sensitiveValues := realProviderTrialSensitiveValues(providerConfig, token, sentinels)
 	redactions := make([]string, 0, len(sensitiveValues))
 	for _, item := range sensitiveValues {
 		redactions = append(redactions, item.value)
@@ -80,8 +90,9 @@ func TestHostAPIProcessRealProviderLocalTrial(t *testing.T) {
 	}
 
 	created, status := processJSON[workflowResponse](t, first, http.MethodPost, "/workflows", map[string]any{
-		"id":    "wf-real-provider-local-trial",
-		"input": "Return a concise operator trial summary without calling tools.",
+		"id": "wf-real-provider-local-trial",
+		"input": "Request marker: " + sentinels.prompt + ". " +
+			"Return this exact response marker without calling tools: " + sentinels.response,
 		"task_profile": map[string]any{
 			"complexity":      "hard",
 			"failure_cost":    "high",
@@ -91,6 +102,18 @@ func TestHostAPIProcessRealProviderLocalTrial(t *testing.T) {
 	}, "")
 	if status != http.StatusAccepted || created.Status != string(workflowkit.StatusWaitingApproval) || created.AgentApproval != nil || created.InputRef == "" || created.OutputRef == "" || created.AgentRunID == "" || created.ApprovalRef == "" || created.WaitingReason == "" || !reflect.DeepEqual(created.Completed, []string{"ingest", "agent_review"}) {
 		t.Fatalf("create status=%d workflow=%#v, want persisted final approval wait", status, created)
+	}
+	artifactStore, err := artifactkit.NewFileStore(filepath.Join(runtimeHome, "artifacts"))
+	if err != nil {
+		t.Fatal("open Host trial artifact store failed")
+	}
+	inputArtifact, err := artifactStore.Get(t.Context(), created.InputRef)
+	if err != nil || !strings.Contains(string(inputArtifact.Content), sentinels.prompt) {
+		t.Fatal("Host trial input artifact did not contain the required prompt sentinel")
+	}
+	responseArtifact, err := artifactStore.Get(t.Context(), created.OutputRef)
+	if err != nil || !strings.Contains(string(responseArtifact.Content), sentinels.response) {
+		t.Fatal("Host trial response artifact did not contain the required response sentinel")
 	}
 	run, status := processJSON[agentRunResponse](t, first, http.MethodGet, "/agent-runs/"+created.AgentRunID, nil, "")
 	if status != http.StatusOK || !realProviderTrialRunMatches(run, created, created.OutputRef) {

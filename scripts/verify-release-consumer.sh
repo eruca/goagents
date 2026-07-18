@@ -24,6 +24,10 @@ if [[ -z "$ref" || -z "$expected_version" ]]; then
   printf 'git ref and expected version are required\n' >&2
   exit 2
 fi
+if [[ "$expected_version" == "pseudo" && ! "$ref" =~ ^[0-9a-f]{40}$ ]]; then
+  printf 'pseudo-version verification requires a 40-character commit SHA\n' >&2
+  exit 2
+fi
 
 workdir="$(mktemp -d "${TMPDIR:-/tmp}/goagents-release-consumer.XXXXXX")"
 cleanup() {
@@ -209,6 +213,11 @@ fi
 if [[ "$expected_version" == "pseudo" ]]; then
   if [[ ! "$resolved_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9]{14}|-0\.[0-9]{14})-[0-9a-f]{12}$ ]]; then
     printf 'resolved version is not a pseudo-version for %s\n' "$module_path" >&2
+    exit 1
+  fi
+  if [[ "${resolved_version##*-}" != "${ref:0:12}" ]]; then
+    printf 'resolved pseudo-version revision does not match candidate SHA for %s\n' \
+      "$module_path" >&2
     exit 1
   fi
 elif [[ "$resolved_version" != "$expected_version" ]]; then
