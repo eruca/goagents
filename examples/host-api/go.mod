@@ -7,6 +7,7 @@ require (
 	github.com/eruca/goagents/artifactkit v0.1.0
 	github.com/eruca/goagents/evalkit v0.1.0
 	github.com/eruca/goagents/goagent v0.1.0
+	github.com/eruca/goagents/hostkit v0.1.0
 	github.com/eruca/goagents/llmkit v0.1.0
 	github.com/eruca/goagents/runkit v0.1.0
 	github.com/eruca/goagents/skillkit v0.1.0
@@ -37,6 +38,8 @@ replace github.com/eruca/goagents/artifactkit => ../../artifactkit
 replace github.com/eruca/goagents/evalkit => ../../evalkit
 
 replace github.com/eruca/goagents/goagent => ../../goagent
+
+replace github.com/eruca/goagents/hostkit => ../../hostkit
 
 replace github.com/eruca/goagents/llmkit => ../../llmkit
 
