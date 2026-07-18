@@ -179,6 +179,107 @@ func TestHostAPIServiceDrainStopsIntakeAndWaitsExecutions(t *testing.T) {
 	}
 }
 
+func TestHostAPIServiceForceStopWaitsForShortHandlers(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*testing.T) (*Server, lifecycleShortRequest, *lifecycleStoreBarrier)
+	}{
+		{
+			name:  "queued create",
+			setup: setupQueuedCreateShortRequest,
+		},
+		{
+			name:  "requeue",
+			setup: setupRequeueShortRequest,
+		},
+		{
+			name:  "agent approval reject",
+			setup: setupAgentRejectShortRequest,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server, request, barrier := test.setup(t)
+			service := startLifecycleService(t, server)
+			requestDone := startLifecycleHTTPRequest(
+				t,
+				service,
+				request.method,
+				request.path,
+				request.body,
+				request.authorization,
+			)
+			waitLifecycleSignal(t, barrier.entered, "short handler store boundary")
+
+			forceResult := make(chan error, 1)
+			go func() {
+				forceResult <- service.ForceStop(t.Context())
+			}()
+			waitLifecycleSignal(t, barrier.contextCancelled, "short handler request cancellation")
+			if doneErr := <-service.Done(); doneErr != nil {
+				t.Fatalf("Done() error after ForceStop(): %v", doneErr)
+			}
+			waitLifecycleSignal(t, server.workerDone, "queued worker exit")
+			waitLifecycleSignal(t, server.janitorDone, "approval janitor exit")
+			waitBound := time.NewTimer(50 * time.Millisecond)
+			returnedEarly := false
+			var forceErr error
+			select {
+			case forceErr = <-forceResult:
+				returnedEarly = true
+				if !waitBound.Stop() {
+					<-waitBound.C
+				}
+			case <-waitBound.C:
+			}
+
+			close(barrier.release)
+			waitLifecycleSignal(t, barrier.returned, "short handler store return")
+			waitLifecycleSignal(t, requestDone, "short handler return")
+			if !returnedEarly {
+				forceErr = <-forceResult
+			}
+			if forceErr != nil {
+				t.Fatalf("ForceStop() after the short handler exited = %v", forceErr)
+			}
+			if err := service.Close(t.Context()); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+			if returnedEarly {
+				t.Fatal("ForceStop() returned before the short handler exited")
+			}
+		})
+	}
+}
+
+func TestHostAPIServiceForceStopShortHandlerConsumesOnlyCleanupBudget(t *testing.T) {
+	server, request, barrier := setupQueuedCreateShortRequest(t)
+	service := startLifecycleService(t, server)
+	requestDone := startLifecycleHTTPRequest(
+		t,
+		service,
+		request.method,
+		request.path,
+		request.body,
+		request.authorization,
+	)
+	waitLifecycleSignal(t, barrier.entered, "short handler store boundary")
+
+	cleanupCtx, cancelCleanup := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancelCleanup()
+	if err := service.ForceStop(cleanupCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ForceStop() error = %v, want context.DeadlineExceeded while short handler remains active", err)
+	}
+
+	close(barrier.release)
+	waitLifecycleSignal(t, barrier.returned, "short handler store return")
+	waitLifecycleSignal(t, requestDone, "short handler return")
+	if err := service.Close(t.Context()); err != nil {
+		t.Fatalf("Close() after short handler exit = %v", err)
+	}
+}
+
 func TestHostAPIServiceForceStopCancelsExecutionsAndRunsCleanup(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -245,23 +346,185 @@ func TestHostAPIServiceForceStopCancelsExecutionsAndRunsCleanup(t *testing.T) {
 	}
 }
 
-func TestHostAPIServiceForceStopCleansAllSnapshotsAfterErrors(t *testing.T) {
+func TestHostAPIServiceForceStopReconcilesFailOnceWorkflowState(t *testing.T) {
+	tests := []struct {
+		name   string
+		inject func(*Server, *workflowkit.MemoryStore, *runkit.MemoryStore) error
+	}{
+		{
+			name: "workflow write",
+			inject: func(server *Server, workflows *workflowkit.MemoryStore, _ *runkit.MemoryStore) error {
+				writeErr := errors.New("workflow write failed once")
+				server.workflows = &failOnceLifecycleWorkflowStore{Store: workflows, err: writeErr}
+				return writeErr
+			},
+		},
+		{
+			name: "AgentRun write",
+			inject: func(server *Server, _ *workflowkit.MemoryStore, runs *runkit.MemoryStore) error {
+				writeErr := errors.New("AgentRun write failed once")
+				server.runs = &failOnceLifecycleRunStore{Store: runs, err: writeErr}
+				return writeErr
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			const workflowID = "wf-force-reconcile"
+			const agentRunID = "agent-force-reconcile"
+			server := newBareLifecycleServer()
+			workflows := workflowkit.NewMemoryStore()
+			runs := runkit.NewMemoryStore()
+			server.workflows = workflows
+			server.runs = runs
+			saveLifecycleTestAgentRun(t, runs, runkit.RunRecord{
+				RunID:      agentRunID,
+				WorkflowID: workflowID,
+				Status:     runkit.StatusRunning,
+			})
+			saveLifecycleTestRun(t, workflows, workflowkit.WorkflowRun{
+				ID:         workflowID,
+				Status:     workflowkit.StatusRunning,
+				AgentRunID: agentRunID,
+			})
+			writeErr := test.inject(server, workflows, runs)
+			service := startLifecycleService(t, server)
+			handle, accepted := server.executions.Begin(workflowID, executionSyncWorkflow, func(ctx context.Context) error {
+				return server.finalizeWorkflowShutdown(ctx, workflowID)
+			})
+			if !accepted {
+				t.Fatal("execution registry rejected reconciliation owner")
+			}
+			go func() {
+				<-service.executionCtx.Done()
+				handle.Done()
+			}()
+
+			if err := service.ForceStop(t.Context()); err != nil {
+				t.Fatalf("ForceStop() error = %v, want fail-once state to converge in the same cleanup budget; first error=%v", err, writeErr)
+			}
+			workflow := getLifecycleTestRun(t, workflows, workflowID)
+			if workflow.Status != workflowkit.StatusFailed || workflow.Error != hostShutdownTimeoutCode {
+				t.Fatalf("workflow after ForceStop() = %q/%q, want shutdown failed", workflow.Status, workflow.Error)
+			}
+			agentRun := getLifecycleAgentRun(t, runs, agentRunID)
+			if agentRun.Status != runkit.StatusFailed ||
+				agentRun.Summary.Status != runkit.StatusFailed ||
+				agentRun.Summary.AbortReason != hostShutdownTimeoutCode {
+				t.Fatalf("AgentRun after ForceStop() = status %q summary %q abort %q, want shutdown failed",
+					agentRun.Status, agentRun.Summary.Status, agentRun.Summary.AbortReason)
+			}
+			if err := service.Close(t.Context()); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestHostAPIServiceForceStopPermanentCleanupFailureExhaustsBudgetWithoutClosingStores(t *testing.T) {
+	server := newBareLifecycleServer()
+	workflows := workflowkit.NewMemoryStore()
+	runs := runkit.NewMemoryStore()
+	callSignals := map[string]chan struct{}{
+		"wf-permanent-first":  make(chan struct{}, 8),
+		"wf-permanent-second": make(chan struct{}, 8),
+	}
+	firstErr := errors.New("first workflow cleanup remains unavailable")
+	secondErr := errors.New("second workflow cleanup remains unavailable")
+	server.workflows = &alwaysFailLifecycleWorkflowStore{
+		Store: workflows,
+		errs: map[string]error{
+			"wf-permanent-first":  firstErr,
+			"wf-permanent-second": secondErr,
+		},
+		calls: callSignals,
+	}
+	server.runs = runs
+	recorder := newCloseRecorder()
+	server.workflowCloser = recorder.closer("workflow", nil)
+	server.runCloser = recorder.closer("run", nil)
+	for workflowID, agentRunID := range map[string]string{
+		"wf-permanent-first":  "agent-permanent-first",
+		"wf-permanent-second": "agent-permanent-second",
+	} {
+		saveLifecycleTestAgentRun(t, runs, runkit.RunRecord{
+			RunID:      agentRunID,
+			WorkflowID: workflowID,
+			Status:     runkit.StatusRunning,
+		})
+		saveLifecycleTestRun(t, workflows, workflowkit.WorkflowRun{
+			ID:         workflowID,
+			Status:     workflowkit.StatusRunning,
+			AgentRunID: agentRunID,
+		})
+	}
+
+	service := startLifecycleService(t, server)
+	for workflowID := range callSignals {
+		workflowID := workflowID
+		handle, accepted := server.executions.Begin(workflowID, executionSyncWorkflow, func(ctx context.Context) error {
+			return server.finalizeWorkflowShutdown(ctx, workflowID)
+		})
+		if !accepted {
+			t.Fatalf("execution registry rejected %q", workflowID)
+		}
+		go func() {
+			<-service.executionCtx.Done()
+			handle.Done()
+		}()
+	}
+
+	cleanupCtx, cancelCleanup := context.WithCancel(t.Context())
+	forceResult := make(chan error, 1)
+	go func() {
+		forceResult <- service.ForceStop(cleanupCtx)
+	}()
+	for workflowID, calls := range callSignals {
+		for attempt := 1; attempt <= 2; attempt++ {
+			select {
+			case <-calls:
+			case err := <-forceResult:
+				t.Fatalf("ForceStop() returned before %q received reconciliation attempt %d: %v", workflowID, attempt, err)
+			case <-t.Context().Done():
+				t.Fatalf("timed out waiting for %q reconciliation attempt %d", workflowID, attempt)
+			}
+		}
+	}
+	cancelCleanup()
+	err := <-forceResult
+	if !errors.Is(err, firstErr) || !errors.Is(err, secondErr) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("ForceStop() error = %v, want both final cleanup errors and context.Canceled", err)
+	}
+	if err := service.Close(cleanupCtx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Close() error = %v, want exhausted cleanup context", err)
+	}
+	if got := recorder.snapshot(); len(got) != 0 {
+		t.Fatalf("stores closed after cleanup budget expired: %v", got)
+	}
+}
+
+func TestHostAPIServiceForceStopReconcilesAllSnapshotsAfterErrors(t *testing.T) {
 	server := newBareLifecycleServer()
 	service := startLifecycleService(t, server)
 	firstErr := errors.New("first force cleanup failed")
 	secondErr := errors.New("second force cleanup failed")
-	firstCalled := make(chan struct{}, 1)
-	secondCalled := make(chan struct{}, 1)
+	var firstCalls atomic.Int32
+	var secondCalls atomic.Int32
 	first, accepted := server.executions.Begin("wf-force-first", executionSyncWorkflow, func(context.Context) error {
-		firstCalled <- struct{}{}
-		return firstErr
+		if firstCalls.Add(1) == 1 {
+			return firstErr
+		}
+		return nil
 	})
 	if !accepted {
 		t.Fatal("first execution was rejected")
 	}
 	second, accepted := server.executions.Begin("wf-force-second", executionQueuedWorkflow, func(context.Context) error {
-		secondCalled <- struct{}{}
-		return secondErr
+		if secondCalls.Add(1) == 1 {
+			return secondErr
+		}
+		return nil
 	})
 	if !accepted {
 		t.Fatal("second execution was rejected")
@@ -275,19 +538,15 @@ func TestHostAPIServiceForceStopCleansAllSnapshotsAfterErrors(t *testing.T) {
 	}()
 
 	err := service.ForceStop(t.Context())
-	if !errors.Is(err, firstErr) || !errors.Is(err, secondErr) {
-		t.Fatalf("ForceStop() error = %v, want both cleanup errors", err)
+	if err != nil {
+		t.Fatalf("ForceStop() error = %v, want both fail-once cleanups to converge", err)
 	}
 	<-executionsDone
-	select {
-	case <-firstCalled:
-	default:
-		t.Fatal("first ForceStop cleanup was not called")
+	if got := firstCalls.Load(); got != 2 {
+		t.Fatalf("first ForceStop cleanup calls = %d, want 2 after one failure", got)
 	}
-	select {
-	case <-secondCalled:
-	default:
-		t.Fatal("second ForceStop cleanup was not called")
+	if got := secondCalls.Load(); got != 2 {
+		t.Fatalf("second ForceStop cleanup calls = %d, want 2 after one failure", got)
 	}
 	if doneErr := <-service.Done(); doneErr != nil {
 		t.Fatalf("Done() error after ForceStop() = %v", doneErr)
@@ -859,6 +1118,154 @@ func (s *blockingArtifactStore) Put(ctx context.Context, artifact artifactkit.Ar
 	}
 }
 
+type lifecycleShortRequest struct {
+	method        string
+	path          string
+	body          any
+	authorization string
+}
+
+type lifecycleStoreBarrier struct {
+	entered          chan struct{}
+	contextCancelled chan struct{}
+	release          chan struct{}
+	returned         chan struct{}
+	enterOnce        sync.Once
+	cancelOnce       sync.Once
+	returnOnce       sync.Once
+}
+
+func newLifecycleStoreBarrier() *lifecycleStoreBarrier {
+	return &lifecycleStoreBarrier{
+		entered:          make(chan struct{}),
+		contextCancelled: make(chan struct{}),
+		release:          make(chan struct{}),
+		returned:         make(chan struct{}),
+	}
+}
+
+func (b *lifecycleStoreBarrier) wait(ctx context.Context) {
+	b.enterOnce.Do(func() { close(b.entered) })
+	<-ctx.Done()
+	b.cancelOnce.Do(func() { close(b.contextCancelled) })
+	<-b.release
+	b.returnOnce.Do(func() { close(b.returned) })
+}
+
+type blockingShortWorkflowStore struct {
+	workflowkit.Store
+	barrier     *lifecycleStoreBarrier
+	blockSave   bool
+	blockUpdate bool
+}
+
+func (s *blockingShortWorkflowStore) Save(ctx context.Context, run workflowkit.WorkflowRun) error {
+	if s.blockSave {
+		s.barrier.wait(ctx)
+	}
+	return s.Store.Save(ctx, run)
+}
+
+func (s *blockingShortWorkflowStore) Update(
+	ctx context.Context,
+	id string,
+	mutate func(workflowkit.WorkflowRun) (workflowkit.WorkflowRun, error),
+) (workflowkit.WorkflowRun, error) {
+	if s.blockUpdate {
+		s.barrier.wait(ctx)
+	}
+	return s.Store.Update(ctx, id, mutate)
+}
+
+type blockingRejectCheckpointStore struct {
+	runkit.CheckpointStore
+	barrier *lifecycleStoreBarrier
+}
+
+func (s *blockingRejectCheckpointStore) RejectCheckpoint(ctx context.Context, request runkit.ApprovalLeaseRequest) error {
+	s.barrier.wait(ctx)
+	return s.CheckpointStore.RejectCheckpoint(ctx, request)
+}
+
+func setupQueuedCreateShortRequest(t *testing.T) (*Server, lifecycleShortRequest, *lifecycleStoreBarrier) {
+	t.Helper()
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	barrier := newLifecycleStoreBarrier()
+	server.workflows = &blockingShortWorkflowStore{
+		Store:     server.workflows,
+		barrier:   barrier,
+		blockSave: true,
+	}
+	return server, lifecycleShortRequest{
+		method: http.MethodPost,
+		path:   "/workflows",
+		body: map[string]any{
+			"id":       "wf-short-create",
+			"input":    "queued create",
+			"run_mode": string(RunModeQueued),
+		},
+	}, barrier
+}
+
+func setupRequeueShortRequest(t *testing.T) (*Server, lifecycleShortRequest, *lifecycleStoreBarrier) {
+	t.Helper()
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	saveLifecycleTestRun(t, server.workflows, workflowkit.WorkflowRun{
+		ID:     "wf-short-requeue",
+		Status: workflowkit.StatusFailed,
+		Error:  "previous_failure",
+	})
+	barrier := newLifecycleStoreBarrier()
+	server.workflows = &blockingShortWorkflowStore{
+		Store:       server.workflows,
+		barrier:     barrier,
+		blockUpdate: true,
+	}
+	return server, lifecycleShortRequest{
+		method: http.MethodPost,
+		path:   "/workflows/wf-short-requeue/requeue",
+		body:   map[string]any{},
+	}, barrier
+}
+
+func setupAgentRejectShortRequest(t *testing.T) (*Server, lifecycleShortRequest, *lifecycleStoreBarrier) {
+	t.Helper()
+	server, err := NewServer(Config{
+		RuntimeHome:           t.TempDir(),
+		AgentApprovalCipher:   &testApprovalCipher{},
+		ApprovalAuthenticator: testApprovalAuthenticator{identity: ApprovalIdentity{Subject: "operator-short-reject"}},
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	created := createToolApprovalWorkflow(t, server, "wf-short-reject")
+	pending := created.AgentApproval.Tools[0]
+	barrier := newLifecycleStoreBarrier()
+	server.agentApprovals.checkpoints = &blockingRejectCheckpointStore{
+		CheckpointStore: server.agentApprovals.checkpoints,
+		barrier:         barrier,
+	}
+	return server, lifecycleShortRequest{
+		method:        http.MethodPost,
+		path:          "/workflows/" + created.ID + "/agent-approve",
+		authorization: "Bearer test-operator",
+		body: map[string]any{
+			"resolutions": []map[string]any{{
+				"index":        pending.Index,
+				"tool_call_id": pending.ToolCallID,
+				"tool":         pending.Tool,
+				"allowed":      false,
+			}},
+		},
+	}, barrier
+}
+
 type signallingWriter struct {
 	mu    sync.Mutex
 	buf   bytes.Buffer
@@ -915,6 +1322,21 @@ func (r *closeRecorder) snapshot() []string {
 type closeFunc func() error
 
 func (f closeFunc) Close() error { return f() }
+
+type alwaysFailLifecycleWorkflowStore struct {
+	workflowkit.Store
+	errs  map[string]error
+	calls map[string]chan struct{}
+}
+
+func (s *alwaysFailLifecycleWorkflowStore) Update(
+	_ context.Context,
+	id string,
+	_ func(workflowkit.WorkflowRun) (workflowkit.WorkflowRun, error),
+) (workflowkit.WorkflowRun, error) {
+	s.calls[id] <- struct{}{}
+	return workflowkit.WorkflowRun{}, s.errs[id]
+}
 
 type controlledDeadlineContext struct {
 	context.Context

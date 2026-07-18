@@ -11,8 +11,14 @@ import (
 
 const hostShutdownTimeoutCode = "host_shutdown_timeout"
 const hostCleanupTimeout = 5 * time.Second
+const cleanupReconciliationInterval = 10 * time.Millisecond
 
 var errWorkflowShutdownUnchanged = errors.New("workflow shutdown state unchanged")
+
+type pendingExecutionCleanup struct {
+	cleanup executionCleanup
+	lastErr error
+}
 
 func (s *Server) finalizeWorkflowShutdown(ctx context.Context, workflowID string) error {
 	run, err := s.workflows.Get(ctx, workflowID)
@@ -159,29 +165,69 @@ func (s *Server) finalizeAgentApprovalShutdown(
 }
 
 func waitAndCleanupExecutions(ctx context.Context, snapshots []executionSnapshot) error {
-	var cleanupErrors []error
 	for _, snapshot := range snapshots {
 		if err := ctx.Err(); err != nil {
-			return joinCleanupErrors(cleanupErrors, err)
+			return err
 		}
 		select {
 		case <-snapshot.done:
 		case <-ctx.Done():
-			return joinCleanupErrors(cleanupErrors, ctx.Err())
-		}
-		if err := ctx.Err(); err != nil {
-			return joinCleanupErrors(cleanupErrors, err)
-		}
-		if snapshot.cleanup != nil {
-			if err := snapshot.cleanup(ctx); err != nil {
-				cleanupErrors = append(cleanupErrors, err)
-			}
-			if err := ctx.Err(); err != nil {
-				return joinCleanupErrors(cleanupErrors, err)
-			}
+			return ctx.Err()
 		}
 	}
-	return joinCleanupErrors(cleanupErrors)
+
+	pending := make([]pendingExecutionCleanup, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		if snapshot.cleanup != nil {
+			pending = append(pending, pendingExecutionCleanup{cleanup: snapshot.cleanup})
+		}
+	}
+
+	for len(pending) > 0 {
+		failed := make([]pendingExecutionCleanup, 0, len(pending))
+		for index, item := range pending {
+			if err := ctx.Err(); err != nil {
+				failed = append(failed, pending[index:]...)
+				return pendingCleanupErrors(failed, err)
+			}
+			item.lastErr = item.cleanup(ctx)
+			if item.lastErr != nil {
+				failed = append(failed, item)
+			}
+			if err := ctx.Err(); err != nil {
+				failed = append(failed, pending[index+1:]...)
+				return pendingCleanupErrors(failed, err)
+			}
+		}
+		if len(failed) == 0 {
+			return nil
+		}
+
+		timer := time.NewTimer(cleanupReconciliationInterval)
+		select {
+		case <-timer.C:
+			pending = failed
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return pendingCleanupErrors(failed, ctx.Err())
+		}
+	}
+	return nil
+}
+
+func pendingCleanupErrors(pending []pendingExecutionCleanup, additional ...error) error {
+	cleanupErrors := make([]error, 0, len(pending)+len(additional))
+	for _, item := range pending {
+		if item.lastErr != nil {
+			cleanupErrors = append(cleanupErrors, item.lastErr)
+		}
+	}
+	return joinCleanupErrors(cleanupErrors, additional...)
 }
 
 func joinCleanupErrors(existing []error, additional ...error) error {

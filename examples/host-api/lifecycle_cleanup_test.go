@@ -46,9 +46,9 @@ func assertHostSideEffectTestIsolation(t *testing.T) {
 	for _, forbidden := range []string{
 		"createcheckpoint",
 		"sideeffect",
+		"sink",
 		"toolcall",
 		"requeue",
-		"retry",
 	} {
 		if strings.Contains(lowerCleanup, forbidden) {
 			t.Fatalf("production lifecycle cleanup contains forbidden %q behavior", forbidden)
@@ -813,11 +813,12 @@ func TestFinalizeAgentApprovalShutdownIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestWaitAndCleanupExecutionsWaitsBeforeDoneAndPropagatesCleanupError(t *testing.T) {
+func TestWaitAndCleanupExecutionsWaitsBeforeDoneAndReconcilesCleanupError(t *testing.T) {
 	operationDone := make(chan struct{})
 	cleanupStarted := make(chan struct{})
-	cleanupContext := make(chan context.Context, 1)
+	cleanupContext := make(chan context.Context, 2)
 	cleanupErr := errors.New("cleanup failed")
+	var cleanupCalls int
 	ctx := newObservedDoneContext(t.Context())
 	result := make(chan error, 1)
 	go func() {
@@ -826,9 +827,15 @@ func TestWaitAndCleanupExecutionsWaitsBeforeDoneAndPropagatesCleanupError(t *tes
 			kind:       executionSyncWorkflow,
 			done:       operationDone,
 			cleanup: func(got context.Context) error {
-				close(cleanupStarted)
+				cleanupCalls++
+				if cleanupCalls == 1 {
+					close(cleanupStarted)
+				}
 				cleanupContext <- got
-				return cleanupErr
+				if cleanupCalls == 1 {
+					return cleanupErr
+				}
+				return nil
 			},
 		}})
 	}()
@@ -839,11 +846,16 @@ func TestWaitAndCleanupExecutionsWaitsBeforeDoneAndPropagatesCleanupError(t *tes
 	}
 
 	close(operationDone)
-	if err := <-result; err != cleanupErr {
-		t.Fatalf("waitAndCleanupExecutions() error = %v, want cleanup sentinel", err)
+	if err := <-result; err != nil {
+		t.Fatalf("waitAndCleanupExecutions() error = %v, want fail-once cleanup to converge", err)
 	}
-	if got := <-cleanupContext; got != ctx {
-		t.Fatalf("cleanup context = %p, want original %p", got, ctx)
+	for attempt := 1; attempt <= 2; attempt++ {
+		if got := <-cleanupContext; got != ctx {
+			t.Fatalf("cleanup context on attempt %d = %p, want original %p", attempt, got, ctx)
+		}
+	}
+	if cleanupCalls != 2 {
+		t.Fatalf("cleanup calls = %d, want 2 after one failure", cleanupCalls)
 	}
 	<-cleanupStarted
 }
@@ -871,22 +883,28 @@ func TestWaitAndCleanupExecutionsStopsCleanupWhenContextExpires(t *testing.T) {
 	}
 }
 
-func TestWaitAndCleanupExecutionsContinuesAfterCleanupErrors(t *testing.T) {
+func TestWaitAndCleanupExecutionsFairlyReconcilesCleanupErrors(t *testing.T) {
 	registry := newExecutionRegistry()
 	firstErr := errors.New("first cleanup failed")
 	secondErr := errors.New("second cleanup failed")
-	firstCalled := make(chan struct{}, 1)
-	secondCalled := make(chan struct{}, 1)
+	var firstCalls int
+	var secondCalls int
 	first, accepted := registry.Begin("wf-first", executionSyncWorkflow, func(context.Context) error {
-		firstCalled <- struct{}{}
-		return firstErr
+		firstCalls++
+		if firstCalls == 1 {
+			return firstErr
+		}
+		return nil
 	})
 	if !accepted {
 		t.Fatal("first execution was rejected")
 	}
 	second, accepted := registry.Begin("wf-second", executionQueuedWorkflow, func(context.Context) error {
-		secondCalled <- struct{}{}
-		return secondErr
+		secondCalls++
+		if secondCalls == 1 {
+			return secondErr
+		}
+		return nil
 	})
 	if !accepted {
 		t.Fatal("second execution was rejected")
@@ -896,18 +914,14 @@ func TestWaitAndCleanupExecutionsContinuesAfterCleanupErrors(t *testing.T) {
 	second.Done()
 
 	err := waitAndCleanupExecutions(t.Context(), snapshots)
-	if !errors.Is(err, firstErr) || !errors.Is(err, secondErr) {
-		t.Fatalf("waitAndCleanupExecutions() error = %v, want both cleanup errors", err)
+	if err != nil {
+		t.Fatalf("waitAndCleanupExecutions() error = %v, want both fail-once cleanups to converge", err)
 	}
-	select {
-	case <-firstCalled:
-	default:
-		t.Fatal("first snapshot cleanup was not called")
+	if firstCalls != 2 {
+		t.Fatalf("first snapshot cleanup calls = %d, want 2", firstCalls)
 	}
-	select {
-	case <-secondCalled:
-	default:
-		t.Fatal("second snapshot cleanup was not called")
+	if secondCalls != 2 {
+		t.Fatalf("second snapshot cleanup calls = %d, want 2", secondCalls)
 	}
 }
 
