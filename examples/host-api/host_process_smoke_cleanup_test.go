@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,24 +16,13 @@ import (
 )
 
 type cleanupTestReporter struct {
-	errors   []string
-	cleanups []func()
+	errors []string
 }
 
 func (r *cleanupTestReporter) Helper() {}
 
 func (r *cleanupTestReporter) Errorf(format string, args ...any) {
 	r.errors = append(r.errors, fmt.Sprintf(format, args...))
-}
-
-func (r *cleanupTestReporter) Cleanup(cleanup func()) {
-	r.cleanups = append(r.cleanups, cleanup)
-}
-
-func (r *cleanupTestReporter) runCleanups() {
-	for index := len(r.cleanups) - 1; index >= 0; index-- {
-		r.cleanups[index]()
-	}
 }
 
 func TestHostProcessCapturesStdoutAndStderrSeparately(t *testing.T) {
@@ -114,6 +104,39 @@ func TestWaitHostExitAcceptsExpectedNonZeroExit(t *testing.T) {
 }
 
 func TestWaitHostExitFailsWhenCleanupKillWasRequired(t *testing.T) {
+	const childEnvironment = "GOAGENTS_REQUIRED_KILL_HELPER_PROCESS"
+	if os.Getenv(childEnvironment) == "child" {
+		runRequiredKillCleanupChild(t)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	t.Cleanup(cancel)
+	command := exec.CommandContext(
+		ctx,
+		os.Args[0],
+		"-test.run=^TestWaitHostExitFailsWhenCleanupKillWasRequired$",
+		"-test.count=1",
+	)
+	command.Env = overrideEnvironment(map[string]string{childEnvironment: "child"})
+	output, err := command.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("required-kill helper process timed out: %v\n%s", ctx.Err(), output)
+	}
+	var exitError *exec.ExitError
+	if !errors.As(err, &exitError) {
+		t.Fatalf("required-kill helper process error = %T %v, want *exec.ExitError\n%s", err, err, output)
+	}
+	if !strings.Contains(string(output), "host process cleanup required kill") {
+		t.Fatalf("required-kill helper process output missing cleanup failure:\n%s", output)
+	}
+	if !strings.Contains(string(output), "kill error: <nil>; reap error: <nil>") {
+		t.Fatalf("required-kill helper process did not confirm kill and reap:\n%s", output)
+	}
+}
+
+func runRequiredKillCleanupChild(t *testing.T) {
+	t.Helper()
 	reader, writer, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("create process blocker: %v", err)
@@ -126,22 +149,10 @@ func TestWaitHostExitFailsWhenCleanupKillWasRequired(t *testing.T) {
 	command := exec.Command("/bin/sh", "-c", "trap '' INT; printf 'ready\n'; read blocked")
 	command.Stdin = reader
 	process := startCapturedHostCommand(t, command)
+	// Register cleanup before the readiness probe so every fatal path signals,
+	// waits, and if necessary kills and reaps the hanging process.
+	cleanupKilledHostProcessWithTimeout(t, process, 20*time.Millisecond)
 	waitForCapturedOutput(t, process.stdout, "ready\n")
-
-	reporter := &cleanupTestReporter{}
-	cleanupKilledHostProcessWithTimeout(reporter, process, 20*time.Millisecond)
-	reporter.runCleanups()
-
-	if len(reporter.errors) != 1 || !strings.Contains(reporter.errors[0], "required kill") {
-		t.Fatalf("cleanup errors = %#v, want one required-kill failure", reporter.errors)
-	}
-	exitCode, err := waitHostProcess(process, 10*time.Millisecond)
-	if err != nil {
-		t.Fatalf("wait after cleanup kill: %v", err)
-	}
-	if process.cmd.ProcessState == nil || exitCode != process.cmd.ProcessState.ExitCode() {
-		t.Fatalf("cleanup did not reap process: state=%v exit=%d", process.cmd.ProcessState, exitCode)
-	}
 }
 
 func TestHostExitErrorIsExactlyOneJSONLine(t *testing.T) {
