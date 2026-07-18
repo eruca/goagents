@@ -118,13 +118,36 @@ Keychain service/account pair.
 
 ## Shutdown boundary
 
-The example process does not yet implement signal-aware draining. Stop it only
-after request handling is quiescent and the queued worker has remained idle;
-SQLite leases recover interrupted workflows, but they cannot make an external
-side effect and its local checkpoint one atomic transaction. Irreversible write
-tools must use an idempotent external API or deduplicate by stable ToolCallID.
-An arbitrary `SIGKILL` during that commit window is outside the MVP's
-exactly-once guarantee.
+The process handles `SIGINT` and `SIGTERM` in two stages.
+
+- The first signal closes HTTP intake, stops new queued claims and janitor
+  scans, and lets already accepted workflows and approvals drain. Configure the
+  positive Go duration with `HOST_API_SHUTDOWN_TIMEOUT`; it defaults to `30s`.
+- If drain completes, stores close and the process exits `0`. Pending workflows
+  that were not claimed remain available when a process starts with the same
+  `HOST_RUNTIME_HOME`; completed or stable `waiting_approval` workflows remain
+  unchanged.
+- A second signal skips the remaining drain wait. A drain timeout does the same.
+  Both paths cancel active execution, conditionally fail unfinished state with
+  `host_shutdown_timeout`, clear owned leases, and use one fixed `5s` budget for
+  force stop plus close. A completed force path exits `5` with
+  `shutdown_timeout`; exhausting cleanup exits `5` with
+  `shutdown_cleanup_timeout`.
+
+New long-running workflow or approval operations that reach the registration
+boundary after drain begins receive `503 host_draining`. Short queued creation
+and requeue transactions remain request-scoped.
+
+A workflow force-closed with `host_shutdown_timeout` is not automatically
+executed after restart. After checking whether an external effect already
+committed, an operator may explicitly call
+`POST /workflows/{id}/requeue`. The retry may issue the external request again.
+Irreversible write tools must use an idempotent external API or deduplicate by
+stable ToolCallID.
+
+Graceful shutdown narrows controlled-signal failure windows; it does not make
+an external side effect and the local checkpoint one transaction, and it does
+not guarantee exactly-once behavior at arbitrary crash points.
 
 By default, the example creates a temporary runtime directory. Set
 `HOST_RUNTIME_HOME` to make workflow state, agent run audit, artifacts, and
@@ -439,7 +462,9 @@ Set `HOST_RUNTIME_HOME` to retain state across restarts and `HOST_API_ADDR` to
 choose the listen address. If `LLMKIT_HOME` is unset, it defaults to
 `$HOST_RUNTIME_HOME/.llmkit`. Set `HOST_API_QUEUED_LEASE_DURATION` to tune the
 in-process queued worker lease duration; it accepts Go durations such as `30s`
-or `2m` and defaults to `1m`.
+or `2m` and defaults to `1m`. Set `HOST_API_SHUTDOWN_TIMEOUT` to a positive Go
+duration to change the graceful drain timeout from its `30s` default; the
+force-stop and close budget remains fixed at `5s`.
 
 There is intentionally no switch that disables OIDC or accepts an approver
 identity from the request body. For a local proof without real external or

@@ -6,15 +6,20 @@ tested independently.
 
 ## Modules
 
+The current release layout contains 13 independently versioned modules:
+
 - [`goagent`](goagent/README.md): agent loop, typed tools, approvals, events, and provider adapters.
 - [`workflowkit`](workflowkit/README.md): durable workflow lifecycle, retries, approvals, and queue leases.
+- `workflowkit/agentstep`: adapter from agent runs to workflow steps.
 - [`runkit`](runkit/README.md): durable agent run records, events, and approval checkpoint storage.
 - [`artifactkit`](artifactkit/README.md): artifact references and durable stores.
+- [`hostkit`](hostkit/README.md): standard-library lifecycle coordination for one host-owned service.
 - [`llmkit`](llmkit/README.md): model routing, provider health, audit, and outcome statistics.
 - [`skillkit`](skillkit/README.md): immutable Skill discovery, gating, activation, and agent projection.
 - [`contextkit`](contextkit/README.md): context windows, projections, and tool budgets.
 - [`evalkit`](evalkit/README.md): reproducible agent evaluation traces and graders.
 - [`mcpkit`](mcpkit/README.md): MCP transport and tool integration.
+- [`mcpkit/officialsdk`](mcpkit/officialsdk/README.md): official MCP Go SDK transport adapter.
 - [`ocrs`](ocrs/README.md): OCR parsing, chunking, scheduling, and retry support.
 
 ## Verify the workspace

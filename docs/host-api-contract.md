@@ -23,6 +23,9 @@ Environment:
   `$HOST_RUNTIME_HOME/.llmkit`.
 - `HOST_API_QUEUED_LEASE_DURATION`: optional Go duration for the in-process
   queued worker lease. Defaults to `1m`.
+- `HOST_API_SHUTDOWN_TIMEOUT`: positive Go duration for graceful drain.
+  Defaults to `30s`. Invalid or non-positive values fail configuration. The
+  force-stop and close phases instead share one fixed `5s` cleanup budget.
 
 Runtime files:
 
@@ -42,9 +45,68 @@ If `.llmkit/config.yaml` is missing, host-api uses static demo providers. If it
 exists, provider clients are built from the config. Referenced `api_key_env`
 values must be set or startup fails.
 
+## Process Lifecycle
+
+The CLI converts `SIGINT` and `SIGTERM` into generic lifecycle interrupts. The
+first signal closes HTTP intake, stops new queued claims and janitor scans, and
+waits for already accepted workflows and approvals. If drain completes, the
+process closes its stores and exits `0`.
+
+A second signal skips the remaining drain wait but does not skip cleanup. A
+second signal or drain timeout cancels active execution and conditionally
+closes unfinished workflow state as `failed` with
+`host_shutdown_timeout`, including clearing an owned queue lease. Force stop
+and close share the fixed five-second cleanup budget.
+
+Pending workflows that were not claimed are recovered when the host restarts
+with the same runtime home. Stable terminal and fully persisted
+`waiting_approval` workflows remain unchanged. Workflows failed by forced
+shutdown are not automatically replayed. After checking the external system,
+an operator must explicitly call the real
+`POST /workflows/{id}/requeue` endpoint.
+
+New sync workflow, final approval continuation, or agent approval/resume work
+that reaches its execution-registration boundary after drain starts receives:
+
+```json
+{
+  "error": {
+    "code": "host_draining",
+    "message": "host is draining"
+  }
+}
+```
+
+Response status: `503 Service Unavailable`.
+
+### Process exit contract
+
+| Scenario | Code | Exit |
+|---|---|---:|
+| Successful drain | no error record | 0 |
+| Invalid environment configuration | `config_failed` | 2 |
+| Store, OIDC, Skill, or composition initialization failure | `initialization_failed` | 2 |
+| Listen address binding failure | `listen_failed` | 3 |
+| Unexpected HTTP serve failure | `serve_failed` | 4 |
+| Drain timeout or second signal | `shutdown_timeout` | 5 |
+| Force stop or close exceeds the shared cleanup budget | `shutdown_cleanup_timeout` | 5 |
+| Unclassified internal failure | `internal_error` | 1 |
+
+A non-zero exit writes exactly one JSON line to stderr with only `level`,
+`event`, `code`, and `message`:
+
+```json
+{"level":"error","event":"host_exit","code":"listen_failed","message":"host API listen failed"}
+```
+
+A successful signal drain writes no error record. The structured line never
+contains a panic stack, nested raw error, environment value, credential,
+checkpoint, prompt, model response, or raw Provider payload.
+
 ## Error Response
 
-All handler-level errors use:
+Except for the lifecycle `host_draining` response shown above, handler-level
+errors use:
 
 ```json
 {
@@ -55,6 +117,7 @@ All handler-level errors use:
 
 Common error codes:
 
+- `host_draining` (`503`, nested safe error object shown above)
 - `invalid_request`
 - `invalid_json`
 - `unsupported_run_mode`
@@ -235,6 +298,9 @@ Behavior:
   queued worker.
 - Appends a `workflow_requeued` event to workflow metadata for
   `GET /workflows/{id}/events`.
+- For a workflow failed with `host_shutdown_timeout`, this endpoint is the
+  operator's explicit retry action after external-side-effect review. Restart
+  alone does not invoke it or replay the workflow.
 
 Response status: `202 Accepted`.
 
@@ -251,6 +317,12 @@ Response:
 
 Requeueing `pending`, `running`, `waiting_approval`, or `succeeded` returns
 `400 invalid_request`. Missing workflow response: `404 not_found`.
+
+Requeue can issue an external request again. Exactly-once effect across the
+external system and local workflow/checkpoint stores is not provided by the
+Host. Irreversible tools must use an idempotent external API or a stable
+ToolCallID as the external deduplication key. Graceful shutdown does not change
+that arbitrary-crash boundary.
 
 ## POST /workflows/{id}/agent-approve
 

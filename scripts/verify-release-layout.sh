@@ -7,6 +7,7 @@ MODULE_PREFIX="github.com/eruca/goagents/"
 
 published_modules=(
   "goagent|${MODULE_PREFIX}goagent|goagent/v0.1.0"
+  "hostkit|${MODULE_PREFIX}hostkit|hostkit/v0.1.0"
   "artifactkit|${MODULE_PREFIX}artifactkit|artifactkit/v0.1.0"
   "contextkit|${MODULE_PREFIX}contextkit|contextkit/v0.1.0"
   "evalkit|${MODULE_PREFIX}evalkit|evalkit/v0.1.0"

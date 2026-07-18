@@ -8,6 +8,7 @@ use (
 	./examples/host-api
 	./examples/host-runtime
 	./goagent
+	./hostkit
 	./llmkit
 	./mcpkit
 	./mcpkit/officialsdk
@@ -21,6 +22,8 @@ use (
 )
 
 replace github.com/eruca/goagents/goagent v0.1.0 => ./goagent
+
+replace github.com/eruca/goagents/hostkit v0.1.0 => ./hostkit
 
 replace github.com/eruca/goagents/artifactkit v0.1.0 => ./artifactkit
 

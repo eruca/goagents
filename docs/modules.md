@@ -21,6 +21,9 @@ Core modules:
 Optional adapter/capability modules:
 
 - `github.com/eruca/goagents/workflowkit/agentstep` in `workflowkit/agentstep/`
+- `github.com/eruca/goagents/hostkit` in `hostkit/` for coordinating the
+  lifecycle of one host-owned service. It is an optional host-side capability
+  that depends only on the Go standard library.
 - `github.com/eruca/goagents/llmkit` in `llmkit/` for LLM routing, account/model policy,
   and audit contracts. It is optional host-side capability, not part of
   `goagent` core.
@@ -56,6 +59,7 @@ llmkit        must not import goagent from its core routing package
 artifactkit   must not import goagent, workflowkit, llmkit, contextkit, or ocrs
 runkit        must not import workflowkit, llmkit, contextkit, ocrs, or artifactkit
 skillkit core must not import other workspace modules; skillkit/agentadapter may import goagent
+hostkit       must not import any other GoAgents workspace module
 ```
 
 Adapter and composition modules may depend on multiple core modules:
@@ -66,7 +70,7 @@ llmkit adapters              may import llmkit + goagent
 mcpkit                       may import goagent
 mcpkit/officialsdk           may import mcpkit + official MCP Go SDK
 skillkit/agentadapter        may import skillkit + goagent
-examples/host-api            may import workflowkit + agentstep + goagent + llmkit + artifactkit + runkit
+examples/host-api            may import hostkit + workflowkit + agentstep + goagent + llmkit + artifactkit + runkit
 examples/host-runtime        may import workflowkit + agentstep + goagent + llmkit + artifactkit + runkit
 examples/agent-approval      may import workflowkit + agentstep + goagent
 examples/ocr-review          may import workflowkit + agentstep + goagent + contextkit + ocrs
@@ -90,6 +94,7 @@ Use Go subdirectory module tags:
 
 ```text
 goagent/v0.1.0
+hostkit/v0.1.0
 artifactkit/v0.1.0
 contextkit/v0.1.0
 evalkit/v0.1.0
@@ -124,6 +129,7 @@ Module-specific checks:
 (cd contextkit && go test ./...)
 (cd evalkit && go test ./...)
 (cd artifactkit && go test ./...)
+(cd hostkit && go test ./...)
 (cd ocrs && go test ./...)
 (cd runkit && go test ./...)
 (cd skillkit && go test ./...)
