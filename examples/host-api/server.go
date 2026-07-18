@@ -543,6 +543,7 @@ func NewServer(config Config) (*Server, error) {
 
 func (s *Server) Close(ctx context.Context) error {
 	if s.executions != nil {
+		s.executions.BeginDrain()
 		if err := s.executions.Wait(ctx); err != nil {
 			return err
 		}

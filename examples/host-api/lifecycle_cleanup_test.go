@@ -571,6 +571,86 @@ func TestWaitAndCleanupExecutionsStopsCleanupWhenContextExpires(t *testing.T) {
 	}
 }
 
+func TestWaitAndCleanupExecutionsContinuesAfterCleanupErrors(t *testing.T) {
+	registry := newExecutionRegistry()
+	firstErr := errors.New("first cleanup failed")
+	secondErr := errors.New("second cleanup failed")
+	firstCalled := make(chan struct{}, 1)
+	secondCalled := make(chan struct{}, 1)
+	first, accepted := registry.Begin("wf-first", executionSyncWorkflow, func(context.Context) error {
+		firstCalled <- struct{}{}
+		return firstErr
+	})
+	if !accepted {
+		t.Fatal("first execution was rejected")
+	}
+	second, accepted := registry.Begin("wf-second", executionQueuedWorkflow, func(context.Context) error {
+		secondCalled <- struct{}{}
+		return secondErr
+	})
+	if !accepted {
+		t.Fatal("second execution was rejected")
+	}
+	snapshots := registry.Snapshot()
+	first.Done()
+	second.Done()
+
+	err := waitAndCleanupExecutions(t.Context(), snapshots)
+	if !errors.Is(err, firstErr) || !errors.Is(err, secondErr) {
+		t.Fatalf("waitAndCleanupExecutions() error = %v, want both cleanup errors", err)
+	}
+	select {
+	case <-firstCalled:
+	default:
+		t.Fatal("first snapshot cleanup was not called")
+	}
+	select {
+	case <-secondCalled:
+	default:
+		t.Fatal("second snapshot cleanup was not called")
+	}
+}
+
+func TestWaitAndCleanupExecutionsStopsAfterCleanupExpiresContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cleanupErr := errors.New("cleanup failed before context expiry")
+	secondCalled := false
+
+	err := waitAndCleanupExecutions(ctx, []executionSnapshot{
+		{
+			workflowID: "wf-expire",
+			kind:       executionSyncWorkflow,
+			done:       closedLifecycleChannel(),
+			cleanup: func(context.Context) error {
+				cancel()
+				return cleanupErr
+			},
+		},
+		{
+			workflowID: "wf-must-not-run",
+			kind:       executionQueuedWorkflow,
+			done:       closedLifecycleChannel(),
+			cleanup: func(context.Context) error {
+				secondCalled = true
+				return nil
+			},
+		},
+	})
+
+	if !errors.Is(err, cleanupErr) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("waitAndCleanupExecutions() error = %v, want cleanup and context errors", err)
+	}
+	if secondCalled {
+		t.Fatal("cleanup continued after the context expired")
+	}
+}
+
+func closedLifecycleChannel() <-chan struct{} {
+	done := make(chan struct{})
+	close(done)
+	return done
+}
+
 func newLifecycleTestServer() (*Server, *workflowkit.MemoryStore) {
 	store := workflowkit.NewMemoryStore()
 	return &Server{workflows: store}, store

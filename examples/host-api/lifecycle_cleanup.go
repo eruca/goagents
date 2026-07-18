@@ -122,23 +122,39 @@ func (s *Server) finalizeAgentApprovalShutdown(
 }
 
 func waitAndCleanupExecutions(ctx context.Context, snapshots []executionSnapshot) error {
+	var cleanupErrors []error
 	for _, snapshot := range snapshots {
 		if err := ctx.Err(); err != nil {
-			return err
+			return joinCleanupErrors(cleanupErrors, err)
 		}
 		select {
 		case <-snapshot.done:
 		case <-ctx.Done():
-			return ctx.Err()
+			return joinCleanupErrors(cleanupErrors, ctx.Err())
 		}
 		if err := ctx.Err(); err != nil {
-			return err
+			return joinCleanupErrors(cleanupErrors, err)
 		}
 		if snapshot.cleanup != nil {
 			if err := snapshot.cleanup(ctx); err != nil {
-				return err
+				cleanupErrors = append(cleanupErrors, err)
+			}
+			if err := ctx.Err(); err != nil {
+				return joinCleanupErrors(cleanupErrors, err)
 			}
 		}
 	}
-	return nil
+	return joinCleanupErrors(cleanupErrors)
+}
+
+func joinCleanupErrors(existing []error, additional ...error) error {
+	all := append(append([]error(nil), existing...), additional...)
+	switch len(all) {
+	case 0:
+		return nil
+	case 1:
+		return all[0]
+	default:
+		return errors.Join(all...)
+	}
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -16,6 +17,8 @@ import (
 
 	"github.com/eruca/goagents/artifactkit"
 	"github.com/eruca/goagents/hostkit"
+	"github.com/eruca/goagents/runkit"
+	"github.com/eruca/goagents/workflowkit"
 )
 
 func TestHostAPIServiceStartBindsBeforeStartingBackgroundComponents(t *testing.T) {
@@ -178,70 +181,119 @@ func TestHostAPIServiceDrainStopsIntakeAndWaitsExecutions(t *testing.T) {
 
 func TestHostAPIServiceForceStopCancelsExecutionsAndRunsCleanup(t *testing.T) {
 	tests := []struct {
-		name string
-		kind executionKind
+		name       string
+		kind       executionKind
+		startOwner func(*testing.T) *lifecycleForceOwner
+		assert     func(*testing.T, *lifecycleForceOwner)
 	}{
-		{name: "sync workflow", kind: executionSyncWorkflow},
-		{name: "queued workflow", kind: executionQueuedWorkflow},
-		{name: "final approval", kind: executionFinalApproval},
-		{name: "agent approval", kind: executionAgentApproval},
+		{
+			name:       "sync workflow handler",
+			kind:       executionSyncWorkflow,
+			startOwner: startSyncWorkflowOwner,
+			assert:     assertWorkflowForceStopped,
+		},
+		{
+			name:       "queued workflow worker",
+			kind:       executionQueuedWorkflow,
+			startOwner: startQueuedWorkflowOwner,
+			assert:     assertQueuedWorkflowForceStopped,
+		},
+		{
+			name:       "final workflow approval handler",
+			kind:       executionFinalApproval,
+			startOwner: startFinalApprovalOwner,
+			assert:     assertWorkflowForceStopped,
+		},
+		{
+			name:       "agent approval handler",
+			kind:       executionAgentApproval,
+			startOwner: startAgentApprovalOwner,
+			assert:     assertAgentApprovalForceStopped,
+		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			server := newBareLifecycleServer()
-			service := newHostAPIService(server, "127.0.0.1:0", io.Discard)
-			if err := service.Start(t.Context()); err != nil {
-				t.Fatalf("Start() error = %v", err)
-			}
+			owner := test.startOwner(t)
+			snapshot := requireLifecycleOwnerSnapshot(t, owner.server, test.kind)
 
-			cleanupCalled := make(chan context.Context, 1)
-			cleanupErr := error(nil)
-			if test.kind == executionFinalApproval {
-				cleanupErr = errors.New("final approval cleanup failed")
-			}
-			handle, accepted := server.executions.Begin("wf-force", test.kind, func(ctx context.Context) error {
-				cleanupCalled <- ctx
-				return cleanupErr
-			})
-			if !accepted {
-				t.Fatal("execution registry rejected active execution")
-			}
-			executionStarted := make(chan struct{})
-			executionExited := make(chan struct{})
+			forceResult := make(chan error, 1)
 			go func() {
-				close(executionStarted)
-				<-service.executionCtx.Done()
-				handle.Done()
-				close(executionExited)
+				forceResult <- owner.service.ForceStop(t.Context())
 			}()
-			<-executionStarted
-
-			cleanupCtx := context.WithValue(t.Context(), lifecycleContextKey{}, test.kind)
-			err := service.ForceStop(cleanupCtx)
-			if cleanupErr == nil && err != nil {
+			<-owner.service.executionCtx.Done()
+			owner.release()
+			if err := <-forceResult; err != nil {
 				t.Fatalf("ForceStop() error = %v", err)
 			}
-			if cleanupErr != nil && !errors.Is(err, cleanupErr) {
-				t.Fatalf("ForceStop() error = %v, want cleanup sentinel", err)
+			<-owner.done
+
+			assertChannelClosed(t, snapshot.done, "production owner done")
+			assertChannelClosed(t, owner.server.workerDone, "worker done")
+			assertChannelClosed(t, owner.server.janitorDone, "janitor done")
+			if !errors.Is(owner.service.intakeCtx.Err(), context.Canceled) {
+				t.Fatalf("intake context error = %v, want context.Canceled", owner.service.intakeCtx.Err())
 			}
-			if got := <-cleanupCalled; got != cleanupCtx {
-				t.Fatalf("cleanup context = %p, want original %p", got, cleanupCtx)
-			}
-			<-executionExited
-			if !errors.Is(service.intakeCtx.Err(), context.Canceled) {
-				t.Fatalf("intake context error = %v, want context.Canceled", service.intakeCtx.Err())
-			}
-			if !errors.Is(service.executionCtx.Err(), context.Canceled) {
-				t.Fatalf("execution context error = %v, want context.Canceled", service.executionCtx.Err())
-			}
-			if doneErr := <-service.Done(); doneErr != nil {
+			if doneErr := <-owner.service.Done(); doneErr != nil {
 				t.Fatalf("Done() error after ForceStop() = %v", doneErr)
 			}
-			if err := service.Close(t.Context()); err != nil {
+			test.assert(t, owner)
+			if err := owner.service.Close(t.Context()); err != nil {
 				t.Fatalf("Close() error = %v", err)
 			}
 		})
+	}
+}
+
+func TestHostAPIServiceForceStopCleansAllSnapshotsAfterErrors(t *testing.T) {
+	server := newBareLifecycleServer()
+	service := startLifecycleService(t, server)
+	firstErr := errors.New("first force cleanup failed")
+	secondErr := errors.New("second force cleanup failed")
+	firstCalled := make(chan struct{}, 1)
+	secondCalled := make(chan struct{}, 1)
+	first, accepted := server.executions.Begin("wf-force-first", executionSyncWorkflow, func(context.Context) error {
+		firstCalled <- struct{}{}
+		return firstErr
+	})
+	if !accepted {
+		t.Fatal("first execution was rejected")
+	}
+	second, accepted := server.executions.Begin("wf-force-second", executionQueuedWorkflow, func(context.Context) error {
+		secondCalled <- struct{}{}
+		return secondErr
+	})
+	if !accepted {
+		t.Fatal("second execution was rejected")
+	}
+	executionsDone := make(chan struct{})
+	go func() {
+		<-service.executionCtx.Done()
+		first.Done()
+		second.Done()
+		close(executionsDone)
+	}()
+
+	err := service.ForceStop(t.Context())
+	if !errors.Is(err, firstErr) || !errors.Is(err, secondErr) {
+		t.Fatalf("ForceStop() error = %v, want both cleanup errors", err)
+	}
+	<-executionsDone
+	select {
+	case <-firstCalled:
+	default:
+		t.Fatal("first ForceStop cleanup was not called")
+	}
+	select {
+	case <-secondCalled:
+	default:
+		t.Fatal("second ForceStop cleanup was not called")
+	}
+	if doneErr := <-service.Done(); doneErr != nil {
+		t.Fatalf("Done() error after ForceStop() = %v", doneErr)
+	}
+	if err := service.Close(t.Context()); err != nil {
+		t.Fatalf("Close() error = %v", err)
 	}
 }
 
@@ -302,6 +354,115 @@ func TestHostAPIServiceCleanupTimeoutDoesNotCloseStoresUnderActiveExecution(t *t
 	}
 	if got, want := recorder.snapshot(), []string{"workflow", "run"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("close order after retry = %v, want %v", got, want)
+	}
+}
+
+func TestHostAPIServiceCloseDrainsRegistryBeforeWaitingForIdle(t *testing.T) {
+	recorder := newCloseRecorder()
+	server := &Server{
+		executions:     newExecutionRegistry(),
+		workflowCloser: recorder.closer("workflow", nil),
+		runCloser:      recorder.closer("run", nil),
+	}
+	service := newHostAPIService(server, "127.0.0.1:0", io.Discard)
+	active, accepted := server.executions.Begin("wf-active", executionSyncWorkflow, nil)
+	if !accepted {
+		t.Fatal("execution registry rejected initial execution")
+	}
+
+	closeCtx := newControlledDeadlineContext(t.Context())
+	closeResult := make(chan error, 1)
+	go func() {
+		closeResult <- service.Close(closeCtx)
+	}()
+	<-closeCtx.observed
+
+	late, lateAccepted := server.executions.Begin("wf-late", executionQueuedWorkflow, nil)
+	if late != nil {
+		late.Done()
+	}
+	if got := recorder.snapshot(); len(got) != 0 {
+		t.Fatalf("stores closed while the initial execution remained active: %v", got)
+	}
+	active.Done()
+	if err := <-closeResult; err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if lateAccepted {
+		t.Fatal("execution registry accepted a new execution after Close() started")
+	}
+	if got, want := recorder.snapshot(), []string{"workflow", "run"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("close order = %v, want %v", got, want)
+	}
+}
+
+func TestHostAPIServiceCloseStopsBetweenStoresWhenContextExpires(t *testing.T) {
+	recorder := newCloseRecorder()
+	closeCtx := newControlledDeadlineContext(t.Context())
+	server := &Server{
+		executions: newExecutionRegistry(),
+		workflowCloser: closeFunc(func() error {
+			recorder.record("workflow")
+			closeCtx.expire()
+			return nil
+		}),
+		runCloser: recorder.closer("run", nil),
+	}
+	service := newHostAPIService(server, "127.0.0.1:0", io.Discard)
+
+	if err := service.Close(closeCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first Close() error = %v, want context.DeadlineExceeded", err)
+	}
+	if got, want := recorder.snapshot(), []string{"workflow"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("close order after deadline = %v, want %v", got, want)
+	}
+	if err := service.Close(t.Context()); err != nil {
+		t.Fatalf("retry Close() error = %v", err)
+	}
+	if err := service.Close(t.Context()); err != nil {
+		t.Fatalf("idempotent Close() error = %v", err)
+	}
+	if got, want := recorder.snapshot(), []string{"workflow", "run"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("close order after retry = %v, want %v", got, want)
+	}
+}
+
+func TestHostAPIServiceConcurrentCloseCallsClosersAtMostOnce(t *testing.T) {
+	recorder := newCloseRecorder()
+	workflowEntered := make(chan struct{})
+	releaseWorkflow := make(chan struct{})
+	var enterOnce sync.Once
+	server := &Server{
+		executions: newExecutionRegistry(),
+		workflowCloser: closeFunc(func() error {
+			recorder.record("workflow")
+			enterOnce.Do(func() { close(workflowEntered) })
+			<-releaseWorkflow
+			return nil
+		}),
+		runCloser: recorder.closer("run", nil),
+	}
+	service := newHostAPIService(server, "127.0.0.1:0", io.Discard)
+
+	const callers = 8
+	results := make(chan error, callers)
+	start := make(chan struct{})
+	for range callers {
+		go func() {
+			<-start
+			results <- service.Close(t.Context())
+		}()
+	}
+	close(start)
+	<-workflowEntered
+	close(releaseWorkflow)
+	for range callers {
+		if err := <-results; err != nil {
+			t.Fatalf("concurrent Close() error = %v", err)
+		}
+	}
+	if got, want := recorder.snapshot(), []string{"workflow", "run"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("concurrent close order = %v, want %v", got, want)
 	}
 }
 
@@ -377,6 +538,300 @@ func TestHostAPIServiceAllOwnedGoroutinesExit(t *testing.T) {
 	}
 }
 
+type lifecycleForceOwner struct {
+	server      *Server
+	service     *hostAPIService
+	workflowID  string
+	approval    *workflowResponse
+	done        <-chan struct{}
+	releaseFunc func()
+	releaseOnce sync.Once
+}
+
+func (o *lifecycleForceOwner) release() {
+	o.releaseOnce.Do(func() {
+		if o.releaseFunc != nil {
+			o.releaseFunc()
+		}
+	})
+}
+
+func (o *lifecycleForceOwner) registerCleanup(t *testing.T) {
+	t.Helper()
+	t.Cleanup(func() {
+		o.release()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = o.service.ForceStop(ctx)
+		_ = o.service.Close(ctx)
+	})
+}
+
+func startSyncWorkflowOwner(t *testing.T) *lifecycleForceOwner {
+	t.Helper()
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	step := newSingleSlotStep(make(chan struct{}), 1)
+	server.executor = workflowkit.NewExecutor(server.workflows, []workflowkit.Step{step})
+	service := startLifecycleService(t, server)
+	done := startLifecycleHTTPRequest(t, service, http.MethodPost, "/workflows", map[string]any{
+		"id":    "wf-force-sync-owner",
+		"input": "force-stop the synchronous owner",
+	}, "")
+	owner := &lifecycleForceOwner{
+		server:     server,
+		service:    service,
+		workflowID: "wf-force-sync-owner",
+		done:       done,
+	}
+	owner.registerCleanup(t)
+	waitLifecycleSignal(t, step.started, "sync workflow step")
+	return owner
+}
+
+func startQueuedWorkflowOwner(t *testing.T) *lifecycleForceOwner {
+	t.Helper()
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	step := newSingleSlotStep(make(chan struct{}), 1)
+	server.executor = workflowkit.NewExecutor(server.workflows, []workflowkit.Step{step})
+	savePendingWorkflow(t, server.workflows, "wf-force-queued-owner", time.Now().UTC())
+	service := startLifecycleService(t, server)
+	owner := &lifecycleForceOwner{
+		server:     server,
+		service:    service,
+		workflowID: "wf-force-queued-owner",
+		done:       server.workerDone,
+	}
+	owner.registerCleanup(t)
+	waitLifecycleSignal(t, step.started, "queued workflow step")
+	return owner
+}
+
+func startFinalApprovalOwner(t *testing.T) *lifecycleForceOwner {
+	t.Helper()
+	server, err := NewServer(Config{
+		RuntimeHome: t.TempDir(),
+		ApprovalAuthenticator: testApprovalAuthenticator{
+			identity: ApprovalIdentity{Subject: "operator-force-final"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	createWaitingWorkflow(t, server, "wf-force-final-owner")
+	step := newSingleSlotStep(make(chan struct{}), 1)
+	server.executor = workflowkit.NewExecutor(server.workflows, []workflowkit.Step{step})
+	service := startLifecycleService(t, server)
+	done := startLifecycleHTTPRequest(
+		t,
+		service,
+		http.MethodPost,
+		"/workflows/wf-force-final-owner/approve",
+		map[string]string{"note": "force-stop final approval"},
+		"Bearer test-operator",
+	)
+	owner := &lifecycleForceOwner{
+		server:     server,
+		service:    service,
+		workflowID: "wf-force-final-owner",
+		done:       done,
+	}
+	owner.registerCleanup(t)
+	waitLifecycleSignal(t, step.started, "final approval step")
+	return owner
+}
+
+func startAgentApprovalOwner(t *testing.T) *lifecycleForceOwner {
+	t.Helper()
+	server, err := NewServer(Config{
+		RuntimeHome:           t.TempDir(),
+		AgentApprovalCipher:   &testApprovalCipher{},
+		ApprovalAuthenticator: testApprovalAuthenticator{identity: ApprovalIdentity{Subject: "operator-force-agent"}},
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	created := createToolApprovalWorkflow(t, server, "wf-force-agent-owner")
+	barrier := &blockingFirstLeaseCheckpointStore{
+		CheckpointStore: server.agentApprovals.checkpoints,
+		acquired:        make(chan struct{}),
+		release:         make(chan struct{}),
+	}
+	server.agentApprovals.checkpoints = barrier
+	service := startLifecycleService(t, server)
+	pending := created.AgentApproval.Tools[0]
+	done := startLifecycleHTTPRequest(
+		t,
+		service,
+		http.MethodPost,
+		"/workflows/"+created.ID+"/agent-approve",
+		map[string]any{
+			"resolutions": []map[string]any{{
+				"index":        pending.Index,
+				"tool_call_id": pending.ToolCallID,
+				"tool":         pending.Tool,
+				"allowed":      true,
+			}},
+		},
+		"Bearer test-operator",
+	)
+	owner := &lifecycleForceOwner{
+		server:      server,
+		service:     service,
+		workflowID:  created.ID,
+		approval:    &created,
+		done:        done,
+		releaseFunc: func() { close(barrier.release) },
+	}
+	owner.registerCleanup(t)
+	waitLifecycleSignal(t, barrier.acquired, "agent approval checkpoint lease")
+	return owner
+}
+
+func startLifecycleService(t *testing.T, server *Server) *hostAPIService {
+	t.Helper()
+	service := newHostAPIService(server, "127.0.0.1:0", io.Discard)
+	if err := service.Start(t.Context()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	return service
+}
+
+func startLifecycleHTTPRequest(
+	t *testing.T,
+	service *hostAPIService,
+	method string,
+	path string,
+	body any,
+	authorization string,
+) <-chan struct{} {
+	t.Helper()
+	payload, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal lifecycle request: %v", err)
+	}
+	request, err := http.NewRequest(
+		method,
+		"http://"+service.listener.Addr().String()+path,
+		bytes.NewReader(payload),
+	)
+	if err != nil {
+		t.Fatalf("build lifecycle request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	if authorization != "" {
+		request.Header.Set("Authorization", authorization)
+	}
+	done := make(chan struct{})
+	go func() {
+		response, _ := http.DefaultClient.Do(request)
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		close(done)
+	}()
+	return done
+}
+
+func requireLifecycleOwnerSnapshot(
+	t *testing.T,
+	server *Server,
+	wantKind executionKind,
+) executionSnapshot {
+	t.Helper()
+	snapshots := server.executions.Snapshot()
+	if len(snapshots) != 1 {
+		t.Fatalf("Snapshot() length = %d, want 1", len(snapshots))
+	}
+	snapshot := snapshots[0]
+	if snapshot.kind != wantKind {
+		t.Fatalf("snapshot kind = %q, want %q", snapshot.kind, wantKind)
+	}
+	if snapshot.cleanup == nil {
+		t.Fatal("production owner snapshot cleanup is nil")
+	}
+	return snapshot
+}
+
+func assertWorkflowForceStopped(t *testing.T, owner *lifecycleForceOwner) {
+	t.Helper()
+	run, err := owner.server.workflows.Get(t.Context(), owner.workflowID)
+	if err != nil {
+		t.Fatalf("Get workflow after ForceStop(): %v", err)
+	}
+	if run.Status != workflowkit.StatusFailed || run.Error != hostShutdownTimeoutCode {
+		t.Fatalf("workflow after ForceStop() = %+v, want failed shutdown state", run)
+	}
+}
+
+func assertQueuedWorkflowForceStopped(t *testing.T, owner *lifecycleForceOwner) {
+	t.Helper()
+	assertWorkflowForceStopped(t, owner)
+	run, err := owner.server.workflows.Get(t.Context(), owner.workflowID)
+	if err != nil {
+		t.Fatalf("Get queued workflow after ForceStop(): %v", err)
+	}
+	if run.LeaseOwner != "" || !run.LeaseUntil.IsZero() {
+		t.Fatalf("queued workflow lease after ForceStop() = (%q, %s), want cleared", run.LeaseOwner, run.LeaseUntil)
+	}
+}
+
+func assertAgentApprovalForceStopped(t *testing.T, owner *lifecycleForceOwner) {
+	t.Helper()
+	if owner.approval == nil || owner.approval.AgentApproval == nil {
+		t.Fatal("agent approval owner fixture is incomplete")
+	}
+	checkpoints := owner.server.runs.(runkit.CheckpointStore)
+	checkpoint, err := checkpoints.GetCheckpoint(
+		t.Context(),
+		owner.approval.AgentApproval.CheckpointID,
+		localApprovalTenant,
+	)
+	if err != nil {
+		t.Fatalf("Get checkpoint after ForceStop(): %v", err)
+	}
+	if checkpoint.Status != runkit.CheckpointFailed ||
+		checkpoint.FailureCode != hostShutdownTimeoutCode ||
+		checkpoint.LeaseOwner != "" ||
+		!checkpoint.LeaseUntil.IsZero() {
+		t.Fatalf("checkpoint after ForceStop() = %+v, want failed shutdown state", checkpoint)
+	}
+	agentRun, err := owner.server.runs.Get(t.Context(), owner.approval.AgentRunID)
+	if err != nil {
+		t.Fatalf("Get agent run after ForceStop(): %v", err)
+	}
+	if agentRun.Status != runkit.StatusFailed ||
+		agentRun.Summary.Status != runkit.StatusFailed ||
+		agentRun.Summary.AbortReason != hostShutdownTimeoutCode {
+		t.Fatalf("agent run after ForceStop() = %+v, want failed shutdown summary", agentRun)
+	}
+	workflow, err := owner.server.workflows.Get(t.Context(), owner.workflowID)
+	if err != nil {
+		t.Fatalf("Get agent workflow after ForceStop(): %v", err)
+	}
+	if workflow.Status != workflowkit.StatusFailed ||
+		workflow.Error != hostShutdownTimeoutCode ||
+		workflow.ApprovalRef != "" ||
+		workflow.WaitingReason != "" ||
+		agentApprovalFromMetadata(workflow.Metadata) != nil {
+		t.Fatalf("agent workflow after ForceStop() = %+v, want failed without pending approval", workflow)
+	}
+}
+
+func waitLifecycleSignal(t *testing.T, signal <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-t.Context().Done():
+		t.Fatalf("timed out waiting for %s", name)
+	}
+}
+
 func newBareLifecycleServer() *Server {
 	return &Server{
 		executions:              newExecutionRegistry(),
@@ -440,11 +895,15 @@ func newCloseRecorder() *closeRecorder {
 
 func (r *closeRecorder) closer(name string, err error) io.Closer {
 	return closeFunc(func() error {
-		r.mu.Lock()
-		r.order = append(r.order, name)
-		r.mu.Unlock()
+		r.record(name)
 		return err
 	})
+}
+
+func (r *closeRecorder) record(name string) {
+	r.mu.Lock()
+	r.order = append(r.order, name)
+	r.mu.Unlock()
 }
 
 func (r *closeRecorder) snapshot() []string {
@@ -492,8 +951,6 @@ func (c *controlledDeadlineContext) expire() {
 		close(c.done)
 	})
 }
-
-type lifecycleContextKey struct{}
 
 func assertChannelOpen(t *testing.T, ch <-chan struct{}, name string) {
 	t.Helper()
