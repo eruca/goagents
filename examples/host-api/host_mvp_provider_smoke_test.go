@@ -3,7 +3,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type mvpProviderMode string
@@ -30,12 +33,71 @@ type mvpProviderRequest struct {
 	HasToolObservation bool
 }
 
+type providerBarrier struct {
+	entered chan struct{}
+	release chan struct{}
+
+	enterOnce sync.Once
+	mu        sync.Mutex
+	cancelled int
+	changed   chan struct{}
+}
+
+func newProviderBarrier() *providerBarrier {
+	return &providerBarrier{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+		changed: make(chan struct{}),
+	}
+}
+
+func (b *providerBarrier) wait(ctx context.Context) bool {
+	b.enterOnce.Do(func() { close(b.entered) })
+	select {
+	case <-b.release:
+		return true
+	case <-ctx.Done():
+		b.mu.Lock()
+		b.cancelled++
+		close(b.changed)
+		b.changed = make(chan struct{})
+		b.mu.Unlock()
+		return false
+	}
+}
+
+func (b *providerBarrier) Cancellations() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.cancelled
+}
+
+func (b *providerBarrier) WaitForCancellations(ctx context.Context, count int) error {
+	for {
+		b.mu.Lock()
+		if b.cancelled >= count {
+			b.mu.Unlock()
+			return nil
+		}
+		changed := b.changed
+		b.mu.Unlock()
+
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
 type mvpProviderStub struct {
 	server *httptest.Server
 
-	mu       sync.Mutex
-	mode     mvpProviderMode
-	requests []mvpProviderRequest
+	mu              sync.Mutex
+	mode            mvpProviderMode
+	barrier         *providerBarrier
+	requests        []mvpProviderRequest
+	requestsChanged chan struct{}
 }
 
 type mvpChatRequest struct {
@@ -49,9 +111,119 @@ type mvpChatRequest struct {
 	} `json:"tools"`
 }
 
+func TestMVPProviderBarrierReleasesConcurrentRequestsAndSnapshotsExactCount(t *testing.T) {
+	barrier := newProviderBarrier()
+	provider := newMVPProviderStub(t, mvpProviderReady)
+	provider.SetBarrier(barrier)
+
+	results := make(chan mvpProviderCallResult, 2)
+	for range 2 {
+		go func() {
+			results <- callMVPProvider(t.Context(), provider.URL())
+		}()
+	}
+
+	waitCtx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	requests, err := provider.WaitForRequests(waitCtx, 2)
+	if err != nil {
+		t.Fatalf("wait for provider requests: %v", err)
+	}
+	select {
+	case <-barrier.entered:
+	case <-waitCtx.Done():
+		t.Fatalf("wait for provider barrier entry: %v", waitCtx.Err())
+	}
+	if len(requests) != 2 || len(provider.Requests()) != 2 {
+		t.Fatalf("provider request count = %d/%d, want exact 2", len(requests), len(provider.Requests()))
+	}
+
+	close(barrier.release)
+	for range 2 {
+		select {
+		case result := <-results:
+			if result.err != nil || result.status != http.StatusOK {
+				t.Fatalf("provider call = (%d, %v), want (200, nil)", result.status, result.err)
+			}
+		case <-waitCtx.Done():
+			t.Fatalf("wait for released provider call: %v", waitCtx.Err())
+		}
+	}
+}
+
+func TestMVPProviderBarrierRecordsRequestContextCancellation(t *testing.T) {
+	barrier := newProviderBarrier()
+	provider := newMVPProviderStub(t, mvpProviderReady)
+	provider.SetBarrier(barrier)
+
+	requestCtx, cancelRequest := context.WithCancel(t.Context())
+	result := make(chan mvpProviderCallResult, 1)
+	go func() {
+		result <- callMVPProvider(requestCtx, provider.URL())
+	}()
+
+	waitCtx, cancelWait := context.WithTimeout(t.Context(), time.Second)
+	defer cancelWait()
+	if _, err := provider.WaitForRequests(waitCtx, 1); err != nil {
+		t.Fatalf("wait for provider request: %v", err)
+	}
+	select {
+	case <-barrier.entered:
+	case <-waitCtx.Done():
+		t.Fatalf("wait for provider barrier entry: %v", waitCtx.Err())
+	}
+	cancelRequest()
+	if err := barrier.WaitForCancellations(waitCtx, 1); err != nil {
+		t.Fatalf("wait for provider request cancellation: %v", err)
+	}
+	if got := barrier.Cancellations(); got != 1 {
+		t.Fatalf("provider cancellations = %d, want 1", got)
+	}
+	if got := len(provider.Requests()); got != 1 {
+		t.Fatalf("provider requests = %d, want exact 1", got)
+	}
+
+	select {
+	case call := <-result:
+		if !errors.Is(call.err, context.Canceled) {
+			t.Fatalf("cancelled provider call error = %v, want context canceled", call.err)
+		}
+	case <-waitCtx.Done():
+		t.Fatalf("wait for cancelled provider call: %v", waitCtx.Err())
+	}
+}
+
+type mvpProviderCallResult struct {
+	status int
+	err    error
+}
+
+func callMVPProvider(ctx context.Context, providerURL string) mvpProviderCallResult {
+	request, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		providerURL+"/v1/chat/completions",
+		strings.NewReader(`{"messages":[],"tools":[]}`),
+	)
+	if err != nil {
+		return mvpProviderCallResult{err: err}
+	}
+	request.Header.Set("Authorization", "Bearer "+mvpProviderAPIKey)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return mvpProviderCallResult{err: err}
+	}
+	defer response.Body.Close()
+	return mvpProviderCallResult{status: response.StatusCode}
+}
+
 func newMVPProviderStub(t *testing.T, mode mvpProviderMode) *mvpProviderStub {
 	t.Helper()
-	stub := &mvpProviderStub{mode: mode}
+	stub := &mvpProviderStub{
+		mode:            mode,
+		requestsChanged: make(chan struct{}),
+	}
 	stub.server = httptest.NewServer(http.HandlerFunc(stub.handle))
 	t.Cleanup(stub.server.Close)
 	return stub
@@ -67,12 +239,41 @@ func (s *mvpProviderStub) SetMode(mode mvpProviderMode) {
 	s.mode = mode
 }
 
+func (s *mvpProviderStub) SetBarrier(barrier *providerBarrier) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.barrier = barrier
+}
+
 func (s *mvpProviderStub) Requests() []mvpProviderRequest {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	requests := make([]mvpProviderRequest, len(s.requests))
-	for index, request := range s.requests {
-		requests[index] = request
+	return cloneMVPProviderRequests(s.requests)
+}
+
+func (s *mvpProviderStub) WaitForRequests(ctx context.Context, count int) ([]mvpProviderRequest, error) {
+	for {
+		s.mu.Lock()
+		if len(s.requests) >= count {
+			requests := cloneMVPProviderRequests(s.requests)
+			s.mu.Unlock()
+			return requests, nil
+		}
+		changed := s.requestsChanged
+		s.mu.Unlock()
+
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
+func cloneMVPProviderRequests(recorded []mvpProviderRequest) []mvpProviderRequest {
+	requests := make([]mvpProviderRequest, len(recorded))
+	copy(requests, recorded)
+	for index, request := range recorded {
 		requests[index].ToolNames = append([]string(nil), request.ToolNames...)
 	}
 	return requests
@@ -107,12 +308,18 @@ func (s *mvpProviderStub) handle(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	mode := s.mode
+	barrier := s.barrier
 	s.requests = append(s.requests, mvpProviderRequest{
 		Authorization:      r.Header.Get("Authorization"),
 		ToolNames:          toolNames,
 		HasToolObservation: hasToolObservation,
 	})
+	close(s.requestsChanged)
+	s.requestsChanged = make(chan struct{})
 	s.mu.Unlock()
+	if barrier != nil && !barrier.wait(r.Context()) {
+		return
+	}
 
 	switch mode {
 	case mvpProviderUnavailable:

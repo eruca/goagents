@@ -1019,10 +1019,13 @@ TestHostAPILifecycleProcessGracefulDrainAndRestart
 4. 轮询确认 listener 拒绝新连接；
 5. 释放第一项；
 6. 断言进程 A exit `0`、stderr 为空；
-7. 只读检查第一项稳定成功、第二项仍 pending 且无 lease；
+7. 只读检查第一项稳定停在 `waiting_approval`、第二项仍 pending 且无 lease；
 8. 同一 runtime home 启动进程 B；
-9. 断言第二项被执行，第一项状态不变；
+9. 断言第二项执行至 `waiting_approval`，第一项保持逐字段不变；
 10. SIGINT 优雅停止进程 B，断言 exit `0`。
+
+这里的 `waiting_approval` 是真实生产 workflow 在 Provider 成功后的既定安全边界；
+测试不得通过生产开关、测试专用 executor 或 listener 关闭后的审批请求绕过最终人工审批。
 
 - [ ] **Step 3:** 增加 drain timeout 测试：
 

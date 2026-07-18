@@ -429,6 +429,32 @@ func waitForHostReady(process *hostProcess) error {
 	return errors.New("readiness endpoint did not return 200")
 }
 
+func waitForHostListenerClosed(process *hostProcess, timeout time.Duration) error {
+	address := strings.TrimPrefix(process.baseURL, "http://")
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	poll := time.NewTicker(10 * time.Millisecond)
+	defer poll.Stop()
+	dialer := net.Dialer{Timeout: 100 * time.Millisecond}
+
+	for {
+		connection, err := dialer.DialContext(ctx, "tcp4", address)
+		if err != nil {
+			if ctx.Err() != nil {
+				return fmt.Errorf("host listener %s still accepts new connections after %s", address, timeout)
+			}
+			return nil
+		}
+		_ = connection.Close()
+
+		select {
+		case <-poll.C:
+		case <-ctx.Done():
+			return fmt.Errorf("host listener %s still accepts new connections after %s", address, timeout)
+		}
+	}
+}
+
 func freeLoopbackAddress(t *testing.T) string {
 	t.Helper()
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
