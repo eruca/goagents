@@ -21,6 +21,14 @@ type pendingExecutionCleanup struct {
 }
 
 func (s *Server) finalizeWorkflowShutdown(ctx context.Context, workflowID string) error {
+	return s.finalizeWorkflowShutdownTracked(ctx, workflowID, nil)
+}
+
+func (s *Server) finalizeWorkflowShutdownTracked(
+	ctx context.Context,
+	workflowID string,
+	tracker *pendingShutdownTracker,
+) error {
 	run, err := s.workflows.Get(ctx, workflowID)
 	if err != nil {
 		return err
@@ -58,11 +66,41 @@ func (s *Server) finalizeWorkflowShutdown(ctx context.Context, workflowID string
 		}
 	}
 
-	// Attempt both stores even when the workflow write failed. Cleanup runs
-	// after the execution operation is done, and a later idempotent cleanup
-	// call will finish whichever side did not commit.
-	agentRunErr := s.finalizeRunningAgentRunShutdown(ctx, run.AgentRunID)
-	return errors.Join(workflowErr, agentRunErr)
+	// Attempt every durable side even when another write failed. Cleanup runs
+	// after the execution operation is done, and Fix B re-enters this exact
+	// shutdown state within the same cleanup budget.
+	identity, hasPendingIdentity := tracker.Snapshot()
+	pendingErr := s.finalizePendingCheckpointShutdown(ctx, identity, hasPendingIdentity)
+	agentRunID := run.AgentRunID
+	if hasPendingIdentity {
+		agentRunID = identity.RunID
+	}
+	agentRunErr := s.finalizeRunningAgentRunShutdown(ctx, agentRunID)
+	return errors.Join(workflowErr, pendingErr, agentRunErr)
+}
+
+func (s *Server) finalizePendingCheckpointShutdown(
+	ctx context.Context,
+	identity pendingShutdownIdentity,
+	present bool,
+) error {
+	if !present || s.agentApprovals == nil || s.agentApprovals.pendingFailures == nil {
+		return nil
+	}
+	err := s.agentApprovals.pendingFailures.FailPendingCheckpoint(ctx, runkit.PendingCheckpointFailure{
+		CheckpointID:   identity.CheckpointID,
+		RunID:          identity.RunID,
+		TenantID:       identity.TenantID,
+		DefinitionHash: identity.DefinitionHash,
+		FailureCode:    hostShutdownTimeoutCode,
+		Now:            time.Now().UTC(),
+	})
+	// A terminal checkpoint is owned by the state transition that reached it.
+	// Cleanup preserves it instead of retrying or rewriting that transition.
+	if errors.Is(err, runkit.ErrCheckpointNotClaimable) {
+		return nil
+	}
+	return err
 }
 
 func (s *Server) finalizeRunningAgentRunShutdown(ctx context.Context, agentRunID string) error {
@@ -88,29 +126,24 @@ func (s *Server) finalizeAgentApprovalShutdown(
 	approval agentApprovalResponse,
 	leaseOwner string,
 ) error {
-	checkpoint, err := s.agentApprovals.checkpoints.GetCheckpoint(ctx, approval.CheckpointID, localApprovalTenant)
-	if err != nil {
-		return err
-	}
-	switch checkpoint.Status {
-	case runkit.CheckpointLeased:
-		if checkpoint.LeaseOwner != leaseOwner {
-			return nil
-		}
-	case runkit.CheckpointConsumed:
-		// A consumed checkpoint cannot be replayed. Continue below so an
-		// incompletely persisted resume is made terminal.
-	case runkit.CheckpointFailed:
-		if checkpoint.FailureCode != hostShutdownTimeoutCode {
-			return nil
-		}
-	default:
-		return nil
-	}
+	return s.finalizeAgentApprovalShutdownTracked(ctx, workflowID, approval, leaseOwner, nil)
+}
 
+func (s *Server) finalizeAgentApprovalShutdownTracked(
+	ctx context.Context,
+	workflowID string,
+	approval agentApprovalResponse,
+	leaseOwner string,
+	tracker *pendingShutdownTracker,
+) error {
+	identity, hasPendingIdentity := tracker.Snapshot()
 	workflowStillPending := false
-	_, err = s.workflows.Update(ctx, workflowID, func(current workflowkit.WorkflowRun) (workflowkit.WorkflowRun, error) {
+	workflowAlreadyFailed := false
+	stableNextPause := false
+	_, err := s.workflows.Update(ctx, workflowID, func(current workflowkit.WorkflowRun) (workflowkit.WorkflowRun, error) {
 		workflowStillPending = workflowHasPendingAgentApproval(current, approval.CheckpointID)
+		workflowAlreadyFailed = current.Status == workflowkit.StatusFailed && current.Error == hostShutdownTimeoutCode
+		stableNextPause = hasPendingIdentity && workflowHasPendingAgentApproval(current, identity.CheckpointID)
 		// This update is only an atomic state probe. The sentinel rolls the
 		// transaction back so stable final or replacement waits keep UpdatedAt.
 		return current, errWorkflowShutdownUnchanged
@@ -118,50 +151,68 @@ func (s *Server) finalizeAgentApprovalShutdown(
 	if !errors.Is(err, errWorkflowShutdownUnchanged) {
 		return err
 	}
-	if !workflowStillPending {
+	if stableNextPause || (!workflowStillPending && !workflowAlreadyFailed) {
 		return nil
 	}
 
-	if checkpoint.Status == runkit.CheckpointLeased {
-		if err := s.agentApprovals.checkpoints.FailLease(ctx, runkit.CheckpointLeaseCompletion{
+	checkpoint, checkpointErr := s.agentApprovals.checkpoints.GetCheckpoint(ctx, approval.CheckpointID, localApprovalTenant)
+	checkpointRelevant := checkpointErr == nil
+	if checkpointErr == nil {
+		switch checkpoint.Status {
+		case runkit.CheckpointLeased:
+			if checkpoint.LeaseOwner != leaseOwner {
+				return nil
+			}
+		case runkit.CheckpointConsumed:
+			// A consumed checkpoint cannot be replayed. Continue below so an
+			// incompletely persisted resume is made terminal.
+		case runkit.CheckpointFailed:
+			if checkpoint.FailureCode != hostShutdownTimeoutCode {
+				return nil
+			}
+		default:
+			return nil
+		}
+	} else if !hasPendingIdentity {
+		return checkpointErr
+	}
+
+	var leaseErr error
+	if checkpointRelevant && checkpoint.Status == runkit.CheckpointLeased {
+		leaseErr = s.agentApprovals.checkpoints.FailLease(ctx, runkit.CheckpointLeaseCompletion{
 			CheckpointID: approval.CheckpointID,
 			TenantID:     checkpoint.TenantID,
 			LeaseOwner:   leaseOwner,
 			FailureCode:  hostShutdownTimeoutCode,
-			Now:          time.Now(),
-		}); err != nil {
-			return err
-		}
+			Now:          time.Now().UTC(),
+		})
 	}
 
-	agentRun, err := s.runs.Get(ctx, checkpoint.RunID)
-	if err != nil {
-		return err
+	pendingErr := s.finalizePendingCheckpointShutdown(ctx, identity, hasPendingIdentity)
+	agentRunID := checkpoint.RunID
+	if hasPendingIdentity {
+		agentRunID = identity.RunID
 	}
-	if agentRun.Status == runkit.StatusRunning {
-		summary := agentRun.Summary
-		summary.Status = runkit.StatusFailed
-		summary.AbortReason = hostShutdownTimeoutCode
-		if err := s.runs.Complete(ctx, checkpoint.RunID, summary); err != nil {
-			return err
-		}
-	}
+	agentRunErr := s.finalizeRunningAgentRunShutdown(ctx, agentRunID)
 
-	_, err = s.workflows.Update(ctx, workflowID, func(current workflowkit.WorkflowRun) (workflowkit.WorkflowRun, error) {
-		if !workflowHasPendingAgentApproval(current, approval.CheckpointID) {
-			return current, errWorkflowShutdownUnchanged
+	var workflowErr error
+	if workflowStillPending && !workflowAlreadyFailed {
+		_, workflowErr = s.workflows.Update(ctx, workflowID, func(current workflowkit.WorkflowRun) (workflowkit.WorkflowRun, error) {
+			if !workflowHasPendingAgentApproval(current, approval.CheckpointID) {
+				return current, errWorkflowShutdownUnchanged
+			}
+			clearAgentApprovalMetadata(current.Metadata)
+			current.Status = workflowkit.StatusFailed
+			current.Error = hostShutdownTimeoutCode
+			current.ApprovalRef = ""
+			current.WaitingReason = ""
+			return current, nil
+		})
+		if errors.Is(workflowErr, errWorkflowShutdownUnchanged) {
+			workflowErr = nil
 		}
-		clearAgentApprovalMetadata(current.Metadata)
-		current.Status = workflowkit.StatusFailed
-		current.Error = hostShutdownTimeoutCode
-		current.ApprovalRef = ""
-		current.WaitingReason = ""
-		return current, nil
-	})
-	if errors.Is(err, errWorkflowShutdownUnchanged) {
-		return nil
 	}
-	return err
+	return errors.Join(checkpointErr, leaseErr, pendingErr, agentRunErr, workflowErr)
 }
 
 func waitAndCleanupExecutions(ctx context.Context, snapshots []executionSnapshot) error {

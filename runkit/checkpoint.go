@@ -72,6 +72,23 @@ type CheckpointLeaseCompletion struct {
 	Now          time.Time
 }
 
+// PendingCheckpointFailure identifies one pending checkpoint without exposing
+// or decrypting its opaque payload.
+type PendingCheckpointFailure struct {
+	CheckpointID   string
+	RunID          string
+	TenantID       string
+	DefinitionHash string
+	FailureCode    string
+	Now            time.Time
+}
+
+// PendingCheckpointFailureStore is an optional capability for atomically
+// failing an exact pending checkpoint during controlled host shutdown.
+type PendingCheckpointFailureStore interface {
+	FailPendingCheckpoint(context.Context, PendingCheckpointFailure) error
+}
+
 // CheckpointStore owns atomic state transitions for opaque approval checkpoints.
 type CheckpointStore interface {
 	CreateCheckpoint(ctx context.Context, checkpoint ApprovalCheckpoint) error
@@ -186,6 +203,37 @@ func (s *MemoryCheckpointStore) FailLease(ctx context.Context, completion Checkp
 	return s.finishLease(ctx, completion, CheckpointFailed)
 }
 
+func (s *MemoryCheckpointStore) FailPendingCheckpoint(ctx context.Context, request PendingCheckpointFailure) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validatePendingCheckpointFailure(request); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	checkpoint, ok := s.checkpoints[request.CheckpointID]
+	if !ok ||
+		checkpoint.RunID != request.RunID ||
+		checkpoint.TenantID != request.TenantID ||
+		checkpoint.DefinitionHash != request.DefinitionHash {
+		return ErrCheckpointNotClaimable
+	}
+	if checkpoint.Status == CheckpointFailed && checkpoint.FailureCode == request.FailureCode {
+		return nil
+	}
+	if checkpoint.Status != CheckpointPending {
+		return ErrCheckpointNotClaimable
+	}
+	checkpoint.Status = CheckpointFailed
+	checkpoint.FailureCode = request.FailureCode
+	checkpoint.LeaseOwner = ""
+	checkpoint.LeaseUntil = time.Time{}
+	checkpoint.UpdatedAt = requestNow(request.Now)
+	s.checkpoints[checkpoint.ID] = cloneApprovalCheckpoint(checkpoint)
+	return nil
+}
+
 func (s *MemoryCheckpointStore) finishLease(ctx context.Context, completion CheckpointLeaseCompletion, status CheckpointStatus) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -242,6 +290,17 @@ func (s *MemoryCheckpointStore) ExpireCheckpoints(ctx context.Context, now time.
 func validateCheckpoint(checkpoint ApprovalCheckpoint) error {
 	if strings.TrimSpace(checkpoint.ID) == "" || strings.TrimSpace(checkpoint.RunID) == "" || strings.TrimSpace(checkpoint.TenantID) == "" || strings.TrimSpace(checkpoint.DefinitionHash) == "" || len(checkpoint.Ciphertext) == 0 || checkpoint.ExpiresAt.IsZero() {
 		return fmt.Errorf("checkpoint id, run id, tenant id, definition hash, ciphertext, and expiry are required")
+	}
+	return nil
+}
+
+func validatePendingCheckpointFailure(request PendingCheckpointFailure) error {
+	if strings.TrimSpace(request.CheckpointID) == "" ||
+		strings.TrimSpace(request.RunID) == "" ||
+		strings.TrimSpace(request.TenantID) == "" ||
+		strings.TrimSpace(request.DefinitionHash) == "" ||
+		strings.TrimSpace(request.FailureCode) == "" {
+		return fmt.Errorf("checkpoint id, run id, tenant id, definition hash, and failure code are required")
 	}
 	return nil
 }

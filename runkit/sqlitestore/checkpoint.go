@@ -11,7 +11,10 @@ import (
 	"github.com/eruca/goagents/runkit"
 )
 
-var _ runkit.CheckpointStore = (*Store)(nil)
+var (
+	_ runkit.CheckpointStore               = (*Store)(nil)
+	_ runkit.PendingCheckpointFailureStore = (*Store)(nil)
+)
 
 func (s *Store) CreateCheckpoint(ctx context.Context, checkpoint runkit.ApprovalCheckpoint) error {
 	if err := validateCheckpoint(checkpoint); err != nil {
@@ -132,6 +135,31 @@ func (s *Store) FailLease(ctx context.Context, completion runkit.CheckpointLease
 	return s.finishLease(ctx, completion, runkit.CheckpointFailed)
 }
 
+func (s *Store) FailPendingCheckpoint(ctx context.Context, request runkit.PendingCheckpointFailure) error {
+	if err := validatePendingCheckpointFailure(request); err != nil {
+		return err
+	}
+	result, err := s.db.ExecContext(ctx, `
+UPDATE approval_checkpoints
+SET status = 'failed', failure_code = ?, lease_owner = '', lease_until = NULL,
+ updated_at = CASE WHEN status = 'pending' THEN ? ELSE updated_at END
+WHERE checkpoint_id = ? AND run_id = ? AND tenant_id = ? AND definition_hash = ?
+ AND (status = 'pending' OR (status = 'failed' AND failure_code = ?))`,
+		request.FailureCode, requestNow(request.Now), request.CheckpointID, request.RunID,
+		request.TenantID, request.DefinitionHash, request.FailureCode)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return runkit.ErrCheckpointNotClaimable
+	}
+	return nil
+}
+
 func (s *Store) finishLease(ctx context.Context, completion runkit.CheckpointLeaseCompletion, status runkit.CheckpointStatus) error {
 	if strings.TrimSpace(completion.CheckpointID) == "" || strings.TrimSpace(completion.TenantID) == "" || strings.TrimSpace(completion.LeaseOwner) == "" {
 		return fmt.Errorf("checkpoint id, tenant id, and lease owner are required")
@@ -216,6 +244,17 @@ func scanCheckpoint(row checkpointRowScanner) (runkit.ApprovalCheckpoint, error)
 func validateCheckpoint(checkpoint runkit.ApprovalCheckpoint) error {
 	if strings.TrimSpace(checkpoint.ID) == "" || strings.TrimSpace(checkpoint.RunID) == "" || strings.TrimSpace(checkpoint.TenantID) == "" || strings.TrimSpace(checkpoint.DefinitionHash) == "" || len(checkpoint.Ciphertext) == 0 || checkpoint.ExpiresAt.IsZero() {
 		return fmt.Errorf("checkpoint id, run id, tenant id, definition hash, ciphertext, and expiry are required")
+	}
+	return nil
+}
+
+func validatePendingCheckpointFailure(request runkit.PendingCheckpointFailure) error {
+	if strings.TrimSpace(request.CheckpointID) == "" ||
+		strings.TrimSpace(request.RunID) == "" ||
+		strings.TrimSpace(request.TenantID) == "" ||
+		strings.TrimSpace(request.DefinitionHash) == "" ||
+		strings.TrimSpace(request.FailureCode) == "" {
+		return fmt.Errorf("checkpoint id, run id, tenant id, definition hash, and failure code are required")
 	}
 	return nil
 }

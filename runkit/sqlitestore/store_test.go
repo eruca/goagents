@@ -244,3 +244,75 @@ func TestCheckpointAllowsOnlyOneConcurrentLease(t *testing.T) {
 		t.Fatalf("successful leases = %d, want 1", succeeded)
 	}
 }
+
+func TestStoreFailsOnlyExactPendingCheckpointAndPersistsAcrossReopen(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "runkit.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	now := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
+	checkpoint := runkit.ApprovalCheckpoint{
+		ID:             "checkpoint-pending-shutdown",
+		RunID:          "run-pending-shutdown",
+		TenantID:       "tenant-pending-shutdown",
+		DefinitionHash: "agent-v1",
+		Ciphertext:     []byte("ciphertext"),
+		ExpiresAt:      now.Add(time.Hour),
+	}
+	if err := store.CreateCheckpoint(ctx, checkpoint); err != nil {
+		t.Fatalf("CreateCheckpoint: %v", err)
+	}
+	request := runkit.PendingCheckpointFailure{
+		CheckpointID:   checkpoint.ID,
+		RunID:          checkpoint.RunID,
+		TenantID:       checkpoint.TenantID,
+		DefinitionHash: checkpoint.DefinitionHash,
+		FailureCode:    "host_shutdown_timeout",
+		Now:            now,
+	}
+	wrong := request
+	wrong.DefinitionHash = "other-definition"
+	if err := store.FailPendingCheckpoint(ctx, wrong); !errors.Is(err, runkit.ErrCheckpointNotClaimable) {
+		t.Fatalf("wrong identity error = %v, want ErrCheckpointNotClaimable", err)
+	}
+	if err := store.FailPendingCheckpoint(ctx, request); err != nil {
+		t.Fatalf("FailPendingCheckpoint: %v", err)
+	}
+	first, err := store.GetCheckpoint(ctx, checkpoint.ID, checkpoint.TenantID)
+	if err != nil {
+		t.Fatalf("GetCheckpoint first: %v", err)
+	}
+	if first.Status != runkit.CheckpointFailed || first.FailureCode != request.FailureCode || !first.UpdatedAt.Equal(now) {
+		t.Fatalf("failed checkpoint = %#v", first)
+	}
+	repeated := request
+	repeated.Now = now.Add(time.Minute)
+	if err := store.FailPendingCheckpoint(ctx, repeated); err != nil {
+		t.Fatalf("idempotent FailPendingCheckpoint: %v", err)
+	}
+	second, err := store.GetCheckpoint(ctx, checkpoint.ID, checkpoint.TenantID)
+	if err != nil {
+		t.Fatalf("GetCheckpoint second: %v", err)
+	}
+	if !second.UpdatedAt.Equal(first.UpdatedAt) {
+		t.Fatalf("idempotent UpdatedAt = %s, want %s", second.UpdatedAt, first.UpdatedAt)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.Close()
+	persisted, err := reopened.GetCheckpoint(ctx, checkpoint.ID, checkpoint.TenantID)
+	if err != nil {
+		t.Fatalf("GetCheckpoint reopened: %v", err)
+	}
+	if persisted.Status != runkit.CheckpointFailed || persisted.FailureCode != request.FailureCode {
+		t.Fatalf("persisted checkpoint = %#v", persisted)
+	}
+}

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -100,9 +101,10 @@ func (r agentApprovalRequest) coreResolutions() []agentcore.ToolApprovalResoluti
 // hostAgentApprovalService owns the host-only identities and encryption
 // boundary. Runkit receives opaque encrypted bytes and never owns local keys.
 type hostAgentApprovalService struct {
-	checkpoints runkit.CheckpointStore
-	runner      routingAgentRunner
-	keychain    agentApprovalKeychainConfig
+	checkpoints     runkit.CheckpointStore
+	pendingFailures runkit.PendingCheckpointFailureStore
+	runner          goagentapproval.Resumer
+	keychain        agentApprovalKeychainConfig
 
 	mu     sync.Mutex
 	cipher goagentapproval.Cipher
@@ -111,18 +113,23 @@ type hostAgentApprovalService struct {
 func newHostAgentApprovalService(
 	runs runkit.Store,
 	cipher goagentapproval.Cipher,
-	runner routingAgentRunner,
+	runner goagentapproval.Resumer,
 	keychain agentApprovalKeychainConfig,
 ) (*hostAgentApprovalService, error) {
 	checkpoints, ok := runs.(runkit.CheckpointStore)
 	if !ok {
 		return nil, fmt.Errorf("host run store does not implement approval checkpoint persistence")
 	}
+	pendingFailures, ok := runs.(runkit.PendingCheckpointFailureStore)
+	if !ok {
+		return nil, fmt.Errorf("host run store does not implement pending checkpoint failure")
+	}
 	return &hostAgentApprovalService{
-		checkpoints: checkpoints,
-		cipher:      cipher,
-		runner:      runner,
-		keychain:    keychain,
+		checkpoints:     checkpoints,
+		pendingFailures: pendingFailures,
+		cipher:          cipher,
+		runner:          runner,
+		keychain:        keychain,
 	}, nil
 }
 
@@ -149,6 +156,12 @@ func (s *hostAgentApprovalService) SavePending(ctx context.Context, workflowID s
 	}); err != nil {
 		return agentApprovalResponse{}, err
 	}
+	rememberPendingShutdownIdentity(ctx, pendingShutdownIdentity{
+		CheckpointID:   approval.CheckpointID,
+		RunID:          checkpoint.RunID,
+		TenantID:       localApprovalTenant,
+		DefinitionHash: hostAgentDefinitionHash,
+	})
 	return approval, nil
 }
 
@@ -186,6 +199,14 @@ func (s *hostAgentApprovalService) ApproveAndResume(ctx context.Context, workflo
 	})
 	if result != nil && result.Interruption != nil {
 		next.Tools = safePendingTools(result.Interruption.Checkpoint)
+	}
+	if errors.Is(err, agentcore.ErrApprovalPending) && result != nil && result.Interruption != nil && len(next.Tools) > 0 {
+		rememberPendingShutdownIdentity(ctx, pendingShutdownIdentity{
+			CheckpointID:   next.CheckpointID,
+			RunID:          result.Interruption.Checkpoint.RunID,
+			TenantID:       localApprovalTenant,
+			DefinitionHash: hostAgentDefinitionHash,
+		})
 	}
 	return next, result, err
 }

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eruca/goagents/goagent/agentcore"
 	"github.com/eruca/goagents/runkit"
 	"github.com/eruca/goagents/workflowkit"
 	workflowsqlite "github.com/eruca/goagents/workflowkit/sqlitestore"
@@ -530,6 +531,128 @@ func TestFinalizeWorkflowShutdownIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestFinalizeWorkflowShutdownTrackedPreservesStablePendingApproval(t *testing.T) {
+	server, created, checkpoints := newAgentApprovalLifecycleFixture(t, "wf-tracked-stable-pending")
+	checkpoint := getLifecycleCheckpoint(t, checkpoints, created.AgentApproval.CheckpointID)
+	tracker := newPendingShutdownTracker()
+	tracker.Remember(pendingShutdownIdentity{
+		CheckpointID:   checkpoint.ID,
+		RunID:          checkpoint.RunID,
+		TenantID:       checkpoint.TenantID,
+		DefinitionHash: checkpoint.DefinitionHash,
+	})
+	beforeCheckpoint := checkpoint
+	beforeRun := getLifecycleAgentRun(t, server.runs, checkpoint.RunID)
+	beforeWorkflow := getLifecycleTestRun(t, server.workflows, created.ID)
+
+	if err := server.finalizeWorkflowShutdownTracked(t.Context(), created.ID, tracker); err != nil {
+		t.Fatalf("finalizeWorkflowShutdownTracked() error = %v", err)
+	}
+
+	afterCheckpoint := getLifecycleCheckpoint(t, checkpoints, checkpoint.ID)
+	afterRun := getLifecycleAgentRun(t, server.runs, checkpoint.RunID)
+	afterWorkflow := getLifecycleTestRun(t, server.workflows, created.ID)
+	if !reflect.DeepEqual(afterCheckpoint, beforeCheckpoint) ||
+		!reflect.DeepEqual(afterRun, beforeRun) ||
+		!reflect.DeepEqual(afterWorkflow, beforeWorkflow) {
+		t.Fatalf("stable pending approval changed: checkpoint=%s->%s run=%s->%s workflow=%s->%s",
+			beforeCheckpoint.Status,
+			afterCheckpoint.Status,
+			beforeRun.Status,
+			afterRun.Status,
+			beforeWorkflow.Status,
+			afterWorkflow.Status,
+		)
+	}
+}
+
+func TestFinalizeWorkflowShutdownTrackedPreservesTerminalCheckpointAndAgentRun(t *testing.T) {
+	server, err := NewServer(Config{
+		RuntimeHome:         t.TempDir(),
+		AgentApprovalCipher: &testApprovalCipher{},
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	t.Cleanup(func() {
+		closeStoreIfPossible(t, server.workflows)
+		closeStoreIfPossible(t, server.runs)
+	})
+	const workflowID = "wf-tracked-terminal"
+	runID := agentcore.NewRunID().String()
+	saveLifecycleTestRun(t, server.workflows, workflowkit.WorkflowRun{
+		ID:     workflowID,
+		Status: workflowkit.StatusRunning,
+	})
+	saveLifecycleTestAgentRun(t, server.runs, runkit.RunRecord{
+		RunID:      runID,
+		WorkflowID: workflowID,
+		Status:     runkit.StatusRunning,
+	})
+	if err := server.runs.Complete(t.Context(), runID, runkit.TerminalSummary{
+		Status:     runkit.StatusSucceeded,
+		LLMCalls:   2,
+		ToolCalls:  1,
+		UsedTools:  []string{"already-finished"},
+		ContentRef: "artifact:terminal",
+	}); err != nil {
+		t.Fatalf("Complete AgentRun: %v", err)
+	}
+	checkpoints := server.runs.(runkit.CheckpointStore)
+	failures := server.runs.(runkit.PendingCheckpointFailureStore)
+	checkpoint := runkit.ApprovalCheckpoint{
+		ID:             "checkpoint-tracked-terminal",
+		RunID:          runID,
+		TenantID:       localApprovalTenant,
+		DefinitionHash: hostAgentDefinitionHash,
+		Ciphertext:     []byte("opaque-terminal"),
+		ExpiresAt:      time.Now().UTC().Add(agentApprovalLifetime),
+	}
+	if err := checkpoints.CreateCheckpoint(t.Context(), checkpoint); err != nil {
+		t.Fatalf("CreateCheckpoint: %v", err)
+	}
+	if err := failures.FailPendingCheckpoint(t.Context(), runkit.PendingCheckpointFailure{
+		CheckpointID:   checkpoint.ID,
+		RunID:          checkpoint.RunID,
+		TenantID:       checkpoint.TenantID,
+		DefinitionHash: checkpoint.DefinitionHash,
+		FailureCode:    "already_terminal",
+		Now:            time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("FailPendingCheckpoint: %v", err)
+	}
+	tracker := newPendingShutdownTracker()
+	tracker.Remember(pendingShutdownIdentity{
+		CheckpointID:   checkpoint.ID,
+		RunID:          checkpoint.RunID,
+		TenantID:       checkpoint.TenantID,
+		DefinitionHash: checkpoint.DefinitionHash,
+	})
+	beforeCheckpoint := getLifecycleCheckpoint(t, checkpoints, checkpoint.ID)
+	beforeRun := getLifecycleAgentRun(t, server.runs, runID)
+
+	if err := server.finalizeWorkflowShutdownTracked(t.Context(), workflowID, tracker); err != nil {
+		t.Fatalf("finalizeWorkflowShutdownTracked() error = %v", err)
+	}
+
+	afterCheckpoint := getLifecycleCheckpoint(t, checkpoints, checkpoint.ID)
+	afterRun := getLifecycleAgentRun(t, server.runs, runID)
+	workflow := getLifecycleTestRun(t, server.workflows, workflowID)
+	if !reflect.DeepEqual(afterCheckpoint, beforeCheckpoint) || !reflect.DeepEqual(afterRun, beforeRun) {
+		t.Fatalf("terminal state changed: checkpoint=%s/%s->%s/%s run=%s->%s",
+			beforeCheckpoint.Status,
+			beforeCheckpoint.FailureCode,
+			afterCheckpoint.Status,
+			afterCheckpoint.FailureCode,
+			beforeRun.Status,
+			afterRun.Status,
+		)
+	}
+	if workflow.Status != workflowkit.StatusFailed || workflow.Error != hostShutdownTimeoutCode {
+		t.Fatalf("workflow after cleanup = %+v, want shutdown failure", workflow)
+	}
+}
+
 func TestFinalizeAgentApprovalShutdownBeforeLeaseIsNoOp(t *testing.T) {
 	server, created, checkpoints := newAgentApprovalLifecycleFixture(t, "wf-agent-cleanup-pending")
 	beforeCheckpoint := getLifecycleCheckpoint(t, checkpoints, created.AgentApproval.CheckpointID)
@@ -696,8 +819,15 @@ func TestFinalizeAgentApprovalShutdownPreservesCompletedPauseReplacement(t *test
 	beforeRun := getLifecycleAgentRun(t, server.runs, created.AgentRunID)
 	beforeWorkflow := getLifecycleTestRun(t, server.workflows, created.ID)
 
-	if err := server.finalizeAgentApprovalShutdown(t.Context(), created.ID, *created.AgentApproval, leaseOwner); err != nil {
-		t.Fatalf("finalizeAgentApprovalShutdown() error = %v", err)
+	tracker := newPendingShutdownTracker()
+	tracker.Remember(pendingShutdownIdentity{
+		CheckpointID:   nextApproval.CheckpointID,
+		RunID:          created.AgentRunID,
+		TenantID:       localApprovalTenant,
+		DefinitionHash: hostAgentDefinitionHash,
+	})
+	if err := server.finalizeAgentApprovalShutdownTracked(t.Context(), created.ID, *created.AgentApproval, leaseOwner, tracker); err != nil {
+		t.Fatalf("finalizeAgentApprovalShutdownTracked() error = %v", err)
 	}
 
 	afterOldCheckpoint := getLifecycleCheckpoint(t, checkpoints, created.AgentApproval.CheckpointID)
@@ -740,8 +870,15 @@ func TestFinalizeAgentApprovalShutdownPreservesLeasedPauseReplacement(t *testing
 	beforeRun := getLifecycleAgentRun(t, server.runs, created.AgentRunID)
 	beforeWorkflow := getLifecycleTestRun(t, server.workflows, created.ID)
 
-	if err := server.finalizeAgentApprovalShutdown(t.Context(), created.ID, *created.AgentApproval, leaseOwner); err != nil {
-		t.Fatalf("finalizeAgentApprovalShutdown() error = %v", err)
+	tracker := newPendingShutdownTracker()
+	tracker.Remember(pendingShutdownIdentity{
+		CheckpointID:   nextApproval.CheckpointID,
+		RunID:          created.AgentRunID,
+		TenantID:       localApprovalTenant,
+		DefinitionHash: hostAgentDefinitionHash,
+	})
+	if err := server.finalizeAgentApprovalShutdownTracked(t.Context(), created.ID, *created.AgentApproval, leaseOwner, tracker); err != nil {
+		t.Fatalf("finalizeAgentApprovalShutdownTracked() error = %v", err)
 	}
 
 	afterOldCheckpoint := getLifecycleCheckpoint(t, checkpoints, created.AgentApproval.CheckpointID)

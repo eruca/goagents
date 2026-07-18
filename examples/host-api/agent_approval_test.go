@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/eruca/goagents/artifactkit"
 	"github.com/eruca/goagents/goagent/agentcore"
 	"github.com/eruca/goagents/runkit"
+	"github.com/eruca/goagents/runkit/goagentapproval"
 	"github.com/eruca/goagents/workflowkit"
 )
 
@@ -61,6 +63,25 @@ func TestNewServerRejectsPartialAgentApprovalKeychainConfig(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("NewServer returned nil error for partial Keychain config")
+	}
+}
+
+func TestNewHostAgentApprovalServiceRequiresPendingCheckpointFailureCapability(t *testing.T) {
+	store := struct {
+		runkit.Store
+		runkit.CheckpointStore
+	}{
+		Store:           runkit.NewMemoryStore(),
+		CheckpointStore: runkit.NewMemoryCheckpointStore(),
+	}
+	_, err := newHostAgentApprovalService(
+		store,
+		&testApprovalCipher{},
+		&pendingAgainLifecycleResumer{},
+		agentApprovalKeychainConfig{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "pending checkpoint failure") {
+		t.Fatalf("newHostAgentApprovalService() error = %v, want missing pending checkpoint failure capability", err)
 	}
 }
 
@@ -651,6 +672,58 @@ func TestHostAgentApprovalServiceUsesExplicitLeaseOwner(t *testing.T) {
 	}
 }
 
+func TestHostAgentApprovalServiceDoesNotTrackFailedNextCheckpointPersist(t *testing.T) {
+	server, err := NewServer(Config{
+		RuntimeHome:           t.TempDir(),
+		AgentApprovalCipher:   &testApprovalCipher{},
+		ApprovalAuthenticator: testApprovalAuthenticator{identity: ApprovalIdentity{Subject: "operator-next-failure"}},
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	created := createToolApprovalWorkflow(t, server, "wf-next-checkpoint-persist-failure")
+	pending := created.AgentApproval.Tools[0]
+	resumer := &pendingAgainLifecycleResumer{}
+	server.agentApprovals.runner = resumer
+	createErr := errors.New("next checkpoint create failed")
+	server.agentApprovals.checkpoints = &createCheckpointErrorStore{
+		CheckpointStore: server.agentApprovals.checkpoints,
+		err:             createErr,
+	}
+	tracker := newPendingShutdownTracker()
+	ctx := withPendingShutdownTracker(t.Context(), tracker)
+
+	_, result, resumeErr := server.agentApprovals.ApproveAndResume(
+		ctx,
+		created.ID,
+		*created.AgentApproval,
+		"operator-next-failure",
+		[]agentcore.ToolApprovalResolution{{
+			Index:      pending.Index,
+			ToolCallID: pending.ToolCallID,
+			Tool:       pending.Tool,
+			Allowed:    true,
+		}},
+		"host-api:next-persist-failure",
+	)
+	if !errors.Is(resumeErr, goagentapproval.ErrNextCheckpointPersist) ||
+		result == nil ||
+		result.Interruption == nil {
+		t.Fatalf("ApproveAndResume() result=%v error=%v, want interrupted result and ErrNextCheckpointPersist", result != nil, resumeErr)
+	}
+	if identity, ok := tracker.Snapshot(); ok {
+		t.Fatalf("tracker recorded nonexistent next checkpoint %q", identity.CheckpointID)
+	}
+	checkpoint := getLifecycleCheckpoint(t, server.runs.(runkit.CheckpointStore), created.AgentApproval.CheckpointID)
+	if checkpoint.Status != runkit.CheckpointFailed || checkpoint.FailureCode != "next_checkpoint_persist_failed" {
+		t.Fatalf("old checkpoint = %s/%s, want failed next checkpoint persistence", checkpoint.Status, checkpoint.FailureCode)
+	}
+	run := getLifecycleAgentRun(t, server.runs, created.AgentRunID)
+	if run.Summary.ToolCalls != 0 || len(run.Summary.UsedTools) != 0 {
+		t.Fatalf("tool execution summary = %+v, want zero tool calls", run.Summary)
+	}
+}
+
 func createToolApprovalWorkflow(t *testing.T, server *Server, id string) workflowResponse {
 	t.Helper()
 	created := doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]any{
@@ -689,6 +762,15 @@ type blockingFirstLeaseCheckpointStore struct {
 	acquired chan struct{}
 	release  chan struct{}
 	once     sync.Once
+}
+
+type createCheckpointErrorStore struct {
+	runkit.CheckpointStore
+	err error
+}
+
+func (s *createCheckpointErrorStore) CreateCheckpoint(context.Context, runkit.ApprovalCheckpoint) error {
+	return s.err
 }
 
 func (s *blockingFirstLeaseCheckpointStore) ApproveAndLease(ctx context.Context, request runkit.ApprovalLeaseRequest) (runkit.ApprovalCheckpoint, error) {

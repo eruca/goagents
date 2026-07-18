@@ -162,3 +162,101 @@ func TestCheckpointFailureCodePersists(t *testing.T) {
 		t.Fatalf("stored = %#v", stored)
 	}
 }
+
+func TestFailPendingCheckpointRequiresExactIdentityAndIsIdempotent(t *testing.T) {
+	store := NewMemoryCheckpointStore()
+	var capability PendingCheckpointFailureStore = store
+	ctx := context.Background()
+	now := time.Date(2026, 7, 18, 8, 0, 0, 0, time.UTC)
+	checkpoint := ApprovalCheckpoint{
+		ID:             "checkpoint-pending-failure",
+		RunID:          "run-pending-failure",
+		TenantID:       "tenant-pending-failure",
+		DefinitionHash: "agent-v1",
+		Ciphertext:     []byte("ciphertext"),
+		ExpiresAt:      now.Add(time.Hour),
+	}
+	if err := store.CreateCheckpoint(ctx, checkpoint); err != nil {
+		t.Fatalf("CreateCheckpoint: %v", err)
+	}
+	request := PendingCheckpointFailure{
+		CheckpointID:   checkpoint.ID,
+		RunID:          checkpoint.RunID,
+		TenantID:       checkpoint.TenantID,
+		DefinitionHash: checkpoint.DefinitionHash,
+		FailureCode:    "host_shutdown_timeout",
+		Now:            now,
+	}
+	wrong := request
+	wrong.RunID = "other-run"
+	if err := capability.FailPendingCheckpoint(ctx, wrong); !errors.Is(err, ErrCheckpointNotClaimable) {
+		t.Fatalf("wrong identity error = %v, want ErrCheckpointNotClaimable", err)
+	}
+	pending, err := store.GetCheckpoint(ctx, checkpoint.ID, checkpoint.TenantID)
+	if err != nil {
+		t.Fatalf("GetCheckpoint pending: %v", err)
+	}
+	if pending.Status != CheckpointPending {
+		t.Fatalf("checkpoint after wrong identity = %#v", pending)
+	}
+
+	if err := capability.FailPendingCheckpoint(ctx, request); err != nil {
+		t.Fatalf("FailPendingCheckpoint: %v", err)
+	}
+	failed, err := store.GetCheckpoint(ctx, checkpoint.ID, checkpoint.TenantID)
+	if err != nil {
+		t.Fatalf("GetCheckpoint failed: %v", err)
+	}
+	if failed.Status != CheckpointFailed || failed.FailureCode != request.FailureCode || failed.LeaseOwner != "" || !failed.LeaseUntil.IsZero() || !failed.UpdatedAt.Equal(now) {
+		t.Fatalf("failed checkpoint = %#v", failed)
+	}
+
+	repeated := request
+	repeated.Now = now.Add(time.Minute)
+	if err := capability.FailPendingCheckpoint(ctx, repeated); err != nil {
+		t.Fatalf("idempotent FailPendingCheckpoint: %v", err)
+	}
+	idempotent, err := store.GetCheckpoint(ctx, checkpoint.ID, checkpoint.TenantID)
+	if err != nil {
+		t.Fatalf("GetCheckpoint idempotent: %v", err)
+	}
+	if !idempotent.UpdatedAt.Equal(failed.UpdatedAt) {
+		t.Fatalf("idempotent UpdatedAt = %s, want %s", idempotent.UpdatedAt, failed.UpdatedAt)
+	}
+
+	differentFailure := request
+	differentFailure.FailureCode = "other_failure"
+	if err := capability.FailPendingCheckpoint(ctx, differentFailure); !errors.Is(err, ErrCheckpointNotClaimable) {
+		t.Fatalf("different failure error = %v, want ErrCheckpointNotClaimable", err)
+	}
+}
+
+func TestFailPendingCheckpointValidatesRequiredIdentity(t *testing.T) {
+	store := NewMemoryCheckpointStore()
+	base := PendingCheckpointFailure{
+		CheckpointID:   "checkpoint-required",
+		RunID:          "run-required",
+		TenantID:       "tenant-required",
+		DefinitionHash: "agent-v1",
+		FailureCode:    "host_shutdown_timeout",
+	}
+	tests := []struct {
+		name   string
+		mutate func(*PendingCheckpointFailure)
+	}{
+		{name: "checkpoint id", mutate: func(request *PendingCheckpointFailure) { request.CheckpointID = "" }},
+		{name: "run id", mutate: func(request *PendingCheckpointFailure) { request.RunID = "" }},
+		{name: "tenant id", mutate: func(request *PendingCheckpointFailure) { request.TenantID = "" }},
+		{name: "definition hash", mutate: func(request *PendingCheckpointFailure) { request.DefinitionHash = "" }},
+		{name: "failure code", mutate: func(request *PendingCheckpointFailure) { request.FailureCode = "" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := base
+			tt.mutate(&request)
+			if err := store.FailPendingCheckpoint(context.Background(), request); err == nil {
+				t.Fatal("FailPendingCheckpoint error = nil, want validation error")
+			}
+		})
+	}
+}

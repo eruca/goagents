@@ -173,6 +173,66 @@ func TestStoreFailureCodePersists(t *testing.T) {
 	}
 }
 
+func TestStoreFailsOnlyExactPendingCheckpoint(t *testing.T) {
+	dsn := os.Getenv("RUNKIT_POSTGRES_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set RUNKIT_POSTGRES_TEST_DSN to run PostgreSQL integration tests")
+	}
+	store, err := Open(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Now().UTC()
+	checkpoint := runkit.ApprovalCheckpoint{
+		ID:             "checkpoint-pending-failure-" + now.Format("20060102150405.000000000"),
+		RunID:          "run-pending-failure",
+		TenantID:       "tenant-pending-failure",
+		DefinitionHash: "agent-v1",
+		Ciphertext:     []byte("ciphertext"),
+		ExpiresAt:      now.Add(time.Hour),
+	}
+	if err := store.CreateCheckpoint(context.Background(), checkpoint); err != nil {
+		t.Fatalf("CreateCheckpoint: %v", err)
+	}
+	request := runkit.PendingCheckpointFailure{
+		CheckpointID:   checkpoint.ID,
+		RunID:          checkpoint.RunID,
+		TenantID:       checkpoint.TenantID,
+		DefinitionHash: checkpoint.DefinitionHash,
+		FailureCode:    "host_shutdown_timeout",
+		Now:            now,
+	}
+	wrong := request
+	wrong.TenantID = "other-tenant"
+	if err := store.FailPendingCheckpoint(context.Background(), wrong); !errors.Is(err, runkit.ErrCheckpointNotClaimable) {
+		t.Fatalf("wrong identity error = %v, want ErrCheckpointNotClaimable", err)
+	}
+	if err := store.FailPendingCheckpoint(context.Background(), request); err != nil {
+		t.Fatalf("FailPendingCheckpoint: %v", err)
+	}
+	first, err := store.GetCheckpoint(context.Background(), checkpoint.ID, checkpoint.TenantID)
+	if err != nil {
+		t.Fatalf("GetCheckpoint first: %v", err)
+	}
+	if first.Status != runkit.CheckpointFailed || first.FailureCode != request.FailureCode || !first.UpdatedAt.Equal(now) {
+		t.Fatalf("failed checkpoint = %#v", first)
+	}
+	repeated := request
+	repeated.Now = now.Add(time.Minute)
+	if err := store.FailPendingCheckpoint(context.Background(), repeated); err != nil {
+		t.Fatalf("idempotent FailPendingCheckpoint: %v", err)
+	}
+	second, err := store.GetCheckpoint(context.Background(), checkpoint.ID, checkpoint.TenantID)
+	if err != nil {
+		t.Fatalf("GetCheckpoint second: %v", err)
+	}
+	if !second.UpdatedAt.Equal(first.UpdatedAt) {
+		t.Fatalf("idempotent UpdatedAt = %s, want %s", second.UpdatedAt, first.UpdatedAt)
+	}
+}
+
 func TestStoreMigratesExistingCheckpointSchema(t *testing.T) {
 	dsn := os.Getenv("RUNKIT_POSTGRES_TEST_DSN")
 	if dsn == "" {

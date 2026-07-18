@@ -722,18 +722,22 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_skill_refs", err.Error())
 		return
 	}
+	operationCtx := r.Context()
+	var pendingShutdown *pendingShutdownTracker
 	if runMode == RunModeSync {
+		pendingShutdown = newPendingShutdownTracker()
 		handle, accepted := s.executions.Begin(req.ID, executionSyncWorkflow, func(ctx context.Context) error {
-			return s.finalizeWorkflowShutdown(ctx, req.ID)
+			return s.finalizeWorkflowShutdownTracked(ctx, req.ID, pendingShutdown)
 		})
 		if !accepted {
 			writeHostDraining(w)
 			return
 		}
 		defer handle.Done()
+		operationCtx = withPendingShutdownTracker(operationCtx, pendingShutdown)
 	}
 	inputRef := "artifact:" + req.ID + ":input"
-	if err := putTextArtifact(r.Context(), s.artifacts, inputRef, req.Input); err != nil {
+	if err := putTextArtifact(operationCtx, s.artifacts, inputRef, req.Input); err != nil {
 		writeError(w, http.StatusInternalServerError, "artifact_error", err.Error())
 		return
 	}
@@ -752,7 +756,7 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 	if runMode == RunModeQueued {
 		run.Status = workflowkit.StatusPending
-		if err := s.workflows.Save(r.Context(), run); err != nil {
+		if err := s.workflows.Save(operationCtx, run); err != nil {
 			writeError(w, http.StatusInternalServerError, "workflow_error", err.Error())
 			return
 		}
@@ -760,10 +764,13 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusAccepted, workflowToResponse(run, runMode))
 		return
 	}
-	run, err = s.executor.Run(r.Context(), run)
+	run, err = s.executor.Run(operationCtx, run)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "workflow_error", err.Error())
 		return
+	}
+	if identity, ok := pendingShutdown.Snapshot(); ok {
+		pendingShutdown.Clear(identity.CheckpointID)
 	}
 	writeJSON(w, http.StatusAccepted, workflowToResponse(run, runMode))
 }
@@ -881,8 +888,9 @@ func (s *Server) runOneQueuedWorkflow(intakeCtx context.Context, executionCtx co
 		s.releaseQueuedWorkflowLease(claimed.ID)
 		return false, false, nil
 	}
+	pendingShutdown := newPendingShutdownTracker()
 	handle, ok := s.executions.Begin(claimed.ID, executionQueuedWorkflow, func(ctx context.Context) error {
-		return s.finalizeWorkflowShutdown(ctx, claimed.ID)
+		return s.finalizeWorkflowShutdownTracked(ctx, claimed.ID, pendingShutdown)
 	})
 	if !ok {
 		s.releaseQueuedWorkflowLease(claimed.ID)
@@ -899,10 +907,14 @@ func (s *Server) runOneQueuedWorkflow(intakeCtx context.Context, executionCtx co
 		stopHeartbeat()
 		s.releaseQueuedWorkflowLease(claimed.ID)
 	}()
-	_, err = s.executor.Run(executionCtx, claimed)
+	operationCtx := withPendingShutdownTracker(executionCtx, pendingShutdown)
+	_, err = s.executor.Run(operationCtx, claimed)
 	if err != nil {
 		s.worker.recordWorkflowError(claimed.ID, err)
 		return true, true, err
+	}
+	if identity, ok := pendingShutdown.Snapshot(); ok {
+		pendingShutdown.Clear(identity.CheckpointID)
 	}
 	s.worker.recordCompleted(claimed.ID)
 	return true, true, nil
@@ -1104,30 +1116,33 @@ func (s *Server) handleApproveAgentTool(w http.ResponseWriter, r *http.Request) 
 
 	approvalToResume := *approval
 	leaseOwner := "host-api:" + agentcore.NewRunID().String()
+	pendingShutdown := newPendingShutdownTracker()
 	handle, accepted := s.executions.Begin(workflowID, executionAgentApproval, func(ctx context.Context) error {
-		return s.finalizeAgentApprovalShutdown(ctx, workflowID, approvalToResume, leaseOwner)
+		return s.finalizeAgentApprovalShutdownTracked(ctx, workflowID, approvalToResume, leaseOwner, pendingShutdown)
 	})
 	if !accepted {
 		writeHostDraining(w)
 		return
 	}
 	defer handle.Done()
-	next, result, resumeErr := s.agentApprovals.ApproveAndResume(r.Context(), workflowID, approvalToResume, identity.Subject, resolutions, leaseOwner)
+	operationCtx := withPendingShutdownTracker(r.Context(), pendingShutdown)
+	next, result, resumeErr := s.agentApprovals.ApproveAndResume(operationCtx, workflowID, approvalToResume, identity.Subject, resolutions, leaseOwner)
 	if errors.Is(resumeErr, runkit.ErrCheckpointNotClaimable) {
 		writeError(w, http.StatusConflict, "approval_conflict", "agent tool approval is already being processed")
 		return
 	}
 	if errors.Is(resumeErr, agentcore.ErrApprovalPending) && result != nil && result.Interruption != nil && len(next.Tools) > 0 {
-		updated, err := s.replacePendingAgentApproval(r.Context(), run, approval.CheckpointID, next)
+		updated, err := s.replacePendingAgentApproval(operationCtx, run, approval.CheckpointID, next)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "workflow_error", err.Error())
 			return
 		}
+		pendingShutdown.Clear(next.CheckpointID)
 		writeJSON(w, http.StatusAccepted, workflowToResponse(updated, RunModeSync))
 		return
 	}
 	if resumeErr != nil || result == nil {
-		_ = s.failAgentApprovalWorkflow(r.Context(), run, approval.CheckpointID, result, errAgentApprovalResumeFailed)
+		_ = s.failAgentApprovalWorkflow(operationCtx, run, approval.CheckpointID, result, errAgentApprovalResumeFailed)
 		if errors.Is(resumeErr, agentcore.ErrInvalidApprovalResolution) {
 			writeError(w, http.StatusBadRequest, "invalid_request", "tool resolutions do not match the pending approval")
 			return
@@ -1136,9 +1151,9 @@ func (s *Server) handleApproveAgentTool(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	updated, err := s.persistResumedAgentResult(r.Context(), run, approval.CheckpointID, result)
+	updated, err := s.persistResumedAgentResult(operationCtx, run, approval.CheckpointID, result)
 	if err != nil {
-		_ = s.failAgentApprovalWorkflow(r.Context(), run, approval.CheckpointID, result, err)
+		_ = s.failAgentApprovalWorkflow(operationCtx, run, approval.CheckpointID, result, err)
 		writeError(w, http.StatusInternalServerError, "workflow_error", "agent approval result persistence failed")
 		return
 	}
