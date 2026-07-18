@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +14,47 @@ import (
 	"github.com/eruca/goagents/workflowkit"
 	workflowsqlite "github.com/eruca/goagents/workflowkit/sqlitestore"
 )
+
+func TestSideEffectSmokeControlsStayOutOfProductionHost(t *testing.T) {
+	assertHostSideEffectTestIsolation(t)
+}
+
+func assertHostSideEffectTestIsolation(t *testing.T) {
+	t.Helper()
+	for _, path := range []string{"main.go", "server.go"} {
+		source, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read production host source %s: %v", path, err)
+		}
+		for _, forbidden := range []string{
+			"GOAGENTS_TEST_SIDE_EFFECT",
+			"sideEffectSink",
+			"testSideEffectStep",
+			"test_external_side_effect",
+		} {
+			if strings.Contains(string(source), forbidden) {
+				t.Fatalf("production host source %s contains test-only control %q", path, forbidden)
+			}
+		}
+	}
+
+	cleanup, err := os.ReadFile("lifecycle_cleanup.go")
+	if err != nil {
+		t.Fatalf("read production lifecycle cleanup: %v", err)
+	}
+	lowerCleanup := strings.ToLower(string(cleanup))
+	for _, forbidden := range []string{
+		"createcheckpoint",
+		"sideeffect",
+		"toolcall",
+		"requeue",
+		"retry",
+	} {
+		if strings.Contains(lowerCleanup, forbidden) {
+			t.Fatalf("production lifecycle cleanup contains forbidden %q behavior", forbidden)
+		}
+	}
+}
 
 func TestFinalizeWorkflowShutdownFailsActiveWorkflow(t *testing.T) {
 	for _, status := range []workflowkit.Status{workflowkit.StatusPending, workflowkit.StatusRunning} {

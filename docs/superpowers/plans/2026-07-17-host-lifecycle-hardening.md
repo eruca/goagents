@@ -1120,7 +1120,7 @@ TestHostSideEffectBoundaryExplicitRequeueIsExternallyIdempotent
 4. 断言进程 A exit `5`；
 5. 通过现有 store API 检查 workflow failed、AgentRun failed，checkpoint 若已 consumed 保持 consumed、若仍 leased 则 failed 且 lease 清空；
 6. 使用同一 runtime home 启动进程 B，不 requeue，等待一个由“无请求观察窗口”控制的 context deadline，断言 sink request count 不增加；
-7. 通过真实 `POST /v1/workflows/{id}/requeue` 显式 requeue；
+7. 通过真实 `POST /workflows/{id}/requeue` 显式 requeue；
 8. 断言 sink 对同一 ToolCallID 的 request count 增加，而 applied count 仍为 `1`；
 9. 优雅停止进程 B。
 
