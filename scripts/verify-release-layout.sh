@@ -2,24 +2,63 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="v0.1.0"
 MODULE_PREFIX="github.com/eruca/goagents/"
 APACHE_LICENSE_SHA256="cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
 
 published_modules=(
-  "goagent|${MODULE_PREFIX}goagent|goagent/v0.1.0"
-  "hostkit|${MODULE_PREFIX}hostkit|hostkit/v0.1.0"
-  "artifactkit|${MODULE_PREFIX}artifactkit|artifactkit/v0.1.0"
-  "contextkit|${MODULE_PREFIX}contextkit|contextkit/v0.1.0"
-  "evalkit|${MODULE_PREFIX}evalkit|evalkit/v0.1.0"
-  "ocrs|${MODULE_PREFIX}ocrs|ocrs/v0.1.0"
-  "workflowkit|${MODULE_PREFIX}workflowkit|workflowkit/v0.1.0"
-  "llmkit|${MODULE_PREFIX}llmkit|llmkit/v0.1.0"
-  "mcpkit|${MODULE_PREFIX}mcpkit|mcpkit/v0.1.0"
-  "runkit|${MODULE_PREFIX}runkit|runkit/v0.1.0"
-  "skillkit|${MODULE_PREFIX}skillkit|skillkit/v0.1.0"
-  "workflowkit/agentstep|${MODULE_PREFIX}workflowkit/agentstep|workflowkit/agentstep/v0.1.0"
-  "mcpkit/officialsdk|${MODULE_PREFIX}mcpkit/officialsdk|mcpkit/officialsdk/v0.1.0"
+  "goagent|${MODULE_PREFIX}goagent|v0.1.0|goagent/v0.1.0"
+  "hostkit|${MODULE_PREFIX}hostkit|v0.1.0|hostkit/v0.1.0"
+  "artifactkit|${MODULE_PREFIX}artifactkit|v0.1.0|artifactkit/v0.1.0"
+  "contextkit|${MODULE_PREFIX}contextkit|v0.1.0|contextkit/v0.1.0"
+  "evalkit|${MODULE_PREFIX}evalkit|v0.1.0|evalkit/v0.1.0"
+  "ocrs|${MODULE_PREFIX}ocrs|v0.1.0|ocrs/v0.1.0"
+  "workflowkit|${MODULE_PREFIX}workflowkit|v0.1.1|workflowkit/v0.1.1"
+  "llmkit|${MODULE_PREFIX}llmkit|v0.1.0|llmkit/v0.1.0"
+  "mcpkit|${MODULE_PREFIX}mcpkit|v0.1.0|mcpkit/v0.1.0"
+  "runkit|${MODULE_PREFIX}runkit|v0.1.1|runkit/v0.1.1"
+  "skillkit|${MODULE_PREFIX}skillkit|v0.1.0|skillkit/v0.1.0"
+  "workflowkit/agentstep|${MODULE_PREFIX}workflowkit/agentstep|v0.1.0|workflowkit/agentstep/v0.1.0"
+  "mcpkit/officialsdk|${MODULE_PREFIX}mcpkit/officialsdk|v0.1.0|mcpkit/officialsdk/v0.1.0"
+)
+
+release_delta_tags=(
+  "hostkit/v0.1.0"
+  "workflowkit/v0.1.1"
+  "runkit/v0.1.1"
+)
+
+internal_requirements=(
+  "llmkit|${MODULE_PREFIX}goagent|v0.1.0"
+  "mcpkit|${MODULE_PREFIX}goagent|v0.1.0"
+  "runkit|${MODULE_PREFIX}goagent|v0.1.0"
+  "skillkit|${MODULE_PREFIX}goagent|v0.1.0"
+  "workflowkit/agentstep|${MODULE_PREFIX}goagent|v0.1.0"
+  "workflowkit/agentstep|${MODULE_PREFIX}workflowkit|v0.1.0"
+  "mcpkit/officialsdk|${MODULE_PREFIX}goagent|v0.1.0"
+  "mcpkit/officialsdk|${MODULE_PREFIX}mcpkit|v0.1.0"
+  "examples/evalkit-goagent-regression|${MODULE_PREFIX}evalkit|v0.1.0"
+  "examples/evalkit-goagent-regression|${MODULE_PREFIX}goagent|v0.1.0"
+  "examples/host-api|${MODULE_PREFIX}artifactkit|v0.1.0"
+  "examples/host-api|${MODULE_PREFIX}evalkit|v0.1.0"
+  "examples/host-api|${MODULE_PREFIX}goagent|v0.1.0"
+  "examples/host-api|${MODULE_PREFIX}hostkit|v0.1.0"
+  "examples/host-api|${MODULE_PREFIX}llmkit|v0.1.0"
+  "examples/host-api|${MODULE_PREFIX}runkit|v0.1.1"
+  "examples/host-api|${MODULE_PREFIX}skillkit|v0.1.0"
+  "examples/host-api|${MODULE_PREFIX}workflowkit|v0.1.1"
+  "examples/host-runtime|${MODULE_PREFIX}artifactkit|v0.1.0"
+  "examples/host-runtime|${MODULE_PREFIX}goagent|v0.1.0"
+  "examples/host-runtime|${MODULE_PREFIX}llmkit|v0.1.0"
+  "examples/host-runtime|${MODULE_PREFIX}runkit|v0.1.0"
+  "examples/host-runtime|${MODULE_PREFIX}workflowkit|v0.1.0"
+  "workflowkit/examples/agent-approval|${MODULE_PREFIX}goagent|v0.1.0"
+  "workflowkit/examples/agent-approval|${MODULE_PREFIX}workflowkit|v0.1.0"
+  "workflowkit/examples/agent-approval|${MODULE_PREFIX}workflowkit/agentstep|v0.1.0"
+  "workflowkit/examples/ocr-review|${MODULE_PREFIX}contextkit|v0.1.0"
+  "workflowkit/examples/ocr-review|${MODULE_PREFIX}goagent|v0.1.0"
+  "workflowkit/examples/ocr-review|${MODULE_PREFIX}ocrs|v0.1.0"
+  "workflowkit/examples/ocr-review|${MODULE_PREFIX}workflowkit|v0.1.0"
+  "workflowkit/examples/ocr-review|${MODULE_PREFIX}workflowkit/agentstep|v0.1.0"
 )
 
 example_modules=(
@@ -65,31 +104,47 @@ check_module_path() {
   fi
 }
 
-check_internal_require_versions() {
-  local dir="$1"
-  local go_mod="$ROOT/$dir/go.mod"
+expected_internal_requirements() {
+  local owner="$1"
+  local spec
+  local dir
+  local module
+  local version
 
-  if ! awk -v prefix="$MODULE_PREFIX" -v version="$VERSION" -v file="$go_mod" '
-    BEGIN { mode = ""; ok = 1 }
+  for spec in "${internal_requirements[@]}"; do
+    IFS='|' read -r dir module version <<<"$spec"
+    if [[ "$dir" == "$owner" ]]; then
+      printf '%s %s\n' "$module" "$version"
+    fi
+  done
+}
+
+actual_internal_requirements() {
+  local go_mod="$1"
+
+  awk -v prefix="$MODULE_PREFIX" '
+    BEGIN { mode = "" }
     $1 == "require" && $2 == "(" { mode = "require"; next }
     $1 == "replace" && $2 == "(" { mode = "replace"; next }
     $1 == ")" { mode = ""; next }
     $1 == "require" && index($2, prefix) == 1 {
-      if ($3 != version) {
-        printf "release layout error: %s: require %s uses %s, want %s\n", file, $2, $3, version > "/dev/stderr"
-        ok = 0
-      }
+      print $2, $3
       next
     }
     mode == "require" && index($1, prefix) == 1 {
-      if ($2 != version) {
-        printf "release layout error: %s: require %s uses %s, want %s\n", file, $1, $2, version > "/dev/stderr"
-        ok = 0
-      }
+      print $1, $2
     }
-    END { exit(ok ? 0 : 1) }
-  ' "$go_mod"; then
-    failed=1
+  ' "$go_mod"
+}
+
+check_internal_require_versions() {
+  local dir="$1"
+  local difference
+
+  if ! difference="$(diff -u \
+    <(expected_internal_requirements "$dir" | LC_ALL=C sort) \
+    <(actual_internal_requirements "$ROOT/$dir/go.mod" | LC_ALL=C sort))"; then
+    report_set_difference "$dir internal requirements" "$difference"
   fi
 }
 
@@ -113,13 +168,14 @@ check_no_internal_replace() {
 check_workspace_replace() {
   local dir="$1"
   local module="$2"
+  local version="$3"
   local target="./$dir"
 
-  if ! awk -v module="$module" -v version="$VERSION" -v target="$target" '
+  if ! awk -v module="$module" -v version="$version" -v target="$target" '
     $1 == "replace" && $2 == module && $3 == version && $4 == "=>" && $5 == target { found = 1 }
     END { exit(found ? 0 : 1) }
   ' "$ROOT/go.work"; then
-    report_error "go.work: missing exact replacement $module $VERSION => $target"
+    report_error "go.work: missing exact replacement $module $version => $target"
   fi
 }
 
@@ -164,10 +220,11 @@ expected_workspace_replaces() {
   local spec
   local dir
   local module
+  local version
 
   for spec in "${published_modules[@]}"; do
-    IFS='|' read -r dir module _ <<<"$spec"
-    printf '%s %s => ./%s\n' "$module" "$VERSION" "$dir"
+    IFS='|' read -r dir module version _ <<<"$spec"
+    printf '%s %s => ./%s\n' "$module" "$version" "$dir"
   done
 }
 
@@ -205,6 +262,27 @@ check_release_manifest_sets() {
     <(workspace_replaces | LC_ALL=C sort -u))"; then
     report_set_difference "go.work replace set" "$difference"
   fi
+}
+
+check_release_delta_tags() {
+  local requested
+  local spec
+  local tag
+  local found
+
+  for requested in "${release_delta_tags[@]}"; do
+    found=0
+    for spec in "${published_modules[@]}"; do
+      IFS='|' read -r _ _ _ tag <<<"$spec"
+      if [[ "$tag" == "$requested" ]]; then
+        found=1
+        break
+      fi
+    done
+    if (( found == 0 )); then
+      report_error "release delta tag is not in the module manifest: $requested"
+    fi
+  done
 }
 
 check_example_replaces() {
@@ -259,16 +337,17 @@ check_example_replaces() {
 }
 
 check_release_manifest_sets
+check_release_delta_tags
 
 for spec in "${published_modules[@]}"; do
-  IFS='|' read -r dir module tag <<<"$spec"
-  if [[ "$tag" != "$dir/$VERSION" ]]; then
-    report_error "$dir: tag is $tag, want $dir/$VERSION"
+  IFS='|' read -r dir module version tag <<<"$spec"
+  if [[ "$tag" != "$dir/$version" ]]; then
+    report_error "$dir: tag is $tag, want $dir/$version"
   fi
   check_module_path "$dir" "$module"
   check_internal_require_versions "$dir"
   check_no_internal_replace "$dir"
-  check_workspace_replace "$dir" "$module"
+  check_workspace_replace "$dir" "$module" "$version"
   printf 'release module: %-28s tag=%s\n' "$module" "$tag"
 done
 

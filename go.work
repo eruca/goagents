@@ -33,13 +33,13 @@ replace github.com/eruca/goagents/evalkit v0.1.0 => ./evalkit
 
 replace github.com/eruca/goagents/ocrs v0.1.0 => ./ocrs
 
-replace github.com/eruca/goagents/workflowkit v0.1.0 => ./workflowkit
+replace github.com/eruca/goagents/workflowkit v0.1.1 => ./workflowkit
 
 replace github.com/eruca/goagents/llmkit v0.1.0 => ./llmkit
 
 replace github.com/eruca/goagents/mcpkit v0.1.0 => ./mcpkit
 
-replace github.com/eruca/goagents/runkit v0.1.0 => ./runkit
+replace github.com/eruca/goagents/runkit v0.1.1 => ./runkit
 
 replace github.com/eruca/goagents/skillkit v0.1.0 => ./skillkit
 

@@ -9,9 +9,9 @@ require (
 	github.com/eruca/goagents/goagent v0.1.0
 	github.com/eruca/goagents/hostkit v0.1.0
 	github.com/eruca/goagents/llmkit v0.1.0
-	github.com/eruca/goagents/runkit v0.1.0
+	github.com/eruca/goagents/runkit v0.1.1
 	github.com/eruca/goagents/skillkit v0.1.0
-	github.com/eruca/goagents/workflowkit v0.1.0
+	github.com/eruca/goagents/workflowkit v0.1.1
 )
 
 require (
