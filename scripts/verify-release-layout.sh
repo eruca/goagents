@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="v0.1.0"
 MODULE_PREFIX="github.com/eruca/goagents/"
+APACHE_LICENSE_SHA256="cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
 
 published_modules=(
   "goagent|${MODULE_PREFIX}goagent|goagent/v0.1.0"
@@ -295,6 +296,10 @@ if [[ ! -f "$ROOT/LICENSE" ]]; then
 elif ! grep -Eq '^[[:space:]]*Apache License[[:space:]]*$' "$ROOT/LICENSE" ||
   ! grep -Eq '^[[:space:]]*Version 2\.0, January 2004[[:space:]]*$' "$ROOT/LICENSE"; then
   report_error "LICENSE is not the Apache License 2.0 text"
+elif ! command -v shasum >/dev/null 2>&1; then
+  report_error "shasum is required to verify LICENSE"
+elif [[ "$(shasum -a 256 "$ROOT/LICENSE" | awk '{print $1}')" != "$APACHE_LICENSE_SHA256" ]]; then
+  report_error "LICENSE SHA-256 does not match the pinned Apache License 2.0 text"
 fi
 
 if (( failed != 0 )); then
