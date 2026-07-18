@@ -33,19 +33,21 @@ bash ./scripts/verify-all.sh
 This runs module tests, race checks for the core execution paths, MCP smokes,
 and runnable examples.
 
-## v0.1.0 release preparation
+## Release layout
 
 The repository uses one monorepo namespace, `github.com/eruca/goagents`, with
-independently tagged subdirectory modules. Validate module paths, internal
-versions, workspace mappings, and tag prefixes with:
+independently tagged subdirectory modules. The historical v0.1.0 publication
+contains 12 modules; the Host lifecycle v0.1.1 candidate adds `hostkit` and
+selectively versions only modules with public changes. Validate module paths,
+internal dependency edges, workspace mappings, and tag prefixes with:
 
 ```bash
 bash ./scripts/verify-release-layout.sh
 ```
 
-The technical layout is separate from public publication. A canonical Git
-remote, actual module tags, and a clean `GOWORK=off` consumer test are still
-required before any public release.
+Local layout checks do not prove publication. Every release still requires an
+exact remote commit, successful CI, annotated tags, and clean `GOWORK=off`
+consumers without local replacements.
 
 ## Host API MVP
 
@@ -86,8 +88,11 @@ This target-specific gate is documented in the Host API README. It checks the
 current single-slot worker for convergence and resource growth; it is not a
 production throughput SLO. A `SKIP` is not a passing acceptance result.
 
-The current GO decision, accepted P2 item, and operating limitations are
-recorded in the [MVP final acceptance record](docs/superpowers/specs/2026-07-15-mvp-final-acceptance.md).
+The historical MVP GO decision and its accepted P2 items remain recorded in
+the [v0.1.0 final acceptance record](docs/superpowers/specs/2026-07-15-mvp-final-acceptance.md).
+Both lifecycle P2 items are now implemented; the current selective-module
+release boundary is recorded in the
+[v0.1.1 release-readiness record](docs/superpowers/specs/2026-07-18-v0.1.1-release-readiness.md).
 
 ## License
 
