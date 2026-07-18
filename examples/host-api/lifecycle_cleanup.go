@@ -19,24 +19,61 @@ func (s *Server) finalizeWorkflowShutdown(ctx context.Context, workflowID string
 	if err != nil {
 		return err
 	}
-	if run.Status != workflowkit.StatusPending && run.Status != workflowkit.StatusRunning {
+	active := run.Status == workflowkit.StatusPending || run.Status == workflowkit.StatusRunning
+	// A previous attempt may have committed the workflow failure before the
+	// AgentRun store failed. Re-enter that exact shutdown state so a later
+	// cleanup call can converge without reopening any other terminal workflow.
+	shutdownFailed := run.Status == workflowkit.StatusFailed && run.Error == hostShutdownTimeoutCode
+	if !active && !shutdownFailed {
 		return nil
 	}
 
-	_, err = s.workflows.Update(ctx, workflowID, func(current workflowkit.WorkflowRun) (workflowkit.WorkflowRun, error) {
-		if current.Status != workflowkit.StatusPending && current.Status != workflowkit.StatusRunning {
-			return current, errWorkflowShutdownUnchanged
+	var workflowErr error
+	if active {
+		updated, updateErr := s.workflows.Update(ctx, workflowID, func(current workflowkit.WorkflowRun) (workflowkit.WorkflowRun, error) {
+			if current.Status != workflowkit.StatusPending && current.Status != workflowkit.StatusRunning {
+				return current, errWorkflowShutdownUnchanged
+			}
+			current.Status = workflowkit.StatusFailed
+			current.Error = hostShutdownTimeoutCode
+			current.LeaseOwner = ""
+			current.LeaseUntil = time.Time{}
+			return current, nil
+		})
+		if errors.Is(updateErr, errWorkflowShutdownUnchanged) {
+			// The workflow stabilized after the outer read. Its referenced
+			// AgentRun belongs to that stable result and must remain untouched.
+			return nil
 		}
-		current.Status = workflowkit.StatusFailed
-		current.Error = hostShutdownTimeoutCode
-		current.LeaseOwner = ""
-		current.LeaseUntil = time.Time{}
-		return current, nil
-	})
-	if errors.Is(err, errWorkflowShutdownUnchanged) {
+		if updateErr == nil {
+			run = updated
+		} else {
+			workflowErr = updateErr
+		}
+	}
+
+	// Attempt both stores even when the workflow write failed. Cleanup runs
+	// after the execution operation is done, and a later idempotent cleanup
+	// call will finish whichever side did not commit.
+	agentRunErr := s.finalizeRunningAgentRunShutdown(ctx, run.AgentRunID)
+	return errors.Join(workflowErr, agentRunErr)
+}
+
+func (s *Server) finalizeRunningAgentRunShutdown(ctx context.Context, agentRunID string) error {
+	if agentRunID == "" || s.runs == nil {
 		return nil
 	}
-	return err
+	agentRun, err := s.runs.Get(ctx, agentRunID)
+	if err != nil {
+		return err
+	}
+	if agentRun.Status != runkit.StatusRunning {
+		return nil
+	}
+	summary := agentRun.Summary
+	summary.Status = runkit.StatusFailed
+	summary.AbortReason = hostShutdownTimeoutCode
+	return s.runs.Complete(ctx, agentRunID, summary)
 }
 
 func (s *Server) finalizeAgentApprovalShutdown(

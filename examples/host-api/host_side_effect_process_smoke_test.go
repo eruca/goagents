@@ -527,15 +527,6 @@ func (s testSideEffectStep) Run(
 		if err := waitForSideEffectRelease(s.sinkURL + "/barrier/release"); err != nil {
 			return workflowkit.StepResult{}, err
 		}
-		completeCtx, cancelComplete := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancelComplete()
-		if err := s.runs.Complete(completeCtx, persisted.RunID, runkit.TerminalSummary{
-			Status:      runkit.StatusFailed,
-			AbortReason: hostShutdownTimeoutCode,
-			ToolCalls:   1,
-		}); err != nil {
-			return workflowkit.StepResult{}, err
-		}
 		return workflowkit.StepResult{
 			Status:     workflowkit.StatusFailed,
 			AgentRunID: persisted.RunID,

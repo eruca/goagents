@@ -80,6 +80,234 @@ func TestFinalizeWorkflowShutdownFailsActiveWorkflow(t *testing.T) {
 	}
 }
 
+func TestFinalizeWorkflowShutdownFailsRunningAgentRun(t *testing.T) {
+	server, workflows, runs := newWorkflowAgentRunLifecycleFixture()
+	saveLifecycleTestAgentRun(t, runs, runkit.RunRecord{
+		RunID:      "agent-running",
+		WorkflowID: "wf-agent-running",
+		Status:     runkit.StatusRunning,
+		Summary: runkit.TerminalSummary{
+			ContentRef:   "artifact:partial-output",
+			InputTokens:  11,
+			OutputTokens: 7,
+			LLMCalls:     2,
+			ToolCalls:    1,
+			UsedTools:    []string{"record_review"},
+		},
+		Metadata: map[string]any{"external_tool_call_id": "tool-call-stable"},
+	})
+	saveLifecycleTestRun(t, workflows, workflowkit.WorkflowRun{
+		ID:         "wf-agent-running",
+		Status:     workflowkit.StatusRunning,
+		AgentRunID: "agent-running",
+	})
+
+	if err := server.finalizeWorkflowShutdown(t.Context(), "wf-agent-running"); err != nil {
+		t.Fatalf("finalizeWorkflowShutdown() error = %v", err)
+	}
+
+	workflow := getLifecycleTestRun(t, workflows, "wf-agent-running")
+	if workflow.Status != workflowkit.StatusFailed || workflow.Error != hostShutdownTimeoutCode {
+		t.Fatalf("workflow = status %q error %q, want shutdown failed", workflow.Status, workflow.Error)
+	}
+	agentRun := getLifecycleAgentRun(t, runs, "agent-running")
+	if agentRun.Status != runkit.StatusFailed ||
+		agentRun.Summary.Status != runkit.StatusFailed ||
+		agentRun.Summary.AbortReason != hostShutdownTimeoutCode {
+		t.Fatalf("agent run = status %q summary %q abort %q, want shutdown failed",
+			agentRun.Status, agentRun.Summary.Status, agentRun.Summary.AbortReason)
+	}
+	if agentRun.Summary.ContentRef != "artifact:partial-output" ||
+		agentRun.Summary.InputTokens != 11 ||
+		agentRun.Summary.OutputTokens != 7 ||
+		agentRun.Summary.LLMCalls != 2 ||
+		agentRun.Summary.ToolCalls != 1 ||
+		!reflect.DeepEqual(agentRun.Summary.UsedTools, []string{"record_review"}) ||
+		!reflect.DeepEqual(agentRun.Metadata, map[string]any{"external_tool_call_id": "tool-call-stable"}) {
+		t.Fatalf("agent run summary or metadata was not preserved: %+v", agentRun)
+	}
+}
+
+func TestFinalizeWorkflowShutdownPreservesTerminalAgentRun(t *testing.T) {
+	for _, status := range []runkit.Status{runkit.StatusSucceeded, runkit.StatusFailed} {
+		t.Run(string(status), func(t *testing.T) {
+			server, workflows, runs := newWorkflowAgentRunLifecycleFixture()
+			saveLifecycleTestAgentRun(t, runs, runkit.RunRecord{
+				RunID:      "agent-terminal-" + string(status),
+				WorkflowID: "wf-terminal-agent-" + string(status),
+				Status:     status,
+				Summary: runkit.TerminalSummary{
+					Status:      status,
+					ContentRef:  "artifact:terminal-output",
+					AbortReason: "existing-terminal-reason",
+					ToolCalls:   3,
+				},
+				Metadata: map[string]any{"marker": "terminal"},
+			})
+			before := getLifecycleAgentRun(t, runs, "agent-terminal-"+string(status))
+			saveLifecycleTestRun(t, workflows, workflowkit.WorkflowRun{
+				ID:         "wf-terminal-agent-" + string(status),
+				Status:     workflowkit.StatusRunning,
+				AgentRunID: before.RunID,
+			})
+
+			if err := server.finalizeWorkflowShutdown(t.Context(), "wf-terminal-agent-"+string(status)); err != nil {
+				t.Fatalf("finalizeWorkflowShutdown() error = %v", err)
+			}
+
+			workflow := getLifecycleTestRun(t, workflows, "wf-terminal-agent-"+string(status))
+			if workflow.Status != workflowkit.StatusFailed || workflow.Error != hostShutdownTimeoutCode {
+				t.Fatalf("workflow = status %q error %q, want shutdown failed", workflow.Status, workflow.Error)
+			}
+			after := getLifecycleAgentRun(t, runs, before.RunID)
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("terminal AgentRun changed:\nbefore=%+v\nafter=%+v", before, after)
+			}
+		})
+	}
+}
+
+func TestFinalizeWorkflowShutdownDoesNotRequireAgentRunID(t *testing.T) {
+	server, workflows, _ := newWorkflowAgentRunLifecycleFixture()
+	saveLifecycleTestRun(t, workflows, workflowkit.WorkflowRun{
+		ID:     "wf-without-agent-run",
+		Status: workflowkit.StatusRunning,
+	})
+
+	if err := server.finalizeWorkflowShutdown(t.Context(), "wf-without-agent-run"); err != nil {
+		t.Fatalf("finalizeWorkflowShutdown() error = %v", err)
+	}
+
+	workflow := getLifecycleTestRun(t, workflows, "wf-without-agent-run")
+	if workflow.Status != workflowkit.StatusFailed || workflow.Error != hostShutdownTimeoutCode {
+		t.Fatalf("workflow = status %q error %q, want shutdown failed", workflow.Status, workflow.Error)
+	}
+}
+
+func TestFinalizeWorkflowShutdownConvergesAfterAgentRunWriteFailure(t *testing.T) {
+	server, workflows, runs := newWorkflowAgentRunLifecycleFixture()
+	saveLifecycleTestAgentRun(t, runs, runkit.RunRecord{
+		RunID:      "agent-fail-once",
+		WorkflowID: "wf-agent-fail-once",
+		Status:     runkit.StatusRunning,
+	})
+	saveLifecycleTestRun(t, workflows, workflowkit.WorkflowRun{
+		ID:         "wf-agent-fail-once",
+		Status:     workflowkit.StatusRunning,
+		AgentRunID: "agent-fail-once",
+	})
+	writeErr := errors.New("agent run write failed once")
+	server.runs = &failOnceLifecycleRunStore{Store: runs, err: writeErr}
+
+	if err := server.finalizeWorkflowShutdown(t.Context(), "wf-agent-fail-once"); !errors.Is(err, writeErr) {
+		t.Fatalf("first finalizeWorkflowShutdown() error = %v, want AgentRun write error", err)
+	}
+	partialWorkflow := getLifecycleTestRun(t, workflows, "wf-agent-fail-once")
+	partialAgentRun := getLifecycleAgentRun(t, runs, "agent-fail-once")
+	if partialWorkflow.Status != workflowkit.StatusFailed ||
+		partialWorkflow.Error != hostShutdownTimeoutCode ||
+		partialAgentRun.Status != runkit.StatusRunning {
+		t.Fatalf("partial state = workflow %q/%q AgentRun %q, want shutdown failed/running",
+			partialWorkflow.Status, partialWorkflow.Error, partialAgentRun.Status)
+	}
+
+	if err := server.finalizeWorkflowShutdown(t.Context(), "wf-agent-fail-once"); err != nil {
+		t.Fatalf("retry finalizeWorkflowShutdown() error = %v", err)
+	}
+	converged := getLifecycleAgentRun(t, runs, "agent-fail-once")
+	if converged.Status != runkit.StatusFailed ||
+		converged.Summary.Status != runkit.StatusFailed ||
+		converged.Summary.AbortReason != hostShutdownTimeoutCode {
+		t.Fatalf("converged AgentRun = status %q summary %q abort %q, want shutdown failed",
+			converged.Status, converged.Summary.Status, converged.Summary.AbortReason)
+	}
+}
+
+func TestFinalizeWorkflowShutdownConvergesAfterWorkflowWriteFailure(t *testing.T) {
+	server, workflows, runs := newWorkflowAgentRunLifecycleFixture()
+	saveLifecycleTestAgentRun(t, runs, runkit.RunRecord{
+		RunID:      "agent-workflow-fail-once",
+		WorkflowID: "wf-write-fail-once",
+		Status:     runkit.StatusRunning,
+	})
+	saveLifecycleTestRun(t, workflows, workflowkit.WorkflowRun{
+		ID:         "wf-write-fail-once",
+		Status:     workflowkit.StatusRunning,
+		AgentRunID: "agent-workflow-fail-once",
+	})
+	writeErr := errors.New("workflow write failed once")
+	server.workflows = &failOnceLifecycleWorkflowStore{Store: workflows, err: writeErr}
+
+	if err := server.finalizeWorkflowShutdown(t.Context(), "wf-write-fail-once"); !errors.Is(err, writeErr) {
+		t.Fatalf("first finalizeWorkflowShutdown() error = %v, want workflow write error", err)
+	}
+	partialWorkflow := getLifecycleTestRun(t, workflows, "wf-write-fail-once")
+	partialAgentRun := getLifecycleAgentRun(t, runs, "agent-workflow-fail-once")
+	if partialWorkflow.Status != workflowkit.StatusRunning ||
+		partialAgentRun.Status != runkit.StatusFailed ||
+		partialAgentRun.Summary.AbortReason != hostShutdownTimeoutCode {
+		t.Fatalf("partial state = workflow %q AgentRun %q/%q, want running/shutdown failed",
+			partialWorkflow.Status, partialAgentRun.Status, partialAgentRun.Summary.AbortReason)
+	}
+
+	if err := server.finalizeWorkflowShutdown(t.Context(), "wf-write-fail-once"); err != nil {
+		t.Fatalf("retry finalizeWorkflowShutdown() error = %v", err)
+	}
+	converged := getLifecycleTestRun(t, workflows, "wf-write-fail-once")
+	if converged.Status != workflowkit.StatusFailed || converged.Error != hostShutdownTimeoutCode {
+		t.Fatalf("converged workflow = status %q error %q, want shutdown failed",
+			converged.Status, converged.Error)
+	}
+}
+
+func TestFinalizeWorkflowShutdownPreservesRunningAgentRunForStableWorkflow(t *testing.T) {
+	tests := []struct {
+		name string
+		run  workflowkit.WorkflowRun
+	}{
+		{name: "waiting approval", run: workflowkit.WorkflowRun{
+			Status:        workflowkit.StatusWaitingApproval,
+			ApprovalRef:   "approval:stable",
+			WaitingReason: "operator approval required",
+		}},
+		{name: "succeeded", run: workflowkit.WorkflowRun{Status: workflowkit.StatusSucceeded}},
+		{name: "cancelled", run: workflowkit.WorkflowRun{Status: workflowkit.StatusCancelled}},
+		{name: "other failure", run: workflowkit.WorkflowRun{
+			Status: workflowkit.StatusFailed,
+			Error:  "provider_failed",
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server, workflows, runs := newWorkflowAgentRunLifecycleFixture()
+			workflowID := "wf-stable-" + strings.ReplaceAll(test.name, " ", "-")
+			agentRunID := "agent-stable-" + strings.ReplaceAll(test.name, " ", "-")
+			saveLifecycleTestAgentRun(t, runs, runkit.RunRecord{
+				RunID:      agentRunID,
+				WorkflowID: workflowID,
+				Status:     runkit.StatusRunning,
+			})
+			test.run.ID = workflowID
+			test.run.AgentRunID = agentRunID
+			saveLifecycleTestRun(t, workflows, test.run)
+			beforeWorkflow := getLifecycleTestRun(t, workflows, workflowID)
+			beforeAgentRun := getLifecycleAgentRun(t, runs, agentRunID)
+
+			if err := server.finalizeWorkflowShutdown(t.Context(), workflowID); err != nil {
+				t.Fatalf("finalizeWorkflowShutdown() error = %v", err)
+			}
+
+			afterWorkflow := getLifecycleTestRun(t, workflows, workflowID)
+			afterAgentRun := getLifecycleAgentRun(t, runs, agentRunID)
+			if !reflect.DeepEqual(afterWorkflow, beforeWorkflow) ||
+				!reflect.DeepEqual(afterAgentRun, beforeAgentRun) {
+				t.Fatalf("stable state changed:\nworkflow before=%+v after=%+v\nAgentRun before=%+v after=%+v",
+					beforeWorkflow, afterWorkflow, beforeAgentRun, afterAgentRun)
+			}
+		})
+	}
+}
+
 func TestFinalizeWorkflowShutdownClearsQueuedLease(t *testing.T) {
 	server, store := newSQLiteLifecycleTestServer(t)
 	saveLifecycleTestRun(t, store, workflowkit.WorkflowRun{
@@ -167,20 +395,29 @@ func TestFinalizeWorkflowShutdownRollsBackWhenWorkflowStabilizesBeforeUpdate(t *
 	} {
 		t.Run(string(status), func(t *testing.T) {
 			updatedAt := time.Date(2026, 7, 18, 8, 0, 0, 0, time.UTC)
+			agentRunID := "agent-stabilized-" + string(status)
 			store := &workflowShutdownRaceStore{
 				outer: workflowkit.WorkflowRun{
-					ID:        "wf-stabilized",
-					Status:    workflowkit.StatusRunning,
-					UpdatedAt: updatedAt.Add(-time.Minute),
+					ID:         "wf-stabilized",
+					Status:     workflowkit.StatusRunning,
+					AgentRunID: agentRunID,
+					UpdatedAt:  updatedAt.Add(-time.Minute),
 				},
 				current: workflowkit.WorkflowRun{
-					ID:        "wf-stabilized",
-					Status:    status,
-					OutputRef: "artifact:stable-output",
-					UpdatedAt: updatedAt,
+					ID:         "wf-stabilized",
+					Status:     status,
+					OutputRef:  "artifact:stable-output",
+					AgentRunID: agentRunID,
+					UpdatedAt:  updatedAt,
 				},
 			}
-			server := &Server{workflows: store}
+			runs := runkit.NewMemoryStore()
+			saveLifecycleTestAgentRun(t, runs, runkit.RunRecord{
+				RunID:  agentRunID,
+				Status: runkit.StatusRunning,
+			})
+			beforeAgentRun := getLifecycleAgentRun(t, runs, agentRunID)
+			server := &Server{workflows: store, runs: runs}
 
 			if err := server.finalizeWorkflowShutdown(t.Context(), "wf-stabilized"); err != nil {
 				t.Fatalf("finalizeWorkflowShutdown() error = %v", err)
@@ -194,6 +431,11 @@ func TestFinalizeWorkflowShutdownRollsBackWhenWorkflowStabilizesBeforeUpdate(t *
 			}
 			if store.updateCalls != 1 {
 				t.Fatalf("Update calls = %d, want 1", store.updateCalls)
+			}
+			afterAgentRun := getLifecycleAgentRun(t, runs, agentRunID)
+			if !reflect.DeepEqual(afterAgentRun, beforeAgentRun) {
+				t.Fatalf("stable %q AgentRun changed:\nbefore=%+v\nafter=%+v",
+					status, beforeAgentRun, afterAgentRun)
 			}
 		})
 	}
@@ -251,10 +493,16 @@ func TestFinalizeWorkflowShutdownPreservesHistoryAndReferences(t *testing.T) {
 }
 
 func TestFinalizeWorkflowShutdownIsIdempotent(t *testing.T) {
-	server, store := newLifecycleTestServer()
-	saveLifecycleTestRun(t, store, workflowkit.WorkflowRun{
+	server, workflows, runs := newWorkflowAgentRunLifecycleFixture()
+	saveLifecycleTestAgentRun(t, runs, runkit.RunRecord{
+		RunID:      "agent-idempotent",
+		WorkflowID: "wf-idempotent",
+		Status:     runkit.StatusRunning,
+	})
+	saveLifecycleTestRun(t, workflows, workflowkit.WorkflowRun{
 		ID:         "wf-idempotent",
 		Status:     workflowkit.StatusRunning,
+		AgentRunID: "agent-idempotent",
 		LeaseOwner: "worker-1",
 		LeaseUntil: time.Now().Add(time.Minute),
 	})
@@ -262,14 +510,23 @@ func TestFinalizeWorkflowShutdownIsIdempotent(t *testing.T) {
 	if err := server.finalizeWorkflowShutdown(t.Context(), "wf-idempotent"); err != nil {
 		t.Fatalf("first finalizeWorkflowShutdown() error = %v", err)
 	}
-	afterFirst := getLifecycleTestRun(t, store, "wf-idempotent")
+	afterFirstWorkflow := getLifecycleTestRun(t, workflows, "wf-idempotent")
+	afterFirstAgentRun := getLifecycleAgentRun(t, runs, "agent-idempotent")
 	if err := server.finalizeWorkflowShutdown(t.Context(), "wf-idempotent"); err != nil {
 		t.Fatalf("second finalizeWorkflowShutdown() error = %v", err)
 	}
-	afterSecond := getLifecycleTestRun(t, store, "wf-idempotent")
+	afterSecondWorkflow := getLifecycleTestRun(t, workflows, "wf-idempotent")
+	afterSecondAgentRun := getLifecycleAgentRun(t, runs, "agent-idempotent")
 
-	if !reflect.DeepEqual(afterSecond, afterFirst) {
-		t.Fatalf("second cleanup changed workflow:\nfirst=%+v\nsecond=%+v", afterFirst, afterSecond)
+	if !reflect.DeepEqual(afterSecondWorkflow, afterFirstWorkflow) ||
+		!reflect.DeepEqual(afterSecondAgentRun, afterFirstAgentRun) {
+		t.Fatalf(
+			"second cleanup changed state:\nworkflow first=%+v second=%+v\nAgentRun first=%+v second=%+v",
+			afterFirstWorkflow,
+			afterSecondWorkflow,
+			afterFirstAgentRun,
+			afterSecondAgentRun,
+		)
 	}
 }
 
@@ -694,11 +951,6 @@ func closedLifecycleChannel() <-chan struct{} {
 	return done
 }
 
-func newLifecycleTestServer() (*Server, *workflowkit.MemoryStore) {
-	store := workflowkit.NewMemoryStore()
-	return &Server{workflows: store}, store
-}
-
 func newSQLiteLifecycleTestServer(t *testing.T) (*Server, workflowkit.Store) {
 	t.Helper()
 	store, err := workflowsqlite.Open(filepath.Join(t.TempDir(), "workflow.db"))
@@ -776,6 +1028,55 @@ func getLifecycleAgentRun(t *testing.T, store runkit.Store, runID string) runkit
 		t.Fatalf("Get agent run %q: %v", runID, err)
 	}
 	return run
+}
+
+func newWorkflowAgentRunLifecycleFixture() (*Server, *workflowkit.MemoryStore, *runkit.MemoryStore) {
+	workflows := workflowkit.NewMemoryStore()
+	runs := runkit.NewMemoryStore()
+	return &Server{workflows: workflows, runs: runs}, workflows, runs
+}
+
+func saveLifecycleTestAgentRun(t *testing.T, store runkit.Store, run runkit.RunRecord) {
+	t.Helper()
+	if err := store.Create(t.Context(), run); err != nil {
+		t.Fatalf("Create AgentRun: %v", err)
+	}
+}
+
+type failOnceLifecycleRunStore struct {
+	runkit.Store
+	err    error
+	failed bool
+}
+
+func (s *failOnceLifecycleRunStore) Complete(
+	ctx context.Context,
+	runID string,
+	summary runkit.TerminalSummary,
+) error {
+	if !s.failed {
+		s.failed = true
+		return s.err
+	}
+	return s.Store.Complete(ctx, runID, summary)
+}
+
+type failOnceLifecycleWorkflowStore struct {
+	workflowkit.Store
+	err    error
+	failed bool
+}
+
+func (s *failOnceLifecycleWorkflowStore) Update(
+	ctx context.Context,
+	id string,
+	mutate func(workflowkit.WorkflowRun) (workflowkit.WorkflowRun, error),
+) (workflowkit.WorkflowRun, error) {
+	if !s.failed {
+		s.failed = true
+		return workflowkit.WorkflowRun{}, s.err
+	}
+	return s.Store.Update(ctx, id, mutate)
 }
 
 type workflowUpdateErrorStore struct {
