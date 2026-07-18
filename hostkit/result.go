@@ -61,7 +61,7 @@ func resultFromError(err error) Result {
 		return Result{
 			exitCode: exitCode(classified.code),
 			code:     string(classified.code),
-			err:      err,
+			err:      classified,
 		}
 	}
 

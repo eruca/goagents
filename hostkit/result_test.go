@@ -2,7 +2,9 @@ package hostkit
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 )
@@ -153,5 +155,94 @@ func TestWriteErrorDoesNotExposeUnclassifiedCause(t *testing.T) {
 	const want = "{\"level\":\"error\",\"event\":\"host_exit\",\"code\":\"internal_error\",\"message\":\"internal error\"}\n"
 	if got := output.String(); got != want {
 		t.Fatalf("WriteError() = %q, want %q", got, want)
+	}
+}
+
+func TestWriteErrorDoesNotExposeWrappedClassifiedError(t *testing.T) {
+	cause := errors.New("raw provider secret")
+	classified := Fail(CodeConfigFailed, "safe config failure", cause)
+	result := resultFromError(fmt.Errorf("outer token sentinel: %w", classified))
+
+	assertSafeClassifiedError(
+		t,
+		result,
+		CodeConfigFailed,
+		2,
+		"safe config failure",
+		cause,
+		"outer token sentinel",
+		"raw provider secret",
+	)
+}
+
+func TestWriteErrorDoesNotExposeJoinedClassifiedError(t *testing.T) {
+	cause := errors.New("raw listener secret")
+	classified := Fail(CodeListenFailed, "safe listen failure", cause)
+	result := resultFromError(errors.Join(
+		classified,
+		errors.New("joined path sentinel"),
+	))
+
+	assertSafeClassifiedError(
+		t,
+		result,
+		CodeListenFailed,
+		3,
+		"safe listen failure",
+		cause,
+		"joined path sentinel",
+		"raw listener secret",
+	)
+}
+
+func assertSafeClassifiedError(
+	t *testing.T,
+	result Result,
+	wantCode Code,
+	wantExit int,
+	wantMessage string,
+	cause error,
+	sensitive ...string,
+) {
+	t.Helper()
+
+	if result.Code() != string(wantCode) || result.ExitCode() != wantExit {
+		t.Fatalf(
+			"result = code %q exit %d, want code %q exit %d",
+			result.Code(),
+			result.ExitCode(),
+			wantCode,
+			wantExit,
+		)
+	}
+	if !errors.Is(result.Err(), cause) {
+		t.Fatal("classified result does not retain its original cause")
+	}
+
+	var output bytes.Buffer
+	if err := WriteError(&output, result); err != nil {
+		t.Fatalf("WriteError() error = %v", err)
+	}
+	for _, value := range sensitive {
+		if bytes.Contains(output.Bytes(), []byte(value)) {
+			t.Fatalf("WriteError() leaked %q: %q", value, output.String())
+		}
+	}
+	if bytes.Count(output.Bytes(), []byte{'\n'}) != 1 {
+		t.Fatalf("WriteError() emitted multiple lines: %q", output.String())
+	}
+
+	var fields map[string]string
+	if err := json.Unmarshal(output.Bytes(), &fields); err != nil {
+		t.Fatalf("WriteError() emitted invalid JSON: %v", err)
+	}
+	if len(fields) != 4 {
+		t.Fatalf("WriteError() emitted %d fields, want 4: %q", len(fields), output.String())
+	}
+	if fields["level"] != "error" ||
+		fields["event"] != "host_exit" ||
+		fields["code"] != string(wantCode) ||
+		fields["message"] != wantMessage {
+		t.Fatalf("WriteError() fields = %#v, want classified safe output", fields)
 	}
 }
