@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -156,12 +155,6 @@ func (s *hostAgentApprovalService) SavePending(ctx context.Context, workflowID s
 	}); err != nil {
 		return agentApprovalResponse{}, err
 	}
-	rememberPendingShutdownIdentity(ctx, pendingShutdownIdentity{
-		CheckpointID:   approval.CheckpointID,
-		RunID:          checkpoint.RunID,
-		TenantID:       localApprovalTenant,
-		DefinitionHash: hostAgentDefinitionHash,
-	})
 	return approval, nil
 }
 
@@ -170,7 +163,7 @@ func (s *hostAgentApprovalService) adapter() (*goagentapproval.Adapter, error) {
 	if err != nil {
 		return nil, err
 	}
-	return goagentapproval.New(s.checkpoints, cipher, s.runner)
+	return goagentapproval.New(pendingShutdownCheckpointStore{CheckpointStore: s.checkpoints}, cipher, s.runner)
 }
 
 func (s *hostAgentApprovalService) ApproveAndResume(ctx context.Context, workflowID string, approval agentApprovalResponse, approverID string, resolutions []agentcore.ToolApprovalResolution, leaseOwner string) (agentApprovalResponse, *agentcore.RunResult, error) {
@@ -199,14 +192,6 @@ func (s *hostAgentApprovalService) ApproveAndResume(ctx context.Context, workflo
 	})
 	if result != nil && result.Interruption != nil {
 		next.Tools = safePendingTools(result.Interruption.Checkpoint)
-	}
-	if errors.Is(err, agentcore.ErrApprovalPending) && result != nil && result.Interruption != nil && len(next.Tools) > 0 {
-		rememberPendingShutdownIdentity(ctx, pendingShutdownIdentity{
-			CheckpointID:   next.CheckpointID,
-			RunID:          result.Interruption.Checkpoint.RunID,
-			TenantID:       localApprovalTenant,
-			DefinitionHash: hostAgentDefinitionHash,
-		})
 	}
 	return next, result, err
 }

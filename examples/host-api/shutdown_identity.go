@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"sync"
+
+	"github.com/eruca/goagents/runkit"
 )
 
 // pendingShutdownIdentity names one checkpoint that was committed by the
@@ -65,3 +67,25 @@ func rememberPendingShutdownIdentity(ctx context.Context, identity pendingShutdo
 	tracker, _ := ctx.Value(pendingShutdownTrackerContextKey{}).(*pendingShutdownTracker)
 	tracker.Remember(identity)
 }
+
+// pendingShutdownCheckpointStore records only checkpoints that the durable
+// store has successfully committed. Initial and resumed pauses share this
+// boundary, including resumed pauses whose old lease later fails to complete.
+type pendingShutdownCheckpointStore struct {
+	runkit.CheckpointStore
+}
+
+func (s pendingShutdownCheckpointStore) CreateCheckpoint(ctx context.Context, checkpoint runkit.ApprovalCheckpoint) error {
+	if err := s.CheckpointStore.CreateCheckpoint(ctx, checkpoint); err != nil {
+		return err
+	}
+	rememberPendingShutdownIdentity(ctx, pendingShutdownIdentity{
+		CheckpointID:   checkpoint.ID,
+		RunID:          checkpoint.RunID,
+		TenantID:       checkpoint.TenantID,
+		DefinitionHash: checkpoint.DefinitionHash,
+	})
+	return nil
+}
+
+var _ runkit.CheckpointStore = pendingShutdownCheckpointStore{}

@@ -20,6 +20,7 @@ import (
 	"github.com/eruca/goagents/goagent/ports"
 	"github.com/eruca/goagents/hostkit"
 	"github.com/eruca/goagents/runkit"
+	"github.com/eruca/goagents/runkit/goagentapproval"
 	"github.com/eruca/goagents/workflowkit"
 )
 
@@ -612,6 +613,145 @@ func TestHostAPIServiceForceStopResumedPendingShutdownBeforeNextWorkflowLink(t *
 	}
 }
 
+func TestHostAPIServiceForceStopTracksCommittedNextCheckpointWhenOldLeaseCompletionFails(t *testing.T) {
+	server, err := NewServer(Config{
+		RuntimeHome:           t.TempDir(),
+		AgentApprovalCipher:   &testApprovalCipher{},
+		ApprovalAuthenticator: testApprovalAuthenticator{identity: ApprovalIdentity{Subject: "operator-lease-failure"}},
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	created := createToolApprovalWorkflow(t, server, "wf-resumed-lease-completion-failure")
+	oldCheckpointID := created.AgentApproval.CheckpointID
+	pending := created.AgentApproval.Tools[0]
+	resumer := &pendingAgainLifecycleResumer{}
+	server.agentApprovals.runner = resumer
+	persistedCheckpoints := server.runs.(runkit.CheckpointStore)
+	completeErr := errors.New("old checkpoint lease completion failed")
+	checkpointStore := newNextCheckpointOldLeaseFailureStore(server.agentApprovals.checkpoints, completeErr)
+	server.agentApprovals.checkpoints = checkpointStore
+	service := startLifecycleService(t, server)
+	forceCalled := false
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if !forceCalled {
+			_ = service.ForceStop(ctx)
+		}
+		_ = service.Close(ctx)
+	})
+
+	const leaseOwner = "host-api:old-lease-completion-failure"
+	tracker := newPendingShutdownTracker()
+	handle, accepted := server.executions.Begin(created.ID, executionAgentApproval, func(ctx context.Context) error {
+		return server.finalizeAgentApprovalShutdownTracked(
+			ctx,
+			created.ID,
+			*created.AgentApproval,
+			leaseOwner,
+			tracker,
+		)
+	})
+	if !accepted {
+		t.Fatal("execution registry rejected approval operation")
+	}
+	resumeErr := make(chan error, 1)
+	go func() {
+		defer handle.Done()
+		_, _, err := server.agentApprovals.ApproveAndResume(
+			withPendingShutdownTracker(service.executionCtx, tracker),
+			created.ID,
+			*created.AgentApproval,
+			"operator-lease-failure",
+			[]agentcore.ToolApprovalResolution{{
+				Index:      pending.Index,
+				ToolCallID: pending.ToolCallID,
+				Tool:       pending.Tool,
+				Allowed:    true,
+			}},
+			leaseOwner,
+		)
+		resumeErr <- err
+	}()
+
+	waitLifecycleSignal(t, checkpointStore.committed, "next pending checkpoint commit")
+	waitLifecycleSignal(t, checkpointStore.completeEntered, "old checkpoint lease completion")
+	committedNext := checkpointStore.snapshot(t)
+	nextIdentity := pendingShutdownIdentity{
+		CheckpointID:   committedNext.ID,
+		RunID:          committedNext.RunID,
+		TenantID:       committedNext.TenantID,
+		DefinitionHash: committedNext.DefinitionHash,
+	}
+	if tracked, ok := tracker.Snapshot(); !ok || tracked != nextIdentity {
+		t.Errorf("tracker = %+v, present=%t, want committed next identity %+v", tracked, ok, nextIdentity)
+	}
+	nextCheckpointBefore := getLifecycleCheckpoint(t, persistedCheckpoints, nextIdentity.CheckpointID)
+	oldBefore := getLifecycleCheckpoint(t, persistedCheckpoints, oldCheckpointID)
+	runBefore := getLifecycleAgentRun(t, server.runs, nextIdentity.RunID)
+	workflowBefore := getLifecycleTestRun(t, server.workflows, created.ID)
+	if nextCheckpointBefore.Status != runkit.CheckpointPending ||
+		oldBefore.Status != runkit.CheckpointLeased ||
+		oldBefore.LeaseOwner != leaseOwner ||
+		runBefore.Status != runkit.StatusRunning ||
+		!workflowHasPendingAgentApproval(workflowBefore, oldCheckpointID) {
+		t.Fatalf("pre-stop state old=%s/%q next=%s run=%s workflow=%s old_link=%t",
+			oldBefore.Status,
+			oldBefore.LeaseOwner,
+			nextCheckpointBefore.Status,
+			runBefore.Status,
+			workflowBefore.Status,
+			workflowHasPendingAgentApproval(workflowBefore, oldCheckpointID),
+		)
+	}
+
+	forceCalled = true
+	if err := service.ForceStop(t.Context()); err != nil {
+		t.Fatalf("ForceStop() error = %v", err)
+	}
+	if err := <-resumeErr; !errors.Is(err, goagentapproval.ErrLeaseCompletion) {
+		t.Fatalf("ApproveAndResume() error = %v, want ErrLeaseCompletion", err)
+	}
+	if doneErr := <-service.Done(); doneErr != nil {
+		t.Fatalf("Done() error after ForceStop() = %v", doneErr)
+	}
+
+	nextCheckpoint := getLifecycleCheckpoint(t, persistedCheckpoints, nextIdentity.CheckpointID)
+	oldCheckpoint := getLifecycleCheckpoint(t, persistedCheckpoints, oldCheckpointID)
+	agentRun := getLifecycleAgentRun(t, server.runs, nextIdentity.RunID)
+	workflow := getLifecycleTestRun(t, server.workflows, created.ID)
+	if nextCheckpoint.Status != runkit.CheckpointFailed ||
+		nextCheckpoint.FailureCode != hostShutdownTimeoutCode ||
+		oldCheckpoint.Status != runkit.CheckpointFailed ||
+		oldCheckpoint.FailureCode != hostShutdownTimeoutCode ||
+		agentRun.Status != runkit.StatusFailed ||
+		agentRun.Summary.Status != runkit.StatusFailed ||
+		agentRun.Summary.AbortReason != hostShutdownTimeoutCode ||
+		workflow.Status != workflowkit.StatusFailed ||
+		workflow.Error != hostShutdownTimeoutCode {
+		t.Fatalf("ForceStop left lease-failure state: old=%s/%s next=%s/%s run=%s/%s workflow=%s/%s",
+			oldCheckpoint.Status,
+			oldCheckpoint.FailureCode,
+			nextCheckpoint.Status,
+			nextCheckpoint.FailureCode,
+			agentRun.Status,
+			agentRun.Summary.AbortReason,
+			workflow.Status,
+			workflow.Error,
+		)
+	}
+	if got := resumer.calls.Load(); got != 1 {
+		t.Fatalf("resume calls = %d, want 1", got)
+	}
+	if agentRun.Summary.ToolCalls != 0 || len(agentRun.Summary.UsedTools) != 0 {
+		t.Fatalf("tool execution summary = %+v, want zero tool calls", agentRun.Summary)
+	}
+	if _, err := server.artifacts.Get(t.Context(), "artifact:"+created.ID+":review-action"); !errors.Is(err, artifactkit.ErrArtifactNotFound) {
+		t.Fatalf("review action artifact after ForceStop() = %v, want not found", err)
+	}
+}
+
 func TestHostAPIServiceForceStopReconcilesFailOnceResumedPendingShutdownState(t *testing.T) {
 	for _, failureSide := range []string{"checkpoint", "AgentRun", "workflow"} {
 		t.Run(failureSide, func(t *testing.T) {
@@ -1161,6 +1301,57 @@ func (s *committedPendingCheckpointBarrier) snapshot(t *testing.T) runkit.Approv
 	defer s.mu.Unlock()
 	if s.checkpoint.ID == "" {
 		t.Fatal("pending checkpoint barrier has no committed identity")
+	}
+	return s.checkpoint
+}
+
+type nextCheckpointOldLeaseFailureStore struct {
+	runkit.CheckpointStore
+	err             error
+	committed       chan struct{}
+	completeEntered chan struct{}
+	commitOnce      sync.Once
+	completeOnce    sync.Once
+	mu              sync.Mutex
+	checkpoint      runkit.ApprovalCheckpoint
+}
+
+func newNextCheckpointOldLeaseFailureStore(store runkit.CheckpointStore, err error) *nextCheckpointOldLeaseFailureStore {
+	return &nextCheckpointOldLeaseFailureStore{
+		CheckpointStore: store,
+		err:             err,
+		committed:       make(chan struct{}),
+		completeEntered: make(chan struct{}),
+	}
+}
+
+func (s *nextCheckpointOldLeaseFailureStore) CreateCheckpoint(ctx context.Context, checkpoint runkit.ApprovalCheckpoint) error {
+	if err := s.CheckpointStore.CreateCheckpoint(ctx, checkpoint); err != nil {
+		return err
+	}
+	s.commitOnce.Do(func() {
+		s.mu.Lock()
+		s.checkpoint = checkpoint
+		s.mu.Unlock()
+		close(s.committed)
+	})
+	return nil
+}
+
+func (s *nextCheckpointOldLeaseFailureStore) CompleteLease(ctx context.Context, _ runkit.CheckpointLeaseCompletion) error {
+	s.completeOnce.Do(func() {
+		close(s.completeEntered)
+	})
+	<-ctx.Done()
+	return s.err
+}
+
+func (s *nextCheckpointOldLeaseFailureStore) snapshot(t *testing.T) runkit.ApprovalCheckpoint {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.checkpoint.ID == "" {
+		t.Fatal("next checkpoint store has no committed identity")
 	}
 	return s.checkpoint
 }
