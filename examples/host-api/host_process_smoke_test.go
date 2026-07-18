@@ -94,11 +94,18 @@ type hostProcess struct {
 	baseURL  string
 	client   *http.Client
 	cmd      *exec.Cmd
-	output   lockedBuffer
+	stdout   *lockedBuffer
+	stderr   *lockedBuffer
+	output   *lockedBuffer
 	response lockedString
 
 	stopOnce sync.Once
 	stopErr  error
+
+	waitOnce     sync.Once
+	waitDone     chan struct{}
+	waitExitCode int
+	waitErr      error
 }
 
 type lockedBuffer struct {
@@ -224,7 +231,12 @@ func startHostProcessWithEnvAndRedactions(t *testing.T, binary, runtimeHome, iss
 		baseURL: "http://" + address,
 		client:  &http.Client{Timeout: time.Second},
 		cmd:     exec.Command(binary),
+		stdout:  &lockedBuffer{},
+		stderr:  &lockedBuffer{},
+		output:  &lockedBuffer{},
 	}
+	process.stdout.SetRedactions(redactions...)
+	process.stderr.SetRedactions(redactions...)
 	process.output.SetRedactions(redactions...)
 	environment := make(map[string]string, len(extraEnvironment)+9)
 	for name, value := range extraEnvironment {
@@ -244,12 +256,12 @@ func startHostProcessWithEnvAndRedactions(t *testing.T, binary, runtimeHome, iss
 		environment[name] = value
 	}
 	process.cmd.Env = overrideEnvironment(environment)
-	process.cmd.Stdout = &process.output
-	process.cmd.Stderr = &process.output
+	process.cmd.Stdout = io.MultiWriter(process.stdout, process.output)
+	process.cmd.Stderr = io.MultiWriter(process.stderr, process.output)
 	if err := process.cmd.Start(); err != nil {
 		t.Fatalf("start host process: %v", err)
 	}
-	t.Cleanup(func() { stopHostProcess(t, process) })
+	cleanupKilledHostProcess(t, process)
 	if err := waitForHostReady(process); err != nil {
 		stopHostProcess(t, process)
 		t.Fatalf("host process did not become ready: %v\n%s", err, process.output.String())
@@ -300,34 +312,106 @@ func smokeKeychainCleanupWithDelete(
 func stopHostProcess(t *testing.T, process *hostProcess) {
 	t.Helper()
 	process.stopOnce.Do(func() {
-		process.stopErr = stopHostCommand(process.cmd)
+		if err := signalHostProcess(process, os.Interrupt); err != nil {
+			process.stopErr = fmt.Errorf("interrupt host process: %w", err)
+			return
+		}
+		exitCode, err := waitHostProcess(process, 5*time.Second)
+		switch {
+		case err != nil:
+			process.stopErr = err
+		case exitCode != 0:
+			process.stopErr = fmt.Errorf("host process exit code = %d, want 0", exitCode)
+		}
 	})
 	if process.stopErr != nil {
 		t.Fatalf("stop host process: %v\n%s", process.stopErr, process.output.String())
 	}
 }
 
-func stopHostCommand(command *exec.Cmd) error {
-	if command.ProcessState != nil {
-		return nil
+func signalHostProcess(process *hostProcess, signal os.Signal) error {
+	if process == nil || process.cmd == nil || process.cmd.Process == nil {
+		return errors.New("host process is not started")
 	}
-	if err := command.Process.Signal(os.Interrupt); err != nil && !errors.Is(err, os.ErrProcessDone) {
-		return fmt.Errorf("interrupt host process: %w", err)
+	if err := process.cmd.Process.Signal(signal); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return err
 	}
-	done := make(chan error, 1)
-	go func() { done <- command.Wait() }()
+	return nil
+}
+
+var errHostProcessWaitTimeout = errors.New("timed out waiting for host process")
+
+func waitHostProcess(process *hostProcess, timeout time.Duration) (int, error) {
+	if process == nil || process.cmd == nil {
+		return -1, errors.New("host process command is nil")
+	}
+	process.waitOnce.Do(func() {
+		process.waitDone = make(chan struct{})
+		go func() {
+			err := process.cmd.Wait()
+			var exitError *exec.ExitError
+			if errors.As(err, &exitError) {
+				err = nil
+			}
+			process.waitExitCode = -1
+			if process.cmd.ProcessState != nil {
+				process.waitExitCode = process.cmd.ProcessState.ExitCode()
+			}
+			process.waitErr = err
+			close(process.waitDone)
+		}()
+	})
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
-	case <-done:
-		return nil
-	case <-time.After(5 * time.Second):
-		if err := command.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
-			return fmt.Errorf("kill host process: %w", err)
-		}
-		if err := <-done; err != nil {
-			return fmt.Errorf("wait for killed host process: %w", err)
-		}
-		return nil
+	case <-process.waitDone:
+		return process.waitExitCode, process.waitErr
+	case <-timer.C:
+		return -1, fmt.Errorf("%w after %s", errHostProcessWaitTimeout, timeout)
 	}
+}
+
+type hostProcessCleanupReporter interface {
+	Helper()
+	Cleanup(func())
+	Errorf(string, ...any)
+}
+
+func cleanupKilledHostProcess(t *testing.T, process *hostProcess) {
+	t.Helper()
+	cleanupKilledHostProcessWithTimeout(t, process, 5*time.Second)
+}
+
+func cleanupKilledHostProcessWithTimeout(
+	t hostProcessCleanupReporter,
+	process *hostProcess,
+	timeout time.Duration,
+) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := signalHostProcess(process, os.Interrupt); err != nil {
+			t.Errorf("signal host process during cleanup: %v", err)
+		}
+		if _, err := waitHostProcess(process, timeout); err == nil {
+			return
+		} else if !errors.Is(err, errHostProcessWaitTimeout) {
+			t.Errorf("wait host process during cleanup: %v", err)
+			return
+		}
+
+		killErr := process.cmd.Process.Kill()
+		if errors.Is(killErr, os.ErrProcessDone) {
+			killErr = nil
+		}
+		_, waitErr := waitHostProcess(process, 5*time.Second)
+		t.Errorf(
+			"host process cleanup required kill after %s (kill error: %v; reap error: %v)",
+			timeout,
+			killErr,
+			waitErr,
+		)
+	})
 }
 
 func waitForHostReady(process *hostProcess) error {
