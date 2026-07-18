@@ -55,7 +55,9 @@ type Config struct {
 type Server struct {
 	artifacts               artifactkit.Store
 	runs                    runkit.Store
+	runCloser               io.Closer
 	workflows               workflowkit.Store
+	workflowCloser          io.Closer
 	queries                 workflowkit.WorkflowQueryStore
 	queue                   workflowkit.QueueLeaseStore
 	executor                *workflowkit.Executor
@@ -76,6 +78,11 @@ type Server struct {
 	agentApprovalJanitorCfg agentApprovalJanitorConfig
 	janitorStart            sync.Once
 	janitorDone             chan struct{}
+	closeMu                 sync.Mutex
+	workflowClosed          bool
+	workflowCloseErr        error
+	runClosed               bool
+	runCloseErr             error
 }
 
 type createWorkflowRequest struct {
@@ -503,7 +510,9 @@ func NewServer(config Config) (*Server, error) {
 	server := &Server{
 		artifacts:               artifacts,
 		runs:                    runs,
+		runCloser:               runs,
 		workflows:               workflows,
+		workflowCloser:          workflows,
 		queries:                 workflows,
 		queue:                   workflows,
 		executions:              newExecutionRegistry(),
@@ -530,6 +539,39 @@ func NewServer(config Config) (*Server, error) {
 		finalizeStep{artifacts: artifacts},
 	})
 	return server, nil
+}
+
+func (s *Server) Close(ctx context.Context) error {
+	if s.executions != nil {
+		if err := s.executions.Wait(ctx); err != nil {
+			return err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	if !s.workflowClosed && s.workflowCloser != nil {
+		s.workflowClosed = true
+		s.workflowCloseErr = s.workflowCloser.Close()
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(s.workflowCloseErr, s.runCloseErr, err)
+	}
+	if !s.runClosed && s.runCloser != nil {
+		s.runClosed = true
+		s.runCloseErr = s.runCloser.Close()
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(s.workflowCloseErr, s.runCloseErr, err)
+	}
+	return errors.Join(s.workflowCloseErr, s.runCloseErr)
 }
 
 func resolveRuntimeConfig(config Config) (Config, error) {
