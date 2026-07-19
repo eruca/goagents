@@ -5,13 +5,51 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 consumer="$repo_root/scripts/verify-release-consumer.sh"
 workdir="$(mktemp -d "${TMPDIR:-/tmp}/goagents-release-consumer-test.XXXXXX")"
 repo_tmpdir=""
-cleanup() {
-  rm -rf "$workdir"
-  if [[ -n "$repo_tmpdir" ]]; then
-    rm -rf "$repo_tmpdir"
+remove_owned_tree() {
+  local owned_path="$1"
+  local cleanup_status=0
+
+  # The harness calls this only for directories it created with mktemp.
+  [[ -d "$owned_path" ]] || return 0
+  if ! chmod -R u+w "$owned_path"; then
+    cleanup_status=1
   fi
+  if ! rm -rf "$owned_path"; then
+    cleanup_status=1
+  fi
+  return "$cleanup_status"
+}
+cleanup() {
+  local command_status=$?
+  local cleanup_status=0
+
+  if ! remove_owned_tree "$workdir"; then
+    cleanup_status=1
+  fi
+  if [[ -n "$repo_tmpdir" ]] && ! remove_owned_tree "$repo_tmpdir"; then
+    cleanup_status=1
+  fi
+  if (( cleanup_status != 0 )); then
+    printf 'release consumer test cleanup failed\n' >&2
+    return 1
+  fi
+  return "$command_status"
 }
 trap cleanup EXIT
+
+cleanup_probe="$workdir/cleanup-probe"
+mkdir -p "$cleanup_probe/readonly"
+printf 'read-only cleanup probe\n' >"$cleanup_probe/readonly/marker"
+chmod 444 "$cleanup_probe/readonly/marker"
+chmod 555 "$cleanup_probe/readonly"
+if ! remove_owned_tree "$cleanup_probe"; then
+  printf 'read-only outer cleanup probe failed\n' >&2
+  exit 1
+fi
+if [[ -e "$cleanup_probe" ]]; then
+  printf 'read-only outer cleanup probe left a residue\n' >&2
+  exit 1
+fi
 
 fake_bin="$workdir/bin"
 mkdir -p "$fake_bin"
