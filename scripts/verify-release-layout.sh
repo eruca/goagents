@@ -6,19 +6,19 @@ MODULE_PREFIX="github.com/eruca/goagents/"
 APACHE_LICENSE_SHA256="cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
 
 published_modules=(
-  "goagent|${MODULE_PREFIX}goagent|v0.1.0|goagent/v0.1.0"
-  "hostkit|${MODULE_PREFIX}hostkit|v0.1.0|hostkit/v0.1.0"
-  "artifactkit|${MODULE_PREFIX}artifactkit|v0.1.0|artifactkit/v0.1.0"
-  "contextkit|${MODULE_PREFIX}contextkit|v0.1.0|contextkit/v0.1.0"
-  "evalkit|${MODULE_PREFIX}evalkit|v0.1.0|evalkit/v0.1.0"
-  "ocrs|${MODULE_PREFIX}ocrs|v0.1.0|ocrs/v0.1.0"
-  "workflowkit|${MODULE_PREFIX}workflowkit|v0.1.1|workflowkit/v0.1.1"
-  "llmkit|${MODULE_PREFIX}llmkit|v0.1.0|llmkit/v0.1.0"
-  "mcpkit|${MODULE_PREFIX}mcpkit|v0.1.0|mcpkit/v0.1.0"
-  "runkit|${MODULE_PREFIX}runkit|v0.1.1|runkit/v0.1.1"
-  "skillkit|${MODULE_PREFIX}skillkit|v0.1.0|skillkit/v0.1.0"
-  "workflowkit/agentstep|${MODULE_PREFIX}workflowkit/agentstep|v0.1.0|workflowkit/agentstep/v0.1.0"
-  "mcpkit/officialsdk|${MODULE_PREFIX}mcpkit/officialsdk|v0.1.0|mcpkit/officialsdk/v0.1.0"
+  "goagent|${MODULE_PREFIX}goagent|v0.1.0|goagent/v0.1.0|existing"
+  "hostkit|${MODULE_PREFIX}hostkit|v0.1.0|hostkit/v0.1.0|release-delta"
+  "artifactkit|${MODULE_PREFIX}artifactkit|v0.1.0|artifactkit/v0.1.0|existing"
+  "contextkit|${MODULE_PREFIX}contextkit|v0.1.0|contextkit/v0.1.0|existing"
+  "evalkit|${MODULE_PREFIX}evalkit|v0.1.0|evalkit/v0.1.0|existing"
+  "ocrs|${MODULE_PREFIX}ocrs|v0.1.0|ocrs/v0.1.0|existing"
+  "workflowkit|${MODULE_PREFIX}workflowkit|v0.1.1|workflowkit/v0.1.1|release-delta"
+  "llmkit|${MODULE_PREFIX}llmkit|v0.1.0|llmkit/v0.1.0|existing"
+  "mcpkit|${MODULE_PREFIX}mcpkit|v0.1.0|mcpkit/v0.1.0|existing"
+  "runkit|${MODULE_PREFIX}runkit|v0.1.1|runkit/v0.1.1|release-delta"
+  "skillkit|${MODULE_PREFIX}skillkit|v0.1.0|skillkit/v0.1.0|existing"
+  "workflowkit/agentstep|${MODULE_PREFIX}workflowkit/agentstep|v0.1.0|workflowkit/agentstep/v0.1.0|existing"
+  "mcpkit/officialsdk|${MODULE_PREFIX}mcpkit/officialsdk|v0.1.0|mcpkit/officialsdk/v0.1.0|existing"
 )
 
 release_delta_tags=(
@@ -182,9 +182,13 @@ check_workspace_replace() {
 expected_module_dirs() {
   local spec
   local dir
+  local module
+  local version
+  local tag
+  local release_status
 
   for spec in "${published_modules[@]}"; do
-    IFS='|' read -r dir _ <<<"$spec"
+    IFS='|' read -r dir module version tag release_status <<<"$spec"
     printf '%s\n' "$dir"
   done
   for spec in "${example_modules[@]}"; do
@@ -221,9 +225,11 @@ expected_workspace_replaces() {
   local dir
   local module
   local version
+  local tag
+  local release_status
 
   for spec in "${published_modules[@]}"; do
-    IFS='|' read -r dir module version _ <<<"$spec"
+    IFS='|' read -r dir module version tag release_status <<<"$spec"
     printf '%s %s => ./%s\n' "$module" "$version" "$dir"
   done
 }
@@ -265,24 +271,35 @@ check_release_manifest_sets() {
 }
 
 check_release_delta_tags() {
-  local requested
   local spec
+  local dir
+  local module
+  local version
   local tag
-  local found
+  local release_status
+  local difference
+  local -a manifest_delta_tags=()
 
-  for requested in "${release_delta_tags[@]}"; do
-    found=0
-    for spec in "${published_modules[@]}"; do
-      IFS='|' read -r _ _ _ tag <<<"$spec"
-      if [[ "$tag" == "$requested" ]]; then
-        found=1
-        break
-      fi
-    done
-    if (( found == 0 )); then
-      report_error "release delta tag is not in the module manifest: $requested"
-    fi
+  for spec in "${published_modules[@]}"; do
+    IFS='|' read -r dir module version tag release_status <<<"$spec"
+    case "$release_status" in
+      existing)
+        ;;
+      release-delta)
+        manifest_delta_tags+=("$tag")
+        ;;
+      *)
+        report_error "$dir: unknown release status: $release_status"
+        ;;
+    esac
   done
+
+  if ! difference="$(diff -u \
+    <(printf '%s\n' "${release_delta_tags[@]}" | LC_ALL=C sort -u) \
+    <(printf '%s\n' "${manifest_delta_tags[@]}" | LC_ALL=C sort -u))"; then
+    report_error "release delta set mismatch"
+    printf '%s\n' "$difference" >&2
+  fi
 }
 
 check_example_replaces() {
@@ -340,7 +357,7 @@ check_release_manifest_sets
 check_release_delta_tags
 
 for spec in "${published_modules[@]}"; do
-  IFS='|' read -r dir module version tag <<<"$spec"
+  IFS='|' read -r dir module version tag release_status <<<"$spec"
   if [[ "$tag" != "$dir/$version" ]]; then
     report_error "$dir: tag is $tag, want $dir/$version"
   fi
