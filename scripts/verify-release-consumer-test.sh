@@ -4,8 +4,12 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 consumer="$repo_root/scripts/verify-release-consumer.sh"
 workdir="$(mktemp -d "${TMPDIR:-/tmp}/goagents-release-consumer-test.XXXXXX")"
+repo_tmpdir=""
 cleanup() {
   rm -rf "$workdir"
+  if [[ -n "$repo_tmpdir" ]]; then
+    rm -rf "$repo_tmpdir"
+  fi
 }
 trap cleanup EXIT
 
@@ -56,6 +60,51 @@ export FAKE_MODULE_PATH="github.com/eruca/goagents/hostkit"
 export FAKE_RESOLVED_VERSION="v0.0.0-20260719000000-bbbbbbbbbbbb"
 
 failures=0
+candidate="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+assert_repo_tmpdir_is_rejected() {
+  local tmpdir="$1"
+  local label="$2"
+  local log="$workdir/$label.log"
+
+  : >"$FAKE_GO_CALLS"
+  if TMPDIR="$tmpdir" "$consumer" hostkit "$candidate" pseudo >"$log" 2>&1; then
+    printf '%s repo TMPDIR unexpectedly succeeded\n' "$label" >&2
+    failures=$((failures + 1))
+  fi
+  if [[ -s "$FAKE_GO_CALLS" ]]; then
+    printf '%s repo TMPDIR reached the go command\n' "$label" >&2
+    failures=$((failures + 1))
+  fi
+  if grep -Fq 'PASS' "$log"; then
+    printf '%s repo TMPDIR emitted PASS\n' "$label" >&2
+    failures=$((failures + 1))
+  fi
+  if grep -Fq "$repo_root" "$log" || grep -Fq "$repo_tmpdir" "$log" || \
+    grep -Fq "$tmpdir" "$log" || grep -Fq "$workdir" "$log"
+  then
+    printf '%s repo TMPDIR exposed a local path\n' "$label" >&2
+    failures=$((failures + 1))
+  fi
+  if [[ ! -f "$repo_tmpdir/marker" ]]; then
+    printf '%s repo TMPDIR removed the caller marker\n' "$label" >&2
+    failures=$((failures + 1))
+  fi
+  if find "$repo_tmpdir" -mindepth 1 -maxdepth 1 ! -name marker -print -quit | grep -q .; then
+    printf '%s repo TMPDIR left its temporary child behind\n' "$label" >&2
+    failures=$((failures + 1))
+  fi
+}
+
+repo_tmpdir="$(mktemp -d "$repo_root/.goagents-release-consumer-test.XXXXXX")"
+printf 'caller-marker\n' >"$repo_tmpdir/marker"
+export FAKE_RESOLVED_VERSION="v0.0.0-20260719000000-aaaaaaaaaaaa"
+assert_repo_tmpdir_is_rejected "$repo_tmpdir" direct
+
+repo_tmpdir_link="$workdir/repo-tmpdir-link"
+ln -s "$repo_tmpdir" "$repo_tmpdir_link"
+assert_repo_tmpdir_is_rejected "$repo_tmpdir_link" symlink
+
 invalid_log="$workdir/invalid.log"
 : >"$FAKE_GO_CALLS"
 if "$consumer" hostkit HEAD pseudo >"$invalid_log" 2>&1; then
@@ -73,7 +122,7 @@ fi
 
 mismatch_log="$workdir/mismatch.log"
 : >"$FAKE_GO_CALLS"
-candidate="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+export FAKE_RESOLVED_VERSION="v0.0.0-20260719000000-bbbbbbbbbbbb"
 if "$consumer" hostkit "$candidate" pseudo >"$mismatch_log" 2>&1; then
   printf 'pseudo-version revision mismatch unexpectedly succeeded\n' >&2
   failures=$((failures + 1))

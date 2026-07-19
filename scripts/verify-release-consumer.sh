@@ -29,11 +29,20 @@ if [[ "$expected_version" == "pseudo" && ! "$ref" =~ ^[0-9a-f]{40}$ ]]; then
   exit 2
 fi
 
+script_dir="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+repo_root="$(cd -P "$script_dir/.." && pwd -P)"
 workdir="$(mktemp -d "${TMPDIR:-/tmp}/goagents-release-consumer.XXXXXX")"
 cleanup() {
   rm -rf "$workdir"
 }
 trap cleanup EXIT
+
+# Resolve TMPDIR symlinks before enforcing the repository boundary.
+workdir="$(cd -P "$workdir" && pwd -P)"
+if [[ "$workdir" == "$repo_root" || "$workdir" == "$repo_root/"* ]]; then
+  printf 'release consumer workdir must be outside the repository\n' >&2
+  exit 1
+fi
 
 cd "$workdir"
 export GOMODCACHE="$workdir/modcache"
