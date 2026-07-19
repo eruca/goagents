@@ -25,7 +25,17 @@ if [[ "$1" == "mod" && "$2" == "init" ]]; then
   printf 'module example.invalid/release-consumer-test\n\ngo 1.24\n' >go.mod
   exit 0
 fi
-if [[ "$1" == "get" || ( "$1" == "mod" && "$2" == "tidy" ) || "$1" == "test" ]]; then
+if [[ "$1" == "get" ]]; then
+  if [[ "${FAKE_CREATE_READONLY_MODCACHE:-0}" == "1" ]]; then
+    readonly_module="$GOMODCACHE/example.invalid/readonly@v0.0.0"
+    mkdir -p "$readonly_module"
+    printf 'readonly module cache entry\n' >"$readonly_module/go.mod"
+    chmod 444 "$readonly_module/go.mod"
+    chmod 555 "$readonly_module"
+  fi
+  exit 0
+fi
+if [[ ( "$1" == "mod" && "$2" == "tidy" ) || "$1" == "test" ]]; then
   exit 0
 fi
 if [[ "$1" == "list" && "$2" == "-m" && "$3" == "all" ]]; then
@@ -104,6 +114,21 @@ assert_repo_tmpdir_is_rejected "$repo_tmpdir" direct
 repo_tmpdir_link="$workdir/repo-tmpdir-link"
 ln -s "$repo_tmpdir" "$repo_tmpdir_link"
 assert_repo_tmpdir_is_rejected "$repo_tmpdir_link" symlink
+
+consumer_tmpdir="$workdir/consumer-tmp"
+mkdir -p "$consumer_tmpdir"
+readonly_cleanup_log="$workdir/readonly-cleanup.log"
+export FAKE_RESOLVED_VERSION="v0.0.0-20260719000000-aaaaaaaaaaaa"
+if ! FAKE_CREATE_READONLY_MODCACHE=1 TMPDIR="$consumer_tmpdir" \
+  "$consumer" hostkit "$candidate" pseudo >"$readonly_cleanup_log" 2>&1
+then
+  printf 'read-only module cache cleanup unexpectedly failed\n' >&2
+  failures=$((failures + 1))
+fi
+if find "$consumer_tmpdir" -mindepth 1 -print -quit | grep -q .; then
+  printf 'read-only module cache cleanup left its temporary child behind\n' >&2
+  failures=$((failures + 1))
+fi
 
 invalid_log="$workdir/invalid.log"
 : >"$FAKE_GO_CALLS"

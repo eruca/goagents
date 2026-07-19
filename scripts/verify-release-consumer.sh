@@ -33,7 +33,23 @@ script_dir="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd -P "$script_dir/.." && pwd -P)"
 workdir="$(mktemp -d "${TMPDIR:-/tmp}/goagents-release-consumer.XXXXXX")"
 cleanup() {
-  rm -rf "$workdir"
+  local command_status=$?
+  local cleanup_status=0
+
+  if [[ -d "$workdir" ]]; then
+    # Go module cache directories are intentionally read-only after extraction.
+    if ! chmod -R u+w "$workdir"; then
+      cleanup_status=1
+    fi
+    if ! rm -rf "$workdir"; then
+      cleanup_status=1
+    fi
+  fi
+  if (( cleanup_status != 0 )); then
+    printf 'release consumer cleanup failed\n' >&2
+    return 1
+  fi
+  return "$command_status"
 }
 trap cleanup EXIT
 
