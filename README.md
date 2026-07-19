@@ -92,7 +92,7 @@ The historical MVP GO decision and its accepted P2 items remain recorded in
 the [v0.1.0 final acceptance record](docs/superpowers/specs/2026-07-15-mvp-final-acceptance.md).
 Both lifecycle P2 items are now implemented; the current selective-module
 release boundary is recorded in the
-[v0.1.1 release-readiness record](docs/superpowers/specs/2026-07-18-v0.1.1-release-readiness.md).
+[v0.1.1 publication record](docs/superpowers/specs/2026-07-18-v0.1.1-publication.md).
 
 ## License
 
