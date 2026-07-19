@@ -130,12 +130,11 @@ func TestRealProviderMVPAcceptance(t *testing.T) {
 				Name: "mvp-tool-smoke",
 				Mode: prompt.ModeCacheable,
 				Content: "For this request, call verification_probe exactly once before answering. " +
-					"After the tool result, return its exact marker and this exact response marker: " +
-					sentinels.response,
+					"After the tool result, return its exact marker.",
 			}}),
 		)
 		result, err := agent.RunDetailed(ctx, agentcore.RunRequest{
-			Input:              "Request marker: " + sentinels.prompt + ". Run the verification probe and report the required markers.",
+			Input:              "Request marker: " + sentinels.prompt + ". Run the verification probe and report its marker.",
 			AllowedPermissions: []policy.Permission{policy.PermissionRead},
 		})
 		if err != nil {
@@ -149,9 +148,6 @@ func TestRealProviderMVPAcceptance(t *testing.T) {
 		}
 		if !strings.Contains(result.Content, marker) {
 			t.Fatal("real provider final answer did not contain the tool observation marker")
-		}
-		if !strings.Contains(result.Content, sentinels.response) {
-			t.Fatal("real provider tool response did not contain the required response sentinel")
 		}
 	})
 

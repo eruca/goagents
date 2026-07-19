@@ -21,6 +21,7 @@ import (
 const (
 	realProviderTrialAccountAlias = "qwen-local-trial-account"
 	realProviderTrialModelAlias   = "qwen-local-trial"
+	realProviderTrialSkillName    = "real-provider-sentinel"
 )
 
 type realProviderTrialSensitiveValue struct {
@@ -60,6 +61,27 @@ func TestRealProviderTrialSensitiveValuesIncludesModel(t *testing.T) {
 	t.Fatal("real Provider trial sensitive values do not include the configured model")
 }
 
+func TestRealProviderTrialSkillPromptProjectsSentinels(t *testing.T) {
+	sentinels := realProviderSentinels{
+		prompt:   "prompt-test-marker",
+		response: "response-test-marker",
+	}
+
+	source := realProviderTrialSkillPrompt(sentinels)
+	if !strings.Contains(source, sentinels.prompt) {
+		t.Fatal("real Provider trial Skill prompt does not contain the prompt sentinel")
+	}
+	if !strings.Contains(source, sentinels.response) {
+		t.Fatal("real Provider trial Skill prompt does not require the response sentinel")
+	}
+}
+
+func realProviderTrialSkillPrompt(sentinels realProviderSentinels) string {
+	return "---\nname: " + realProviderTrialSkillName + "\ndescription: Local real Provider trial instructions.\n---\n# Instructions\n" +
+		"The request marker is " + sentinels.prompt + ". Do not repeat it. " +
+		"Answer directly without tools and include this exact response marker: " + sentinels.response + ".\n"
+}
+
 func TestHostAPIProcessRealProviderLocalTrial(t *testing.T) {
 	providerConfig := requireRealProviderConfig(t)
 	sentinels := requireRealProviderSentinels(t)
@@ -68,12 +90,14 @@ func TestHostAPIProcessRealProviderLocalTrial(t *testing.T) {
 	binary := buildHostBinary(t)
 	runtimeHome := t.TempDir()
 	writeHostRealProviderTrialConfig(t, runtimeHome, providerConfig)
+	skillRoot := t.TempDir()
+	writeHostAPISkill(t, skillRoot, realProviderTrialSkillName, realProviderTrialSkillPrompt(sentinels), nil)
 	token := oidc.mintToken(t, "operator-local-trial", "host-api", time.Now().Add(time.Hour))
 	keychainService := fmt.Sprintf("%s.smoke.real-provider.%d", localApprovalKeychainService, time.Now().UnixNano())
 	cleanupKeychain := smokeKeychainCleanup(t, keychainService, localApprovalKeyID)
 	t.Cleanup(cleanupKeychain)
 	environment := map[string]string{
-		hostAPISkillRootEnv:     "",
+		hostAPISkillRootEnv:     skillRoot,
 		"OPENAI_COMPAT_API_KEY": providerConfig.APIKey,
 	}
 	sensitiveValues := realProviderTrialSensitiveValues(providerConfig, token, sentinels)
@@ -90,17 +114,20 @@ func TestHostAPIProcessRealProviderLocalTrial(t *testing.T) {
 	}
 
 	created, status := processJSON[workflowResponse](t, first, http.MethodPost, "/workflows", map[string]any{
-		"id": "wf-real-provider-local-trial",
-		"input": "Request marker: " + sentinels.prompt + ". " +
-			"Return this exact response marker without calling tools: " + sentinels.response,
+		"id":    "wf-real-provider-local-trial",
+		"input": "Request marker: " + sentinels.prompt + ". Complete the local trial without calling tools.",
+		"skill_refs": []map[string]string{{
+			"name": realProviderTrialSkillName,
+		}},
 		"task_profile": map[string]any{
 			"complexity":      "hard",
 			"failure_cost":    "high",
 			"privacy":         "cloud_allowed",
 			"needs_reasoning": true,
+			"needs_tools":     false,
 		},
 	}, "")
-	if status != http.StatusAccepted || created.Status != string(workflowkit.StatusWaitingApproval) || created.AgentApproval != nil || created.InputRef == "" || created.OutputRef == "" || created.AgentRunID == "" || created.ApprovalRef == "" || created.WaitingReason == "" || !reflect.DeepEqual(created.Completed, []string{"ingest", "agent_review"}) {
+	if status != http.StatusAccepted || created.Status != string(workflowkit.StatusWaitingApproval) || created.AgentApproval != nil || created.InputRef == "" || created.OutputRef == "" || created.AgentRunID == "" || created.ApprovalRef == "" || created.WaitingReason == "" || len(created.SkillRefs) != 1 || created.SkillRefs[0].Name != realProviderTrialSkillName || created.SkillRefs[0].Digest == "" || !reflect.DeepEqual(created.Completed, []string{"ingest", "agent_review"}) {
 		t.Fatalf("create status=%d workflow=%#v, want persisted final approval wait", status, created)
 	}
 	artifactStore, err := artifactkit.NewFileStore(filepath.Join(runtimeHome, "artifacts"))
