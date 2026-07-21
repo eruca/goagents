@@ -3,6 +3,7 @@ package pgstore
 import (
 	"context"
 	"errors"
+	"math"
 	"reflect"
 	"strings"
 	"sync"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/eruca/goagents/memorykit"
+	"github.com/google/uuid"
 )
 
 const extractionTenantID = "tenant-extraction"
@@ -57,6 +59,27 @@ func TestExtractionJobRejectsOversizedDerivedActorAndLeaseOverflow(t *testing.T)
 	overflowNow := time.Unix(int64(^uint64(0)>>1), 0)
 	if _, err := store.ClaimExtraction(context.Background(), "worker-1", time.Minute, 3, overflowNow); !errors.Is(err, memorykit.ErrInvalidMemory) {
 		t.Fatalf("overflow claim = %v, want ErrInvalidMemory", err)
+	}
+	if _, err := store.ClaimExtraction(context.Background(), "worker-1", time.Nanosecond, 3, time.Now()); !errors.Is(err, memorykit.ErrInvalidMemory) {
+		t.Fatalf("sub-microsecond claim = %v, want ErrInvalidMemory", err)
+	}
+	if _, err := store.ClaimExtraction(context.Background(), "worker-1", time.Minute, int(math.MaxInt32)+1, time.Now()); !errors.Is(err, memorykit.ErrInvalidMemory) {
+		t.Fatalf("oversized max-attempt claim = %v, want ErrInvalidMemory", err)
+	}
+
+	validJob := extractionJobFixture("81333333-3333-4333-8333-333333333333")
+	if err := store.EnqueueExtraction(context.Background(), validJob); err != nil {
+		t.Fatal(err)
+	}
+	leased, err := store.ClaimExtraction(context.Background(), "worker-1", time.Minute, 3, validJob.CreatedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteExtraction(context.Background(), validJob.ID, "worker-1", 0, validJob.CreatedAt); !errors.Is(err, memorykit.ErrInvalidMemory) {
+		t.Fatalf("zero attempt complete = %v, want ErrInvalidMemory", err)
+	}
+	if err := store.FailExtraction(context.Background(), validJob.ID, "worker-1", leased.Attempts, "source_read_failed", int(math.MaxInt32)+1, validJob.CreatedAt); !errors.Is(err, memorykit.ErrInvalidMemory) {
+		t.Fatalf("oversized max-attempt fail = %v, want ErrInvalidMemory", err)
 	}
 }
 
@@ -131,14 +154,57 @@ func TestExtractionJobWrongOwnerCannotCompleteOrFail(t *testing.T) {
 	if err := store.EnqueueExtraction(context.Background(), job); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.ClaimExtraction(context.Background(), "worker-1", time.Minute, 3, job.CreatedAt); err != nil {
+	leased, err := store.ClaimExtraction(context.Background(), "worker-1", time.Minute, 3, job.CreatedAt)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CompleteExtraction(context.Background(), job.ID, "worker-2", job.CreatedAt.Add(time.Second)); !errors.Is(err, memorykit.ErrConflict) {
+	if err := store.CompleteExtraction(context.Background(), job.ID, "worker-2", leased.Attempts, job.CreatedAt.Add(time.Second)); !errors.Is(err, memorykit.ErrConflict) {
 		t.Fatalf("wrong-owner CompleteExtraction() = %v, want ErrConflict", err)
 	}
-	if err := store.FailExtraction(context.Background(), job.ID, "worker-2", "source_read_failed", 3, job.CreatedAt.Add(time.Second)); !errors.Is(err, memorykit.ErrConflict) {
+	if err := store.FailExtraction(context.Background(), job.ID, "worker-2", leased.Attempts, "source_read_failed", 3, job.CreatedAt.Add(time.Second)); !errors.Is(err, memorykit.ErrConflict) {
 		t.Fatalf("wrong-owner FailExtraction() = %v, want ErrConflict", err)
+	}
+}
+
+func TestExtractionJobLeaseFencingRejectsExpiredAndStaleAttemptForSameWorker(t *testing.T) {
+	tests := []struct {
+		name string
+		id   string
+		run  func(*Store, memorykit.ExtractionJob, int, time.Time) error
+	}{
+		{name: "complete", id: "84555555-5555-4555-8555-555555555555", run: func(store *Store, job memorykit.ExtractionJob, attempt int, now time.Time) error {
+			return store.CompleteExtraction(context.Background(), job.ID, "worker-1", attempt, now)
+		}},
+		{name: "fail", id: "84666666-6666-4666-8666-666666666666", run: func(store *Store, job memorykit.ExtractionJob, attempt int, now time.Time) error {
+			return store.FailExtraction(context.Background(), job.ID, "worker-1", attempt, "source_read_failed", 3, now)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := openExtractionStore(t)
+			job := extractionJobFixture(test.id)
+			if err := store.EnqueueExtraction(context.Background(), job); err != nil {
+				t.Fatal(err)
+			}
+			first, err := store.ClaimExtraction(context.Background(), "worker-1", time.Minute, 3, job.CreatedAt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := test.run(store, first, first.Attempts, first.LeaseUntil); !errors.Is(err, memorykit.ErrConflict) {
+				t.Fatalf("expired attempt transition = %v, want ErrConflict", err)
+			}
+			second, err := store.ClaimExtraction(context.Background(), "worker-1", time.Minute, 3, first.LeaseUntil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			transitionNow := first.LeaseUntil.Add(time.Second)
+			if err := test.run(store, second, first.Attempts, transitionNow); !errors.Is(err, memorykit.ErrConflict) {
+				t.Fatalf("stale attempt transition = %v, want ErrConflict", err)
+			}
+			if err := test.run(store, second, second.Attempts, transitionNow); err != nil {
+				t.Fatalf("current attempt transition = %v", err)
+			}
+		})
 	}
 }
 
@@ -152,7 +218,7 @@ func TestExtractionJobFailureRetriesThenScrubsTerminalSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.FailExtraction(context.Background(), job.ID, first.LeaseOwner, "candidate_extract_failed", 2, job.CreatedAt.Add(time.Second)); err != nil {
+	if err := store.FailExtraction(context.Background(), job.ID, first.LeaseOwner, first.Attempts, "candidate_extract_failed", 2, job.CreatedAt.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	status, attempts, source, failure := extractionJobState(t, store, job.ID)
@@ -164,7 +230,7 @@ func TestExtractionJobFailureRetriesThenScrubsTerminalSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.FailExtraction(context.Background(), job.ID, second.LeaseOwner, "candidate_write_failed", 2, job.CreatedAt.Add(3*time.Second)); err != nil {
+	if err := store.FailExtraction(context.Background(), job.ID, second.LeaseOwner, second.Attempts, "candidate_write_failed", 2, job.CreatedAt.Add(3*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	status, attempts, source, failure = extractionJobState(t, store, job.ID)
@@ -202,7 +268,7 @@ func TestExtractionJobCompletionKeepsScrubbedIdempotencyTombstone(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CompleteExtraction(context.Background(), job.ID, leased.LeaseOwner, job.CreatedAt.Add(time.Second)); err != nil {
+	if err := store.CompleteExtraction(context.Background(), job.ID, leased.LeaseOwner, leased.Attempts, job.CreatedAt.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.EnqueueExtraction(context.Background(), job); err != nil {
@@ -229,10 +295,11 @@ func TestExtractionJobRejectsRawFailureText(t *testing.T) {
 	if err := store.EnqueueExtraction(context.Background(), job); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.ClaimExtraction(context.Background(), "worker-1", time.Minute, 3, job.CreatedAt); err != nil {
+	leased, err := store.ClaimExtraction(context.Background(), "worker-1", time.Minute, 3, job.CreatedAt)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.FailExtraction(context.Background(), job.ID, "worker-1", "provider said secret text", 3, job.CreatedAt.Add(time.Second)); !errors.Is(err, memorykit.ErrInvalidMemory) {
+	if err := store.FailExtraction(context.Background(), job.ID, "worker-1", leased.Attempts, "provider said secret text", 3, job.CreatedAt.Add(time.Second)); !errors.Is(err, memorykit.ErrInvalidMemory) {
 		t.Fatalf("raw FailExtraction() = %v, want ErrInvalidMemory", err)
 	}
 	status, _, _, failure := extractionJobState(t, store, job.ID)
@@ -255,9 +322,9 @@ func TestExtractionJobOperationsPreserveCancellation(t *testing.T) {
 			_, err := store.ClaimExtraction(ctx, "worker-1", time.Minute, 3, job.CreatedAt)
 			return err
 		}},
-		{name: "complete", run: func() error { return store.CompleteExtraction(ctx, job.ID, "worker-1", job.CreatedAt) }},
+		{name: "complete", run: func() error { return store.CompleteExtraction(ctx, job.ID, "worker-1", 1, job.CreatedAt) }},
 		{name: "fail", run: func() error {
-			return store.FailExtraction(ctx, job.ID, "worker-1", "source_read_failed", 3, job.CreatedAt)
+			return store.FailExtraction(ctx, job.ID, "worker-1", 1, "source_read_failed", 3, job.CreatedAt)
 		}},
 	}
 	for _, check := range checks {
@@ -275,7 +342,7 @@ func TestExtractionWorkerWithPostgreSQLCreatesOnlyCandidate(t *testing.T) {
 	if err := store.EnqueueExtraction(context.Background(), job); err != nil {
 		t.Fatal(err)
 	}
-	candidateID := "8bbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	candidateID := uuid.NewSHA1(uuid.MustParse(job.ID), []byte("candidate:0")).String()
 	worker, err := memorykit.NewExtractionWorker(memorykit.ExtractionWorkerConfig{
 		Jobs: store, Memories: store,
 		Reader: extractionSourceReaderFunc(func(context.Context, memorykit.Source) (string, error) {
@@ -288,7 +355,7 @@ func TestExtractionWorkerWithPostgreSQLCreatesOnlyCandidate(t *testing.T) {
 		}),
 		ValidateContent: extractionContentValidatorFunc(func(context.Context, string) error { return nil }),
 		Limits:          validConfig().Limits, WorkerID: "worker-1", LeaseDuration: time.Minute, MaxAttempts: 3,
-		NewCandidateID: func(string, int) string { return candidateID }, Now: func() time.Time { return job.CreatedAt },
+		Now: func() time.Time { return job.CreatedAt },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -313,29 +380,35 @@ func TestExtractionWorkerRetryReusesCandidateWithoutDuplicateRevision(t *testing
 	if err := store.EnqueueExtraction(context.Background(), job); err != nil {
 		t.Fatal(err)
 	}
-	candidateID := "8eeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
-	worker, err := memorykit.NewExtractionWorker(memorykit.ExtractionWorkerConfig{
-		Jobs: jobs, Memories: store,
-		Reader: extractionSourceReaderFunc(func(context.Context, memorykit.Source) (string, error) {
-			return "terminal output", nil
-		}),
-		Extractor: extractionCandidateExtractorFunc(func(context.Context, memorykit.ExtractionRequest) ([]memorykit.CandidateDraft, error) {
-			return []memorykit.CandidateDraft{{
-				Kind: memorykit.KindLesson, Key: "worker.retry", Content: "Use stable candidate identity", Confidence: .9,
-			}}, nil
-		}),
-		ValidateContent: extractionContentValidatorFunc(func(context.Context, string) error { return nil }),
-		Limits:          validConfig().Limits, WorkerID: "worker-1", LeaseDuration: time.Minute, MaxAttempts: 3,
-		NewCandidateID: func(string, int) string { return candidateID }, Now: func() time.Time { return job.CreatedAt },
-	})
-	if err != nil {
-		t.Fatal(err)
+	candidateID := uuid.NewSHA1(uuid.MustParse(job.ID), []byte("candidate:0")).String()
+	newWorker := func(now time.Time) *memorykit.ExtractionWorker {
+		t.Helper()
+		worker, err := memorykit.NewExtractionWorker(memorykit.ExtractionWorkerConfig{
+			Jobs: jobs, Memories: store,
+			Reader: extractionSourceReaderFunc(func(context.Context, memorykit.Source) (string, error) {
+				return "terminal output", nil
+			}),
+			Extractor: extractionCandidateExtractorFunc(func(context.Context, memorykit.ExtractionRequest) ([]memorykit.CandidateDraft, error) {
+				return []memorykit.CandidateDraft{{
+					Kind: memorykit.KindLesson, Key: "worker.retry", Content: "Use stable candidate identity", Confidence: .9,
+				}}, nil
+			}),
+			ValidateContent: extractionContentValidatorFunc(func(context.Context, string) error { return nil }),
+			Limits:          validConfig().Limits, WorkerID: "worker-1", LeaseDuration: time.Minute, MaxAttempts: 3,
+			Now: func() time.Time { return now },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return worker
 	}
+	worker := newWorker(job.CreatedAt)
 	worked, firstErr := worker.RunOnce(context.Background())
 	if !worked || !errors.Is(firstErr, errInjectedCompletion) {
 		t.Fatalf("first RunOnce() = %v, %v, want injected completion error", worked, firstErr)
 	}
-	worked, err = worker.RunOnce(context.Background())
+	worker = newWorker(job.CreatedAt.Add(time.Second))
+	worked, err := worker.RunOnce(context.Background())
 	if err != nil || !worked {
 		t.Fatalf("second RunOnce() = %v, %v", worked, err)
 	}
@@ -367,11 +440,12 @@ func TestProjectTrustedPostgreSQLReplayHasOneRevision(t *testing.T) {
 		Actor: "trusted-projector", Reason: "approved event", Now: now,
 	}}
 	validator := extractionContentValidatorFunc(func(context.Context, string) error { return nil })
-	first, err := memorykit.ProjectTrusted(context.Background(), store, validator, projection)
+	first, err := memorykit.ProjectTrusted(context.Background(), store, validator, validConfig().Limits, projection)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := memorykit.ProjectTrusted(context.Background(), store, validator, projection)
+	projection.Create.Now = projection.Create.Now.Add(time.Hour)
+	second, err := memorykit.ProjectTrusted(context.Background(), store, validator, validConfig().Limits, projection)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,6 +457,31 @@ func TestProjectTrustedPostgreSQLReplayHasOneRevision(t *testing.T) {
 	})
 	if err != nil || len(revisions) != 1 {
 		t.Fatalf("trusted replay revisions = %#v, %v", revisions, err)
+	}
+}
+
+func TestProjectTrustedRejectsReplayAfterForget(t *testing.T) {
+	store := openExtractionStore(t)
+	now := time.Date(2026, 7, 21, 10, 30, 0, 0, time.UTC)
+	projection := memorykit.TrustedProjection{EventID: "approved-event-forget", Create: memorykit.CreateRequest{
+		ID: "8fffffff-ffff-4fff-8fff-ffffffffffff", Scope: extractionScope(),
+		Kind: memorykit.KindConstraint, Key: "trusted.forgotten", Status: memorykit.StatusActive,
+		Content: "Do not revive forgotten trusted memory", ValidFrom: now, Importance: 90, Confidence: 1,
+		Actor: "trusted-projector", Reason: "approved event", Now: now,
+	}}
+	validator := extractionContentValidatorFunc(func(context.Context, string) error { return nil })
+	created, err := memorykit.ProjectTrusted(context.Background(), store, validator, validConfig().Limits, projection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Forget(context.Background(), memorykit.VersionedCommand{
+		Scope: created.Scope, ID: created.ID, ExpectedVersion: created.Version,
+		Actor: "reviewer", Reason: "forgotten", Now: now.Add(time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := memorykit.ProjectTrusted(context.Background(), store, validator, validConfig().Limits, projection); !errors.Is(err, memorykit.ErrInvalidRecallResult) {
+		t.Fatalf("forgotten ProjectTrusted() = %v, want ErrInvalidRecallResult", err)
 	}
 }
 
@@ -460,10 +559,10 @@ type failFirstCompletionStore struct {
 	completeCalls int
 }
 
-func (s *failFirstCompletionStore) CompleteExtraction(ctx context.Context, id, workerID string, now time.Time) error {
+func (s *failFirstCompletionStore) CompleteExtraction(ctx context.Context, id, workerID string, expectedAttempt int, now time.Time) error {
 	s.completeCalls++
 	if s.completeCalls == 1 {
 		return errInjectedCompletion
 	}
-	return s.Store.CompleteExtraction(ctx, id, workerID, now)
+	return s.Store.CompleteExtraction(ctx, id, workerID, expectedAttempt, now)
 }

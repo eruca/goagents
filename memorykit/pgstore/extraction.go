@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -47,7 +48,8 @@ func (s *Store) ClaimExtraction(
 	if err := ctx.Err(); err != nil {
 		return memorykit.ExtractionJob{}, err
 	}
-	if !s.validExtractionIdentity(workerID) || leaseDuration <= 0 || maxAttempts <= 0 || now.IsZero() {
+	if !s.validExtractionIdentity(workerID) || leaseDuration < time.Microsecond ||
+		maxAttempts <= 0 || maxAttempts > math.MaxInt32 || now.IsZero() {
 		return memorykit.ExtractionJob{}, fmt.Errorf("%w: invalid extraction claim", memorykit.ErrInvalidMemory)
 	}
 	leaseUntil := now.Add(leaseDuration)
@@ -99,22 +101,23 @@ func (s *Store) ClaimExtraction(
 	return job, nil
 }
 
-func (s *Store) CompleteExtraction(ctx context.Context, id, workerID string, now time.Time) error {
+func (s *Store) CompleteExtraction(ctx context.Context, id, workerID string, expectedAttempt int, now time.Time) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if err := memorykit.ValidateMemoryID(id); err != nil {
 		return err
 	}
-	if !s.validExtractionIdentity(workerID) || now.IsZero() {
+	if !s.validExtractionIdentity(workerID) || expectedAttempt <= 0 || expectedAttempt > math.MaxInt32 || now.IsZero() {
 		return fmt.Errorf("%w: invalid extraction completion", memorykit.ErrInvalidMemory)
 	}
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE memory_extraction_jobs
 		SET status = 'completed',
 			source_kind = '', source_ref = '', evidence_hash = '', source_agent_id = '',
-			lease_owner = '', lease_until = NULL, updated_at = $3
-		WHERE id = $1 AND lease_owner = $2 AND status = 'leased'`, id, workerID, now)
+			lease_owner = '', lease_until = NULL, updated_at = $4
+		WHERE id = $1 AND lease_owner = $2 AND attempts = $3
+		  AND status = 'leased' AND lease_until > $4`, id, workerID, expectedAttempt, now)
 	if err != nil {
 		return wrapBackend("complete extraction", err)
 	}
@@ -123,7 +126,9 @@ func (s *Store) CompleteExtraction(ctx context.Context, id, workerID string, now
 
 func (s *Store) FailExtraction(
 	ctx context.Context,
-	id, workerID, failureCode string,
+	id, workerID string,
+	expectedAttempt int,
+	failureCode string,
 	maxAttempts int,
 	now time.Time,
 ) error {
@@ -133,21 +138,22 @@ func (s *Store) FailExtraction(
 	if err := memorykit.ValidateMemoryID(id); err != nil {
 		return err
 	}
-	if !s.validExtractionIdentity(workerID) || !validExtractionFailureCode(failureCode) ||
-		maxAttempts <= 0 || now.IsZero() {
+	if !s.validExtractionIdentity(workerID) || expectedAttempt <= 0 || expectedAttempt > math.MaxInt32 ||
+		!validExtractionFailureCode(failureCode) || maxAttempts <= 0 || maxAttempts > math.MaxInt32 || now.IsZero() {
 		return fmt.Errorf("%w: invalid extraction failure", memorykit.ErrInvalidMemory)
 	}
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE memory_extraction_jobs
-		SET status = CASE WHEN attempts >= $4 THEN 'failed' ELSE 'pending' END,
-			failure_code = $3,
-			source_kind = CASE WHEN attempts >= $4 THEN '' ELSE source_kind END,
-			source_ref = CASE WHEN attempts >= $4 THEN '' ELSE source_ref END,
-			evidence_hash = CASE WHEN attempts >= $4 THEN '' ELSE evidence_hash END,
-			source_agent_id = CASE WHEN attempts >= $4 THEN '' ELSE source_agent_id END,
-			lease_owner = '', lease_until = NULL, updated_at = $5
-		WHERE id = $1 AND lease_owner = $2 AND status = 'leased'`,
-		id, workerID, failureCode, maxAttempts, now)
+		SET status = CASE WHEN attempts >= $5 THEN 'failed' ELSE 'pending' END,
+			failure_code = $4,
+			source_kind = CASE WHEN attempts >= $5 THEN '' ELSE source_kind END,
+			source_ref = CASE WHEN attempts >= $5 THEN '' ELSE source_ref END,
+			evidence_hash = CASE WHEN attempts >= $5 THEN '' ELSE evidence_hash END,
+			source_agent_id = CASE WHEN attempts >= $5 THEN '' ELSE source_agent_id END,
+			lease_owner = '', lease_until = NULL, updated_at = $6
+		WHERE id = $1 AND lease_owner = $2 AND attempts = $3
+		  AND status = 'leased' AND lease_until > $6`,
+		id, workerID, expectedAttempt, failureCode, maxAttempts, now)
 	if err != nil {
 		return wrapBackend("fail extraction", err)
 	}

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 func TestValidateCandidateDraftReusesCreateValidation(t *testing.T) {
@@ -74,8 +76,9 @@ func TestNewExtractionWorkerRejectsIncompleteConfiguration(t *testing.T) {
 			c.WorkerID = strings.Repeat("w", c.Limits.MaxMetadataRunes+1)
 		}},
 		{name: "lease duration", mutate: func(c *ExtractionWorkerConfig) { c.LeaseDuration = 0 }},
+		{name: "sub-microsecond lease", mutate: func(c *ExtractionWorkerConfig) { c.LeaseDuration = time.Nanosecond }},
 		{name: "max attempts", mutate: func(c *ExtractionWorkerConfig) { c.MaxAttempts = 0 }},
-		{name: "candidate ID", mutate: func(c *ExtractionWorkerConfig) { c.NewCandidateID = nil }},
+		{name: "max attempts overflow", mutate: func(c *ExtractionWorkerConfig) { c.MaxAttempts = int(math.MaxInt32) + 1 }},
 		{name: "clock", mutate: func(c *ExtractionWorkerConfig) { c.Now = nil }},
 	}
 	for _, test := range tests {
@@ -87,6 +90,69 @@ func TestNewExtractionWorkerRejectsIncompleteConfiguration(t *testing.T) {
 				t.Fatalf("NewExtractionWorker() = %#v, %v, want nil ErrInvalidMemory", worker, err)
 			}
 		})
+	}
+}
+
+func TestExtractionWorkerStopsBeforeCandidateWriteWhenLeaseExpires(t *testing.T) {
+	claimNow := time.Date(2026, 7, 21, 8, 0, 0, 0, time.UTC)
+	job := extractionWorkerTestJob()
+	clockCalls := 0
+	jobs := &extractionJobStoreStub{claimJob: job}
+	memories := &extractionLifecycleStoreStub{}
+	config := extractionWorkerTestConfig()
+	config.Jobs, config.Memories = jobs, memories
+	config.Extractor = candidateExtractorFunc(func(context.Context, ExtractionRequest) ([]CandidateDraft, error) {
+		return []CandidateDraft{{Kind: KindLesson, Key: "lease.fence", Content: "never write after lease expiry"}}, nil
+	})
+	config.Now = func() time.Time {
+		clockCalls++
+		if clockCalls == 1 {
+			return claimNow
+		}
+		return job.LeaseUntil
+	}
+	worker, err := NewExtractionWorker(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	worked, err := worker.RunOnce(context.Background())
+	if !worked || err == nil {
+		t.Fatalf("RunOnce() = %v, %v, want true and lease error", worked, err)
+	}
+	if len(memories.creates) != 0 || jobs.completed {
+		t.Fatalf("expired lease wrote/completed = %d/%v", len(memories.creates), jobs.completed)
+	}
+	if jobs.failAttempt != job.Attempts {
+		t.Fatalf("FailExtraction attempt = %d, want %d", jobs.failAttempt, job.Attempts)
+	}
+}
+
+func TestExtractionWorkerDoesNotCompleteAtLeaseDeadline(t *testing.T) {
+	job := extractionWorkerTestJob()
+	clockCalls := 0
+	jobs := &extractionJobStoreStub{claimJob: job}
+	config := extractionWorkerTestConfig()
+	config.Jobs = jobs
+	config.Now = func() time.Time {
+		clockCalls++
+		if clockCalls == 1 {
+			return job.UpdatedAt
+		}
+		return job.LeaseUntil
+	}
+	worker, err := NewExtractionWorker(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	worked, err := worker.RunOnce(context.Background())
+	if !worked || err == nil {
+		t.Fatalf("RunOnce() = %v, %v, want true and lease error", worked, err)
+	}
+	if jobs.completed || jobs.completeAttempt != 0 || jobs.failAttempt != job.Attempts {
+		t.Fatalf("deadline transitions = complete:%v completeAttempt:%d failAttempt:%d",
+			jobs.completed, jobs.completeAttempt, jobs.failAttempt)
 	}
 }
 
@@ -142,15 +208,6 @@ func TestExtractionWorkerCreatesCandidatesThenCompletesLease(t *testing.T) {
 			{Kind: KindDecision, Key: "release.strategy", Content: "Use the conservative release gate", Confidence: .99},
 		}, nil
 	})
-	config.NewCandidateID = func(jobID string, index int) string {
-		if jobID != job.ID {
-			t.Fatalf("NewCandidateID() job = %q, want %q", jobID, job.ID)
-		}
-		return []string{
-			"a1111111-1111-4111-8111-111111111111",
-			"a2222222-2222-4222-8222-222222222222",
-		}[index]
-	}
 	worker, err := NewExtractionWorker(config)
 	if err != nil {
 		t.Fatal(err)
@@ -163,10 +220,17 @@ func TestExtractionWorkerCreatesCandidatesThenCompletesLease(t *testing.T) {
 	if !jobs.completed || jobs.failedCode != "" {
 		t.Fatalf("job transition complete/failed = %v/%q", jobs.completed, jobs.failedCode)
 	}
+	if jobs.completeAttempt != job.Attempts {
+		t.Fatalf("CompleteExtraction attempt = %d, want %d", jobs.completeAttempt, job.Attempts)
+	}
 	if len(memories.creates) != 2 {
 		t.Fatalf("Create() calls = %d, want 2", len(memories.creates))
 	}
 	for index, request := range memories.creates {
+		wantID := uuid.NewSHA1(uuid.MustParse(job.ID), []byte("candidate:"+string(rune('0'+index)))).String()
+		if request.ID != wantID {
+			t.Errorf("Create[%d].ID = %q, want %q", index, request.ID, wantID)
+		}
 		if request.Status != StatusCandidate {
 			t.Errorf("Create[%d].Status = %q, want candidate", index, request.Status)
 		}
@@ -208,6 +272,9 @@ func TestExtractionWorkerFailsLeaseBeforeReturningWorkError(t *testing.T) {
 	}
 	if jobs.failedCode != "source_read_failed" || jobs.completed {
 		t.Fatalf("job transition failed/complete = %q/%v", jobs.failedCode, jobs.completed)
+	}
+	if jobs.failAttempt != jobs.claimJob.Attempts {
+		t.Fatalf("FailExtraction attempt = %d, want %d", jobs.failAttempt, jobs.claimJob.Attempts)
 	}
 	if strings.Contains(jobs.failedCode, "private") {
 		t.Fatalf("failure code leaked raw error: %q", jobs.failedCode)
@@ -260,6 +327,74 @@ func TestExtractionWorkerUsesContentFreeFailureCodeForEachStage(t *testing.T) {
 			}
 			if jobs.failedCode != test.wantCode || strings.Contains(jobs.failedCode, "private") {
 				t.Fatalf("failure code = %q, want %q", jobs.failedCode, test.wantCode)
+			}
+		})
+	}
+}
+
+func TestExtractionWorkerRejectsMalformedCreateResultBeforeCompletion(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Memory)
+	}{
+		{name: "foreign scope", mutate: func(memory *Memory) { memory.Scope.SubjectID = "project-foreign" }},
+		{name: "version one active", mutate: func(memory *Memory) { memory.Status = StatusActive }},
+		{name: "zero version", mutate: func(memory *Memory) { memory.Version = 0 }},
+		{name: "erased replay", mutate: func(memory *Memory) {
+			memory.Version, memory.Status, memory.Content = 2, StatusInactive, ""
+			memory.UpdatedAt = memory.UpdatedAt.Add(time.Second)
+		}},
+		{name: "wrong provenance", mutate: func(memory *Memory) {
+			memory.Version, memory.CreatedBy = 2, "other-actor"
+			memory.UpdatedAt = memory.UpdatedAt.Add(time.Second)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			jobs := &extractionJobStoreStub{claimJob: extractionWorkerTestJob()}
+			memories := &extractionLifecycleStoreStub{mutateResult: test.mutate}
+			config := extractionWorkerTestConfig()
+			config.Jobs, config.Memories = jobs, memories
+			config.Extractor = candidateExtractorFunc(func(context.Context, ExtractionRequest) ([]CandidateDraft, error) {
+				return []CandidateDraft{{Kind: KindLesson, Key: "return.integrity", Content: "validate store output"}}, nil
+			})
+			worker, err := NewExtractionWorker(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			worked, err := worker.RunOnce(context.Background())
+			if !worked || !errors.Is(err, ErrInvalidRecallResult) {
+				t.Fatalf("RunOnce() = %v, %v, want true ErrInvalidRecallResult", worked, err)
+			}
+			if jobs.completed || jobs.failedCode != "candidate_write_failed" {
+				t.Fatalf("malformed result transition = complete:%v failure:%q", jobs.completed, jobs.failedCode)
+			}
+		})
+	}
+}
+
+func TestExtractionWorkerAcceptsValidReviewedLifecycleReplay(t *testing.T) {
+	for _, status := range []Status{StatusCandidate, StatusActive, StatusInactive} {
+		t.Run(string(status), func(t *testing.T) {
+			jobs := &extractionJobStoreStub{claimJob: extractionWorkerTestJob()}
+			memories := &extractionLifecycleStoreStub{mutateResult: func(memory *Memory) {
+				memory.Version, memory.Status = 2, status
+				memory.Content = "reviewed lifecycle content"
+				memory.UpdatedAt = memory.UpdatedAt.Add(time.Second)
+			}}
+			config := extractionWorkerTestConfig()
+			config.Jobs, config.Memories = jobs, memories
+			config.Extractor = candidateExtractorFunc(func(context.Context, ExtractionRequest) ([]CandidateDraft, error) {
+				return []CandidateDraft{{Kind: KindLesson, Key: "return.lifecycle", Content: "original candidate"}}, nil
+			})
+			worker, err := NewExtractionWorker(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			worked, err := worker.RunOnce(context.Background())
+			if err != nil || !worked || !jobs.completed {
+				t.Fatalf("RunOnce() = %v, %v, completed=%v", worked, err, jobs.completed)
 			}
 		})
 	}
@@ -404,7 +539,7 @@ func TestProjectTrustedRequiresActiveValidatedEvent(t *testing.T) {
 	store := &extractionLifecycleStoreStub{}
 	projection := trustedProjectionTestValue()
 
-	created, err := ProjectTrusted(context.Background(), store, validator, projection)
+	created, err := ProjectTrusted(context.Background(), store, validator, extractionTestLimits(), projection)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,13 +551,25 @@ func TestProjectTrustedRequiresActiveValidatedEvent(t *testing.T) {
 	}
 
 	projection.Create.Status = StatusCandidate
-	if _, err := ProjectTrusted(context.Background(), store, validator, projection); !errors.Is(err, ErrInvalidMemory) {
+	if _, err := ProjectTrusted(context.Background(), store, validator, extractionTestLimits(), projection); !errors.Is(err, ErrInvalidMemory) {
 		t.Fatalf("candidate ProjectTrusted() error = %v, want ErrInvalidMemory", err)
 	}
 	projection.Create.Status = StatusActive
 	projection.EventID = " \t"
-	if _, err := ProjectTrusted(context.Background(), store, validator, projection); !errors.Is(err, ErrInvalidMemory) {
+	if _, err := ProjectTrusted(context.Background(), store, validator, extractionTestLimits(), projection); !errors.Is(err, ErrInvalidMemory) {
 		t.Fatalf("blank event ProjectTrusted() error = %v, want ErrInvalidMemory", err)
+	}
+	projection.EventID = "event-42"
+	if _, err := ProjectTrusted(context.Background(), store, validator, Limits{}, projection); !errors.Is(err, ErrInvalidMemory) {
+		t.Fatalf("invalid limits ProjectTrusted() error = %v, want ErrInvalidMemory", err)
+	}
+	projection.Create.Now = time.Time{}
+	createsBefore := len(store.creates)
+	if _, err := ProjectTrusted(context.Background(), store, validator, extractionTestLimits(), projection); !errors.Is(err, ErrInvalidMemory) {
+		t.Fatalf("zero clock ProjectTrusted() error = %v, want ErrInvalidMemory", err)
+	}
+	if len(store.creates) != createsBefore {
+		t.Fatal("ProjectTrusted wrote with zero clock")
 	}
 }
 
@@ -431,7 +578,7 @@ func TestProjectTrustedPreservesValidatorAndContextErrors(t *testing.T) {
 	validationErr := errors.New("sensitive content")
 	validator := &contentValidatorStub{err: validationErr}
 	store := &extractionLifecycleStoreStub{}
-	if _, err := ProjectTrusted(context.Background(), store, validator, projection); !errors.Is(err, validationErr) {
+	if _, err := ProjectTrusted(context.Background(), store, validator, extractionTestLimits(), projection); !errors.Is(err, validationErr) {
 		t.Fatalf("ProjectTrusted() validation error = %v", err)
 	}
 	if len(store.creates) != 0 {
@@ -441,8 +588,57 @@ func TestProjectTrustedPreservesValidatorAndContextErrors(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	validator.err = nil
-	if _, err := ProjectTrusted(ctx, store, validator, projection); !errors.Is(err, context.Canceled) {
+	if _, err := ProjectTrusted(ctx, store, validator, extractionTestLimits(), projection); !errors.Is(err, context.Canceled) {
 		t.Fatalf("ProjectTrusted() cancellation = %v, want context.Canceled", err)
+	}
+}
+
+func TestProjectTrustedRejectsMalformedStoreResult(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Memory)
+	}{
+		{name: "candidate", mutate: func(memory *Memory) { memory.Status = StatusCandidate }},
+		{name: "candidate replay", mutate: func(memory *Memory) {
+			memory.Version, memory.Status = 2, StatusCandidate
+			memory.UpdatedAt = memory.UpdatedAt.Add(time.Second)
+		}},
+		{name: "foreign scope", mutate: func(memory *Memory) { memory.Scope.SubjectID = "project-foreign" }},
+		{name: "zero version", mutate: func(memory *Memory) { memory.Version = 0 }},
+		{name: "inactive replay", mutate: func(memory *Memory) {
+			memory.Version, memory.Status = 2, StatusInactive
+			memory.UpdatedAt = memory.UpdatedAt.Add(time.Second)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := &extractionLifecycleStoreStub{mutateResult: test.mutate}
+			_, err := ProjectTrusted(context.Background(), store, &contentValidatorStub{}, extractionTestLimits(), trustedProjectionTestValue())
+			if !errors.Is(err, ErrInvalidRecallResult) {
+				t.Fatalf("ProjectTrusted() error = %v, want ErrInvalidRecallResult", err)
+			}
+		})
+	}
+}
+
+func TestProjectTrustedAcceptsMicrosecondCanonicalTimeAndActiveReplay(t *testing.T) {
+	projection := trustedProjectionTestValue()
+	store := &extractionLifecycleStoreStub{mutateResult: func(memory *Memory) {
+		memory.ValidFrom = memory.ValidFrom.Add(-time.Microsecond)
+		memory.CreatedAt = memory.CreatedAt.Add(time.Microsecond)
+		memory.UpdatedAt = memory.UpdatedAt.Add(time.Microsecond)
+	}}
+	if _, err := ProjectTrusted(context.Background(), store, &contentValidatorStub{}, extractionTestLimits(), projection); err != nil {
+		t.Fatalf("microsecond canonical ProjectTrusted() = %v", err)
+	}
+
+	store.mutateResult = func(memory *Memory) {
+		memory.Version = 2
+		memory.Content = "corrected active trusted content"
+		memory.UpdatedAt = memory.UpdatedAt.Add(time.Second)
+	}
+	if _, err := ProjectTrusted(context.Background(), store, &contentValidatorStub{}, extractionTestLimits(), projection); err != nil {
+		t.Fatalf("active replay ProjectTrusted() = %v", err)
 	}
 }
 
@@ -455,8 +651,7 @@ func extractionWorkerTestConfig() ExtractionWorkerConfig {
 		Extractor:       candidateExtractorFunc(func(context.Context, ExtractionRequest) ([]CandidateDraft, error) { return nil, nil }),
 		ValidateContent: &contentValidatorStub{}, Limits: extractionTestLimits(), WorkerID: "worker-1",
 		LeaseDuration: time.Minute, MaxAttempts: 3,
-		NewCandidateID: func(string, int) string { return "a1111111-1111-4111-8111-111111111111" },
-		Now:            func() time.Time { return now },
+		Now: func() time.Time { return now },
 	}
 }
 
@@ -509,6 +704,8 @@ type extractionJobStoreStub struct {
 	completed                  bool
 	failedCode                 string
 	failedAt                   time.Time
+	completeAttempt            int
+	failAttempt                int
 	completeID, completeWorker string
 }
 
@@ -520,18 +717,19 @@ func (s *extractionJobStoreStub) ClaimExtraction(context.Context, string, time.D
 	}
 	return s.claimJob, s.claimErr
 }
-func (s *extractionJobStoreStub) CompleteExtraction(_ context.Context, id, worker string, _ time.Time) error {
-	s.completed, s.completeID, s.completeWorker = true, id, worker
+func (s *extractionJobStoreStub) CompleteExtraction(_ context.Context, id, worker string, expectedAttempt int, _ time.Time) error {
+	s.completed, s.completeID, s.completeWorker, s.completeAttempt = true, id, worker, expectedAttempt
 	return nil
 }
-func (s *extractionJobStoreStub) FailExtraction(_ context.Context, _, _, code string, _ int, now time.Time) error {
-	s.failedCode, s.failedAt = code, now
+func (s *extractionJobStoreStub) FailExtraction(_ context.Context, _, _ string, expectedAttempt int, code string, _ int, now time.Time) error {
+	s.failedCode, s.failedAt, s.failAttempt = code, now, expectedAttempt
 	return s.failErr
 }
 
 type extractionLifecycleStoreStub struct {
-	creates   []CreateRequest
-	createErr error
+	creates      []CreateRequest
+	createErr    error
+	mutateResult func(*Memory)
 }
 
 func (s *extractionLifecycleStoreStub) Create(_ context.Context, request CreateRequest) (Memory, error) {
@@ -539,10 +737,18 @@ func (s *extractionLifecycleStoreStub) Create(_ context.Context, request CreateR
 	if s.createErr != nil {
 		return Memory{}, s.createErr
 	}
-	return Memory{
+	memory := Memory{
 		ID: request.ID, Scope: request.Scope, Kind: request.Kind, Key: request.Key, Status: request.Status,
-		Content: request.Content, IdempotencyKey: request.IdempotencyKey, Version: 1,
-	}, nil
+		Content: request.Content, ValidFrom: request.ValidFrom, ValidUntil: request.ValidUntil,
+		Importance: request.Importance, Confidence: request.Confidence,
+		SourceAgentID: request.SourceAgentID, CreatedBy: request.Actor,
+		IdempotencyKey: request.IdempotencyKey, Version: 1,
+		CreatedAt: request.Now, UpdatedAt: request.Now,
+	}
+	if s.mutateResult != nil {
+		s.mutateResult(&memory)
+	}
+	return memory, nil
 }
 func (*extractionLifecycleStoreStub) Get(context.Context, Scope, string) (Memory, error) {
 	return Memory{}, ErrNotFound
