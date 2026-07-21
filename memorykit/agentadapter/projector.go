@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"reflect"
 	"sort"
 	"strings"
@@ -415,11 +416,11 @@ func cloneMetadataReflect(value reflect.Value, stack map[metadataVisit]struct{})
 		result.Set(cloned)
 		return result, nil
 	case reflect.Map:
-		if value.IsNil() {
-			return reflect.Zero(value.Type()), nil
-		}
 		if value.Type().Key().Kind() != reflect.String {
 			return reflect.Value{}, invalidProjectionMetadata()
+		}
+		if value.IsNil() {
+			return reflect.Zero(value.Type()), nil
 		}
 		visit := metadataVisit{kind: value.Kind(), pointer: uintptr(value.UnsafePointer())}
 		if _, cyclic := stack[visit]; cyclic {
@@ -468,8 +469,12 @@ func cloneMetadataReflect(value reflect.Value, stack map[metadataVisit]struct{})
 		return result, nil
 	case reflect.Bool, reflect.String,
 		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
-		reflect.Float32, reflect.Float64:
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return value, nil
+	case reflect.Float32, reflect.Float64:
+		if number := value.Float(); math.IsNaN(number) || math.IsInf(number, 0) {
+			return reflect.Value{}, invalidProjectionMetadata()
+		}
 		return value, nil
 	default:
 		return reflect.Value{}, invalidProjectionMetadata()

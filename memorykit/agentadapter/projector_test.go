@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -627,6 +628,7 @@ func TestProjectorRejectsUnsafeInputMetadataBeforeDependencies(t *testing.T) {
 
 func TestProjectorRejectsUnsupportedMetadataKinds(t *testing.T) {
 	t.Parallel()
+	var typedNilNonStringMap map[int]string
 	tests := []struct {
 		name  string
 		value any
@@ -637,6 +639,7 @@ func TestProjectorRejectsUnsupportedMetadataKinds(t *testing.T) {
 		{name: "function", value: func() {}},
 		{name: "channel", value: make(chan struct{})},
 		{name: "non-string map key", value: map[int]string{1: "unsafe"}},
+		{name: "typed nil non-string map key", value: typedNilNonStringMap},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -656,6 +659,68 @@ func TestProjectorRejectsUnsupportedMetadataKinds(t *testing.T) {
 				t.Fatalf("projection/error/resolver calls = %#v, %v, %d", got, err, resolverCalls)
 			}
 		})
+	}
+}
+
+func TestProjectorRejectsNonFiniteMetadataBeforeDependencies(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		value any
+	}{
+		{name: "float32 NaN", value: float32(math.NaN())},
+		{name: "float32 positive infinity", value: float32(math.Inf(1))},
+		{name: "float32 negative infinity", value: float32(math.Inf(-1))},
+		{name: "float64 NaN", value: math.NaN()},
+		{name: "float64 positive infinity", value: math.Inf(1)},
+		{name: "float64 negative infinity", value: math.Inf(-1)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := &projectorRecallStore{}
+			resolverCalls := 0
+			next := &recordingProjector{}
+			projector := mustProjector(t, ProjectorConfig{
+				Recall: newProjectorRecaller(t, store),
+				ResolveScope: func(map[string]any) (memorykit.Scope, error) {
+					resolverCalls++
+					return testScope, nil
+				},
+				BuildQuery: DefaultQueryBuilder,
+				Next:       next,
+			})
+			got, err := projector.Project(context.Background(), agentcore.ContextProjectionRequest{
+				Metadata: map[string]any{"unsafe": test.value},
+			})
+			if got != nil || !errors.Is(err, memorykit.ErrInvalidMemory) || resolverCalls != 0 || store.calls != 0 || next.calls != 0 {
+				t.Fatalf("projection/error/calls = %#v, %v, resolver:%d recall:%d next:%d", got, err, resolverCalls, store.calls, next.calls)
+			}
+		})
+	}
+}
+
+func TestProjectorPreservesFiniteFloatMetadata(t *testing.T) {
+	t.Parallel()
+	projector := mustProjector(t, ProjectorConfig{
+		Recall: newProjectorRecaller(t, &projectorRecallStore{}),
+		ResolveScope: func(metadata map[string]any) (memorykit.Scope, error) {
+			if metadata["float32"] != float32(-1.5) || metadata["float64"] != 2.5 {
+				t.Fatalf("finite floats changed: %#v", metadata)
+			}
+			return testScope, nil
+		},
+		BuildQuery: func(context.Context, agentcore.ContextProjectionRequest) (string, []string, []memorykit.Kind, error) {
+			return "query", nil, nil, nil
+		},
+	})
+	got, err := projector.Project(context.Background(), agentcore.ContextProjectionRequest{
+		Metadata: map[string]any{"float32": float32(-1.5), "float64": 2.5},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["float32"] != float32(-1.5) || got.Metadata["float64"] != 2.5 {
+		t.Fatalf("finite result floats changed: %#v", got.Metadata)
 	}
 }
 
