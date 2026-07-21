@@ -14,6 +14,8 @@ import (
 	"github.com/eruca/goagents/memorykit"
 )
 
+var _ memorykit.Store = (*Store)(nil)
+
 type Store struct {
 	mu         sync.RWMutex
 	limits     memorykit.Limits
@@ -21,13 +23,18 @@ type Store struct {
 	sources    map[string][]memorykit.Source
 	revisions  map[string][]memorykit.Revision
 	creates    map[idempotencyIdentity]createRecord
-	embeddings map[string]storedEmbedding
+	embeddings map[embeddingIdentity]storedEmbedding
 }
 
 type storedEmbedding struct {
-	profileID  string
-	dimensions int
-	vector     []float32
+	contentHash string
+	dimensions  int
+	vector      []float32
+}
+
+type embeddingIdentity struct {
+	memoryID  string
+	profileID string
 }
 
 type idempotencyIdentity struct {
@@ -53,7 +60,7 @@ func New(limits memorykit.Limits) (*Store, error) {
 		sources:    make(map[string][]memorykit.Source),
 		revisions:  make(map[string][]memorykit.Revision),
 		creates:    make(map[idempotencyIdentity]createRecord),
-		embeddings: make(map[string]storedEmbedding),
+		embeddings: make(map[embeddingIdentity]storedEmbedding),
 	}, nil
 }
 
@@ -244,8 +251,8 @@ func (s *Store) SearchCandidates(ctx context.Context, query memorykit.CandidateQ
 			result.FullText = append(result.FullText, memorykit.Candidate{Memory: memory, Sources: copySources(sources)})
 		}
 		if query.VectorLimit > 0 {
-			embedding, exists := s.embeddings[id]
-			if !exists || embedding.profileID != query.EmbeddingProfileID || embedding.dimensions != query.EmbeddingDimensions {
+			embedding, exists := s.embeddings[embeddingIdentity{memoryID: id, profileID: query.EmbeddingProfileID}]
+			if !exists || embedding.dimensions != query.EmbeddingDimensions || embedding.contentHash != hashMemoryContent(memory.Content) {
 				continue
 			}
 			similarity, ok := cosineSimilarity(query.QueryVector, embedding.vector)
@@ -270,6 +277,72 @@ func (s *Store) SearchCandidates(ctx context.Context, query memorykit.CandidateQ
 	result.FullText = rankCandidates(result.FullText, query.FullTextLimit, memorykit.ChannelFullText)
 	result.Vector = rankCandidates(result.Vector, query.VectorLimit, memorykit.ChannelVector)
 	return result, nil
+}
+
+func (s *Store) PendingEmbeddings(ctx context.Context, query memorykit.PendingEmbeddingQuery) ([]memorykit.EmbeddingInput, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := memorykit.ValidatePendingEmbeddingQuery(query, s.limits); err != nil {
+		return nil, err
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	result := make([]memorykit.EmbeddingInput, 0)
+	for id, memory := range s.memories {
+		if memory.Status != memorykit.StatusActive {
+			continue
+		}
+		contentHash := hashMemoryContent(memory.Content)
+		embedding, exists := s.embeddings[embeddingIdentity{memoryID: id, profileID: query.ProfileID}]
+		if exists && embedding.contentHash == contentHash {
+			continue
+		}
+		result = append(result, memorykit.EmbeddingInput{
+			MemoryID: id, Scope: memory.Scope, Content: memory.Content,
+			ContentHash: contentHash, Version: memory.Version,
+		})
+	}
+	sort.Slice(result, func(i, j int) bool {
+		left, right := s.memories[result[i].MemoryID], s.memories[result[j].MemoryID]
+		if left.UpdatedAt.Equal(right.UpdatedAt) {
+			return result[i].MemoryID < result[j].MemoryID
+		}
+		return left.UpdatedAt.Before(right.UpdatedAt)
+	})
+	if len(result) > query.Limit {
+		result = result[:query.Limit]
+	}
+	return append([]memorykit.EmbeddingInput(nil), result...), nil
+}
+
+func (s *Store) PutEmbedding(ctx context.Context, request memorykit.PutEmbeddingRequest) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := memorykit.ValidatePutEmbeddingRequest(request, s.limits); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	memory, exists := s.memories[request.MemoryID]
+	if !exists || memory.Scope != request.Scope || memory.Status != memorykit.StatusActive ||
+		hashMemoryContent(memory.Content) != request.ContentHash {
+		return memorykit.ErrConflict
+	}
+	s.embeddings[embeddingIdentity{memoryID: request.MemoryID, profileID: request.ProfileID}] = storedEmbedding{
+		contentHash: request.ContentHash,
+		dimensions:  request.Dimensions, vector: append([]float32(nil), request.Vector...),
+	}
+	return nil
 }
 
 func (s *Store) Activate(ctx context.Context, command memorykit.VersionedCommand) (memorykit.Memory, error) {
@@ -362,7 +435,11 @@ func (s *Store) Erase(ctx context.Context, command memorykit.VersionedCommand) e
 	memory.UpdatedAt = command.Now
 	s.memories[memory.ID] = memory
 	s.sources[memory.ID] = make([]memorykit.Source, 0)
-	delete(s.embeddings, memory.ID)
+	for identity := range s.embeddings {
+		if identity.memoryID == memory.ID {
+			delete(s.embeddings, identity)
+		}
+	}
 	for identity, record := range s.creates {
 		if record.id != memory.ID {
 			continue
@@ -541,6 +618,11 @@ func cosineSimilarity(left, right []float32) (float64, bool) {
 		similarity = -1
 	}
 	return similarity, true
+}
+
+func hashMemoryContent(content string) string {
+	digest := sha256.Sum256([]byte(content))
+	return fmt.Sprintf("%x", digest)
 }
 
 func validateIdentity(scope memorykit.Scope, id string) error {

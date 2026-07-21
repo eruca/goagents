@@ -26,6 +26,34 @@ type RecallStore interface {
 	SearchCandidates(context.Context, CandidateQuery) (CandidateSet, error)
 }
 
+type PendingEmbeddingQuery struct {
+	ProfileID string
+	Limit     int
+}
+
+type EmbeddingInput struct {
+	MemoryID    string
+	Scope       Scope
+	Content     string
+	ContentHash string
+	Version     int64
+}
+
+type PutEmbeddingRequest struct {
+	MemoryID    string
+	Scope       Scope
+	ProfileID   string
+	ContentHash string
+	Dimensions  int
+	Vector      []float32
+	EmbeddedAt  time.Time
+}
+
+type EmbeddingStore interface {
+	PendingEmbeddings(context.Context, PendingEmbeddingQuery) ([]EmbeddingInput, error)
+	PutEmbedding(context.Context, PutEmbeddingRequest) error
+}
+
 type Channel string
 
 const (
@@ -64,6 +92,46 @@ type CandidateSet struct {
 type Store interface {
 	LifecycleStore
 	RecallStore
+	EmbeddingStore
+}
+
+func ValidatePendingEmbeddingQuery(query PendingEmbeddingQuery, limits Limits) error {
+	if err := limits.Validate(); err != nil {
+		return err
+	}
+	if !validEmbeddingMetadata(query.ProfileID, limits) || query.Limit <= 0 || query.Limit > limits.MaxListItems {
+		return fmt.Errorf("%w: invalid pending embedding query", ErrInvalidMemory)
+	}
+	return nil
+}
+
+func ValidatePutEmbeddingRequest(request PutEmbeddingRequest, limits Limits) error {
+	if err := limits.Validate(); err != nil {
+		return err
+	}
+	if err := request.Scope.Validate(); err != nil {
+		return err
+	}
+	if err := ValidateMemoryID(request.MemoryID); err != nil {
+		return err
+	}
+	if !validEmbeddingMetadata(request.ProfileID, limits) ||
+		!validEmbeddingMetadata(request.ContentHash, limits) ||
+		request.Dimensions <= 0 || len(request.Vector) != request.Dimensions {
+		return fmt.Errorf("%w: invalid embedding request", ErrInvalidMemory)
+	}
+	for _, value := range request.Vector {
+		if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
+			return fmt.Errorf("%w: embedding values must be finite", ErrInvalidMemory)
+		}
+	}
+	return nil
+}
+
+func validEmbeddingMetadata(value string, limits Limits) bool {
+	return value != "" && value == strings.TrimSpace(value) &&
+		utf8.RuneCountInString(value) <= limits.MaxMetadataRunes &&
+		strings.IndexFunc(value, func(r rune) bool { return r <= 0x1f || r == 0x7f }) < 0
 }
 
 // ValidateCandidateQuery validates both shared filters and channel-specific inputs.

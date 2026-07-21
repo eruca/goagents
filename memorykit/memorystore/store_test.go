@@ -119,8 +119,9 @@ func TestSearchCandidatesAppliesDeterministicLimitsAndReturnsCopies(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sources[0].Ref != "ref-"+memoryIDHigher || store.embeddings[memoryIDHigher].vector[0] != 1 {
-		t.Fatalf("store state mutated: sources=%#v embedding=%#v", sources, store.embeddings[memoryIDHigher])
+	embedding := store.embeddings[embeddingIdentity{memoryID: memoryIDHigher, profileID: "test-3d"}]
+	if sources[0].Ref != "ref-"+memoryIDHigher || embedding.vector[0] != 1 {
+		t.Fatalf("store state mutated: sources=%#v embedding=%#v", sources, embedding)
 	}
 }
 
@@ -157,7 +158,7 @@ func TestEraseRemovesPrivateEmbeddingAndAllRecallCandidates(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.mu.RLock()
-	_, embeddingExists := store.embeddings[memoryIDErase]
+	_, embeddingExists := store.embeddings[embeddingIdentity{memoryID: memoryIDErase, profileID: "test-3d"}]
 	store.mu.RUnlock()
 	if embeddingExists {
 		t.Fatal("Erase retained private embedding")
@@ -174,6 +175,40 @@ func TestEraseRemovesPrivateEmbeddingAndAllRecallCandidates(t *testing.T) {
 	}
 	if len(got.Exact) != 0 || len(got.FullText) != 0 || len(got.Vector) != 0 {
 		t.Fatalf("erased memory remained recallable: %#v", got)
+	}
+}
+
+func TestEmbeddingStoreUsesExplicitRequestProfiles(t *testing.T) {
+	store := newTestStore(t)
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	scope := memorykit.Scope{TenantID: "tenant-1", SubjectType: memorykit.SubjectProject, SubjectID: "project-embedding"}
+	request := testMemoryRequest(memoryIDExact, scope, memorykit.KindDecision, "embedding.key", "embedding content", memorykit.StatusActive, now, 80)
+	createTestMemory(t, store, request)
+	hash := hashMemoryContent(request.Content)
+
+	first, err := store.PendingEmbeddings(context.Background(), memorykit.PendingEmbeddingQuery{ProfileID: "profile-a", Limit: 10})
+	if err != nil || len(first) != 1 || first[0].ContentHash != hash {
+		t.Fatalf("profile-a pending = %#v, %v", first, err)
+	}
+	vector := []float32{1, 0}
+	if err := store.PutEmbedding(context.Background(), memorykit.PutEmbeddingRequest{
+		MemoryID: request.ID, Scope: scope, ProfileID: "profile-a", ContentHash: hash,
+		Dimensions: 2, Vector: vector, EmbeddedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	vector[0] = 0
+	first, err = store.PendingEmbeddings(context.Background(), memorykit.PendingEmbeddingQuery{ProfileID: "profile-a", Limit: 10})
+	if err != nil || len(first) != 0 {
+		t.Fatalf("profile-a pending after Put = %#v, %v", first, err)
+	}
+	second, err := store.PendingEmbeddings(context.Background(), memorykit.PendingEmbeddingQuery{ProfileID: "profile-b", Limit: 10})
+	if err != nil || len(second) != 1 {
+		t.Fatalf("profile-b pending = %#v, %v", second, err)
+	}
+	stored := store.embeddings[embeddingIdentity{memoryID: request.ID, profileID: "profile-a"}]
+	if !reflect.DeepEqual(stored.vector, []float32{1, 0}) {
+		t.Fatalf("stored vector aliased caller: %v", stored.vector)
 	}
 }
 
@@ -209,8 +244,9 @@ func putTestEmbedding(t *testing.T, store *Store, id, profileID string, vector [
 	t.Helper()
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	store.embeddings[id] = storedEmbedding{
-		profileID: profileID, dimensions: len(vector), vector: append([]float32(nil), vector...),
+	store.embeddings[embeddingIdentity{memoryID: id, profileID: profileID}] = storedEmbedding{
+		contentHash: hashMemoryContent(store.memories[id].Content),
+		dimensions:  len(vector), vector: append([]float32(nil), vector...),
 	}
 }
 

@@ -21,9 +21,15 @@ type rowScanner interface {
 // scanMemory is the single decoder for every memory query, so reads cannot drift
 // when the persistence shape changes.
 func scanMemory(row rowScanner) (memorykit.Memory, error) {
+	return scanMemoryWithTail(row)
+}
+
+// scanMemoryWithTail keeps the canonical memory decoder reusable for queries
+// that append computed columns, such as vector similarity.
+func scanMemoryWithTail(row rowScanner, tail ...any) (memorykit.Memory, error) {
 	var memory memorykit.Memory
 	var validUntil sql.NullTime
-	err := row.Scan(
+	destinations := []any{
 		&memory.ID,
 		&memory.Scope.TenantID,
 		&memory.Scope.SubjectType,
@@ -42,7 +48,9 @@ func scanMemory(row rowScanner) (memorykit.Memory, error) {
 		&memory.Version,
 		&memory.CreatedAt,
 		&memory.UpdatedAt,
-	)
+	}
+	destinations = append(destinations, tail...)
+	err := row.Scan(destinations...)
 	if err != nil {
 		return memorykit.Memory{}, err
 	}
