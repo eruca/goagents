@@ -102,6 +102,8 @@ var migrationV1 = []string{
 )`,
 	`CREATE INDEX IF NOT EXISTS idx_memory_extraction_claim
   ON memory_extraction_jobs (status, lease_until, created_at, id)`,
+	`CREATE INDEX IF NOT EXISTS idx_memory_extraction_claimable
+  ON memory_extraction_jobs (created_at, id) WHERE status IN ('pending','leased')`,
 	`INSERT INTO memorykit_schema_versions(version, applied_at)
 VALUES (1, now()) ON CONFLICT (version) DO NOTHING`,
 }
