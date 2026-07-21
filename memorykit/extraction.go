@@ -227,7 +227,7 @@ func (w *ExtractionWorker) RunOnce(ctx context.Context) (bool, error) {
 
 	completeNow, clockErr := w.leaseTime(job, claimNow)
 	if clockErr != nil {
-		return true, w.failAt(ctx, job, "candidate_write_failed", clockErr, claimNow)
+		return true, w.failAt(ctx, job, "candidate_write_failed", clockErr, completeNow)
 	}
 	err = w.jobs.CompleteExtraction(ctx, job.ID, w.workerID, job.Attempts, completeNow)
 	if err = contextError(ctx, err); err != nil {
@@ -417,9 +417,9 @@ func equivalentStoreTime(left, right time.Time) bool {
 	if left.IsZero() != right.IsZero() {
 		return false
 	}
-	difference := left.Sub(right)
-	if difference < 0 {
-		difference = -difference
+	later, earlier := left, right
+	if later.Before(earlier) {
+		later, earlier = earlier, later
 	}
-	return difference <= time.Microsecond
+	return later.Sub(earlier) <= time.Microsecond
 }

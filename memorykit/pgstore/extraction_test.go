@@ -373,6 +373,45 @@ func TestExtractionWorkerWithPostgreSQLCreatesOnlyCandidate(t *testing.T) {
 	}
 }
 
+func TestExtractionWorkerExpiredLeaseCannotUseOldTimeToFailPostgreSQL(t *testing.T) {
+	store := openExtractionStore(t)
+	job := extractionJobFixture("8bbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+	if err := store.EnqueueExtraction(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	clockCalls := 0
+	worker, err := memorykit.NewExtractionWorker(memorykit.ExtractionWorkerConfig{
+		Jobs: store, Memories: store,
+		Reader: extractionSourceReaderFunc(func(context.Context, memorykit.Source) (string, error) {
+			return "terminal output", nil
+		}),
+		Extractor: extractionCandidateExtractorFunc(func(context.Context, memorykit.ExtractionRequest) ([]memorykit.CandidateDraft, error) {
+			return nil, nil
+		}),
+		ValidateContent: extractionContentValidatorFunc(func(context.Context, string) error { return nil }),
+		Limits:          validConfig().Limits, WorkerID: "worker-1", LeaseDuration: time.Microsecond, MaxAttempts: 3,
+		Now: func() time.Time {
+			clockCalls++
+			if clockCalls == 1 {
+				return job.CreatedAt
+			}
+			return job.CreatedAt.Add(time.Microsecond)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	worked, err := worker.RunOnce(context.Background())
+	if !worked || !errors.Is(err, memorykit.ErrConflict) {
+		t.Fatalf("RunOnce() = %v, %v, want true ErrConflict", worked, err)
+	}
+	status, attempts, source, failure := extractionJobState(t, store, job.ID)
+	if status != memorykit.ExtractionLeased || attempts != 1 || source != job.Source || failure != "" {
+		t.Fatalf("expired worker state = %q/%d/%#v/%q, want unchanged leased attempt", status, attempts, source, failure)
+	}
+}
+
 func TestExtractionWorkerRetryReusesCandidateWithoutDuplicateRevision(t *testing.T) {
 	store := openExtractionStore(t)
 	jobs := &failFirstCompletionStore{Store: store}

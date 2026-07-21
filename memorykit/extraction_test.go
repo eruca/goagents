@@ -131,7 +131,8 @@ func TestExtractionWorkerStopsBeforeCandidateWriteWhenLeaseExpires(t *testing.T)
 func TestExtractionWorkerDoesNotCompleteAtLeaseDeadline(t *testing.T) {
 	job := extractionWorkerTestJob()
 	clockCalls := 0
-	jobs := &extractionJobStoreStub{claimJob: job}
+	transitionErr := errors.New("expired fail transition")
+	jobs := &extractionJobStoreStub{claimJob: job, failErr: transitionErr}
 	config := extractionWorkerTestConfig()
 	config.Jobs = jobs
 	config.Now = func() time.Time {
@@ -147,12 +148,15 @@ func TestExtractionWorkerDoesNotCompleteAtLeaseDeadline(t *testing.T) {
 	}
 
 	worked, err := worker.RunOnce(context.Background())
-	if !worked || err == nil {
-		t.Fatalf("RunOnce() = %v, %v, want true and lease error", worked, err)
+	if !worked || !errors.Is(err, ErrConflict) || !errors.Is(err, transitionErr) {
+		t.Fatalf("RunOnce() = %v, %v, want true with lease and transition errors", worked, err)
 	}
 	if jobs.completed || jobs.completeAttempt != 0 || jobs.failAttempt != job.Attempts {
 		t.Fatalf("deadline transitions = complete:%v completeAttempt:%d failAttempt:%d",
 			jobs.completed, jobs.completeAttempt, jobs.failAttempt)
+	}
+	if !jobs.failedAt.Equal(job.LeaseUntil) {
+		t.Fatalf("FailExtraction now = %v, want fresh lease deadline %v", jobs.failedAt, job.LeaseUntil)
 	}
 }
 
@@ -608,6 +612,9 @@ func TestProjectTrustedRejectsMalformedStoreResult(t *testing.T) {
 		{name: "inactive replay", mutate: func(memory *Memory) {
 			memory.Version, memory.Status = 2, StatusInactive
 			memory.UpdatedAt = memory.UpdatedAt.Add(time.Second)
+		}},
+		{name: "version one valid from extreme past", mutate: func(memory *Memory) {
+			memory.ValidFrom = time.Date(100, time.January, 1, 0, 0, 0, 0, time.UTC)
 		}},
 	}
 	for _, test := range tests {
