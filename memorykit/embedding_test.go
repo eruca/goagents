@@ -9,8 +9,9 @@ import (
 )
 
 const (
-	embeddingWorkerMemoryOne = "11111111-1111-4111-8111-111111111111"
-	embeddingWorkerMemoryTwo = "22222222-2222-4222-8222-222222222222"
+	embeddingWorkerMemoryOne   = "11111111-1111-4111-8111-111111111111"
+	embeddingWorkerMemoryTwo   = "22222222-2222-4222-8222-222222222222"
+	embeddingWorkerMemoryThree = "33333333-3333-4333-8333-333333333333"
 )
 
 var embeddingWorkerScope = Scope{
@@ -125,6 +126,29 @@ func TestEmbeddingWorkerReturnsWithoutEmbeddingWhenNoWorkIsPending(t *testing.T)
 	}
 	if len(store.pendingCalls) != 1 || len(embedder.requests) != 0 || len(store.putRequests) != 0 {
 		t.Fatalf("calls = pending:%d embed:%d put:%d", len(store.pendingCalls), len(embedder.requests), len(store.putRequests))
+	}
+}
+
+func TestEmbeddingWorkerRejectsStoreBatchAboveConfiguredLimit(t *testing.T) {
+	inputs := append(embeddingWorkerInputs(), EmbeddingInput{
+		MemoryID: embeddingWorkerMemoryThree, Scope: embeddingWorkerScope,
+		Content: "third", ContentHash: "hash-third", Version: 1,
+	})
+	store := &embeddingWorkerStore{pendingInputs: inputs}
+	embedder := &embeddingWorkerEmbedder{}
+	worker, err := NewEmbeddingWorker(EmbeddingWorkerConfig{
+		Store: store, Embedder: embedder, ProfileID: "test-3d", Dimensions: 3, BatchSize: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	count, err := worker.RunOnce(context.Background())
+	if count != 0 || !errors.Is(err, ErrInvalidMemory) {
+		t.Fatalf("RunOnce = %d, %v", count, err)
+	}
+	if len(embedder.requests) != 0 || len(store.putRequests) != 0 {
+		t.Fatalf("calls = embed:%d put:%d", len(embedder.requests), len(store.putRequests))
 	}
 }
 

@@ -64,6 +64,9 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	if len(inputs) > w.batchSize {
+		return 0, fmt.Errorf("%w: pending embedding batch exceeds configured limit", ErrInvalidMemory)
+	}
 	if len(inputs) == 0 {
 		return 0, nil
 	}
