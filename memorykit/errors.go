@@ -3,11 +3,13 @@ package memorykit
 import "errors"
 
 var (
-	ErrInvalidScope    = errors.New("invalid memory scope")
-	ErrInvalidMemory   = errors.New("invalid memory")
-	ErrNotFound        = errors.New("memory not found")
-	ErrConflict        = errors.New("memory version conflict")
-	ErrNoExtractionJob = errors.New("no claimable extraction job")
+	ErrInvalidScope        = errors.New("invalid memory scope")
+	ErrInvalidMemory       = errors.New("invalid memory")
+	ErrNotFound            = errors.New("memory not found")
+	ErrConflict            = errors.New("memory version conflict")
+	ErrNoExtractionJob     = errors.New("no claimable extraction job")
+	ErrInvalidRecallResult = errors.New("invalid memory recall result")
+	ErrRecallDependency    = errors.New("memory recall dependency failure")
 )
 
 type BackendError struct {

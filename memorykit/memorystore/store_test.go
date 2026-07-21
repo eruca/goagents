@@ -125,6 +125,43 @@ func TestSearchCandidatesRejectsInvalidQueryAndCancelledContext(t *testing.T) {
 	}
 }
 
+func TestEraseRemovesPrivateEmbeddingAndAllRecallCandidates(t *testing.T) {
+	store := newTestStore(t)
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	scope := memorykit.Scope{TenantID: "tenant-1", SubjectType: memorykit.SubjectProject, SubjectID: "project-1"}
+	createTestMemory(t, store, testMemoryRequest(
+		"erase-me", scope, memorykit.KindDecision, "vector.storage", "verify vector storage",
+		memorykit.StatusActive, now, 80,
+	))
+	putTestEmbedding(t, store, "erase-me", "test-3d", []float32{1, 0, 0})
+
+	if err := store.Erase(context.Background(), memorykit.VersionedCommand{
+		Scope: scope, ID: "erase-me", ExpectedVersion: 1,
+		Actor: "test", Reason: "erase fixture", Now: now.Add(time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store.mu.RLock()
+	_, embeddingExists := store.embeddings["erase-me"]
+	store.mu.RUnlock()
+	if embeddingExists {
+		t.Fatal("Erase retained private embedding")
+	}
+
+	got, err := store.SearchCandidates(context.Background(), memorykit.CandidateQuery{
+		Scope: scope, Text: "vector storage", Keys: []string{"vector.storage"},
+		QueryVector: []float32{1, 0, 0}, Now: now.Add(2 * time.Minute),
+		ExactLimit: 4, FullTextLimit: 4, VectorLimit: 4, MinVectorSimilarity: 0.7,
+		EmbeddingProfileID: "test-3d", EmbeddingDimensions: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Exact) != 0 || len(got.FullText) != 0 || len(got.Vector) != 0 {
+		t.Fatalf("erased memory remained recallable: %#v", got)
+	}
+}
+
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
 	store, err := New(memorykit.Limits{

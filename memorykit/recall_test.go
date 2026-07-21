@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"reflect"
 	"strings"
@@ -90,7 +91,8 @@ func TestRecallerDegradesOnlyTypedRecoverableVectorFailures(t *testing.T) {
 	recaller := newTestRecaller(t, store, fixedEmbedder{err: recoverable}, testRecallPolicy())
 
 	got, err := recaller.Recall(context.Background(), RecallRequest{
-		Scope: projectScope("project-1"), Text: "secret query", Now: fixedNow,
+		Scope: projectScope("project-1"), Text: "secret query",
+		Keys: []string{"build.test_command"}, Now: fixedNow,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -124,7 +126,8 @@ func TestRecallerReturnsEmptyDegradedResultWhenVectorWasOnlyRunnableChannel(t *t
 	}}, policy)
 
 	got, err := recaller.Recall(context.Background(), RecallRequest{
-		Scope: projectScope("project-1"), Text: "query", Now: fixedNow,
+		Scope: projectScope("project-1"), Text: "query",
+		Keys: []string{"build.test_command"}, Now: fixedNow,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -147,7 +150,8 @@ func TestRecallerKeepsPartialResultsForTypedRecoverableVectorStoreFailure(t *tes
 	recaller := newTestRecaller(t, store, fixedEmbedder{vector: []float32{1, 0, 0}}, testRecallPolicy())
 
 	got, err := recaller.Recall(context.Background(), RecallRequest{
-		Scope: projectScope("project-1"), Text: "query", Now: fixedNow,
+		Scope: projectScope("project-1"), Text: "query",
+		Keys: []string{"build.test_command"}, Now: fixedNow,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -160,14 +164,24 @@ func TestRecallerKeepsPartialResultsForTypedRecoverableVectorStoreFailure(t *tes
 	}
 }
 
-func TestRecallerReturnsNonVectorOrUntypedStoreErrors(t *testing.T) {
+func TestRecallerRedactsStoreErrorsAndPreservesClassification(t *testing.T) {
+	secret := "query-sentinel content-sentinel vector-sentinel"
 	tests := []struct {
-		name string
-		err  error
+		name        string
+		err         error
+		recoverable bool
+		channel     Channel
 	}{
-		{name: "non recoverable", err: errors.New("store corrupt")},
-		{name: "recoverable backend without channel", err: &BackendError{Op: "search", Recoverable: true, Err: errors.New("offline")}},
-		{name: "recoverable full text channel", err: &ChannelError{Channel: ChannelFullText, Err: &BackendError{Op: "fts", Recoverable: true, Err: errors.New("offline")}}},
+		{name: "non recoverable", err: errors.New(secret)},
+		{name: "recoverable backend without channel", recoverable: true, err: &BackendError{
+			Op: secret, Recoverable: true, Err: errors.New(secret),
+		}},
+		{name: "recoverable full text channel", recoverable: true, channel: ChannelFullText, err: &ChannelError{
+			Channel: ChannelFullText, Err: &BackendError{Op: secret, Recoverable: true, Err: errors.New(secret)},
+		}},
+		{name: "non recoverable exact channel", channel: ChannelExact, err: &ChannelError{
+			Channel: ChannelExact, Err: errors.New(secret),
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -176,30 +190,58 @@ func TestRecallerReturnsNonVectorOrUntypedStoreErrors(t *testing.T) {
 			_, err := recaller.Recall(context.Background(), RecallRequest{
 				Scope: projectScope("project-1"), Text: "query", Now: fixedNow,
 			})
-			if !errors.Is(err, test.err) {
-				t.Fatalf("err = %v, want %v", err, test.err)
+			assertSafeDependencyError(t, err, test.err, test.recoverable)
+			var channelErr *ChannelError
+			if test.channel == "" && errors.As(err, &channelErr) {
+				t.Fatalf("unexpected channel error: %v", err)
+			}
+			if test.channel != "" && (!errors.As(err, &channelErr) || channelErr.Channel != test.channel) {
+				t.Fatalf("channel error = %#v", channelErr)
 			}
 		})
 	}
 }
 
-func TestRecallerReturnsNonRecoverableEmbeddingError(t *testing.T) {
-	want := errors.New("invalid embedding response")
+func TestRecallerRedactsNonRecoverableEmbeddingError(t *testing.T) {
+	want := errors.New("query-sentinel content-sentinel vector-sentinel")
 	store := &fakeRecallStore{}
 	recaller := newTestRecaller(t, store, fixedEmbedder{err: want}, testRecallPolicy())
 
 	_, err := recaller.Recall(context.Background(), RecallRequest{
 		Scope: projectScope("project-1"), Text: "query", Now: fixedNow,
 	})
-	if !errors.Is(err, want) {
-		t.Fatalf("err = %v, want %v", err, want)
-	}
+	assertSafeDependencyError(t, err, want, false)
 	if store.calls != 0 {
 		t.Fatalf("store calls = %d", store.calls)
 	}
 }
 
-func TestRecallerDefensivelyFiltersScopeStatusAndEffectiveTime(t *testing.T) {
+func TestRecallerPreservesDependencyContextErrors(t *testing.T) {
+	t.Run("embedder canceled", func(t *testing.T) {
+		recaller := newTestRecaller(t, &fakeRecallStore{}, fixedEmbedder{
+			err: fmt.Errorf("secret wrapper: %w", context.Canceled),
+		}, testRecallPolicy())
+		_, err := recaller.Recall(context.Background(), RecallRequest{
+			Scope: projectScope("project-1"), Text: "query", Now: fixedNow,
+		})
+		if err != context.Canceled {
+			t.Fatalf("err = %#v", err)
+		}
+	})
+
+	t.Run("store deadline", func(t *testing.T) {
+		store := &fakeRecallStore{err: fmt.Errorf("secret wrapper: %w", context.DeadlineExceeded)}
+		recaller := newTestRecaller(t, store, fixedEmbedder{vector: []float32{1, 0, 0}}, testRecallPolicy())
+		_, err := recaller.Recall(context.Background(), RecallRequest{
+			Scope: projectScope("project-1"), Text: "query", Now: fixedNow,
+		})
+		if err != context.DeadlineExceeded {
+			t.Fatalf("err = %#v", err)
+		}
+	})
+}
+
+func TestRecallerDefensivelyFiltersStatusAndEffectiveTime(t *testing.T) {
 	valid := memory("valid", 10)
 	candidate := memory("candidate", 100)
 	candidate.Status = StatusCandidate
@@ -209,17 +251,16 @@ func TestRecallerDefensivelyFiltersScopeStatusAndEffectiveTime(t *testing.T) {
 	expired.ValidUntil = fixedNow
 	future := memory("future", 100)
 	future.ValidFrom = fixedNow.Add(time.Minute)
-	otherScope := memory("other-scope", 100)
-	otherScope.Scope = projectScope("project-2")
 	store := &fakeRecallStore{set: CandidateSet{Exact: []Candidate{
 		{Memory: candidate, Rank: 1, Channel: ChannelExact},
 		{Memory: inactive, Rank: 2, Channel: ChannelExact},
 		{Memory: expired, Rank: 3, Channel: ChannelExact},
 		{Memory: future, Rank: 4, Channel: ChannelExact},
-		{Memory: otherScope, Rank: 5, Channel: ChannelExact},
-		{Memory: valid, Rank: 6, Channel: ChannelExact},
+		{Memory: valid, Rank: 5, Channel: ChannelExact},
 	}}}
-	recaller := newTestRecaller(t, store, fixedEmbedder{vector: []float32{1, 0, 0}}, testRecallPolicy())
+	policy := testRecallPolicy()
+	policy.ExactLimit = 8
+	recaller := newTestRecaller(t, store, fixedEmbedder{vector: []float32{1, 0, 0}}, policy)
 
 	got, err := recaller.Recall(context.Background(), RecallRequest{
 		Scope: projectScope("project-1"), Keys: []string{"build.test_command"}, Now: fixedNow,
@@ -230,6 +271,161 @@ func TestRecallerDefensivelyFiltersScopeStatusAndEffectiveTime(t *testing.T) {
 	if ids := recallItemIDs(got.Items); !reflect.DeepEqual(ids, []string{"valid"}) {
 		t.Fatalf("ids = %v", ids)
 	}
+}
+
+func TestRecallerFailsClosedOnInvalidStoreResponseShape(t *testing.T) {
+	valid := Candidate{Memory: memory("valid", 10), Rank: 1, Channel: ChannelExact}
+	tests := []struct {
+		name    string
+		request RecallRequest
+		policy  RecallPolicy
+		set     CandidateSet
+	}{
+		{
+			name:    "channel does not match container",
+			request: RecallRequest{Scope: projectScope("project-1"), Keys: []string{"build.test_command"}, Now: fixedNow},
+			policy:  testRecallPolicy(), set: CandidateSet{Exact: []Candidate{{Memory: valid.Memory, Rank: 1, Channel: ChannelFullText}}},
+		},
+		{
+			name:    "exact result without keys",
+			request: RecallRequest{Scope: projectScope("project-1"), Text: "query", Now: fixedNow},
+			policy:  testRecallPolicy(), set: CandidateSet{Exact: []Candidate{valid}},
+		},
+		{
+			name:    "full text result without text",
+			request: RecallRequest{Scope: projectScope("project-1"), Keys: []string{"build.test_command"}, Now: fixedNow},
+			policy:  testRecallPolicy(), set: CandidateSet{FullText: []Candidate{{Memory: valid.Memory, Rank: 1, Channel: ChannelFullText}}},
+		},
+		{
+			name:    "vector result without query vector",
+			request: RecallRequest{Scope: projectScope("project-1"), Keys: []string{"build.test_command"}, Now: fixedNow},
+			policy:  testRecallPolicy(), set: CandidateSet{Vector: []Candidate{{Memory: valid.Memory, Rank: 1, Channel: ChannelVector, Similarity: 0.9}}},
+		},
+		{
+			name:    "slice exceeds limit",
+			request: RecallRequest{Scope: projectScope("project-1"), Keys: []string{"build.test_command"}, Now: fixedNow},
+			policy:  func() RecallPolicy { policy := testRecallPolicy(); policy.ExactLimit = 1; return policy }(),
+			set:     CandidateSet{Exact: []Candidate{valid, {Memory: memory("second", 9), Rank: 1, Channel: ChannelExact}}},
+		},
+		{
+			name:    "rank exceeds limit",
+			request: RecallRequest{Scope: projectScope("project-1"), Keys: []string{"build.test_command"}, Now: fixedNow},
+			policy:  func() RecallPolicy { policy := testRecallPolicy(); policy.ExactLimit = 1; return policy }(),
+			set:     CandidateSet{Exact: []Candidate{{Memory: valid.Memory, Rank: 2, Channel: ChannelExact}}},
+		},
+		{
+			name:    "duplicate ID in channel",
+			request: RecallRequest{Scope: projectScope("project-1"), Keys: []string{"build.test_command"}, Now: fixedNow},
+			policy:  testRecallPolicy(), set: CandidateSet{Exact: []Candidate{valid, valid}},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assertInvalidRecallSet(t, test.policy, test.request, test.set, nil)
+		})
+	}
+}
+
+func TestRecallerFailsClosedOnMalformedStoreMemoryAndSources(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Candidate)
+	}{
+		{name: "blank ID", mutate: func(candidate *Candidate) { candidate.Memory.ID = "" }},
+		{name: "wrong scope", mutate: func(candidate *Candidate) { candidate.Memory.Scope = projectScope("project-2") }},
+		{name: "invalid kind", mutate: func(candidate *Candidate) { candidate.Memory.Kind = Kind("invalid") }},
+		{name: "importance", mutate: func(candidate *Candidate) { candidate.Memory.Importance = 101 }},
+		{name: "confidence NaN", mutate: func(candidate *Candidate) { candidate.Memory.Confidence = math.NaN() }},
+		{name: "confidence range", mutate: func(candidate *Candidate) { candidate.Memory.Confidence = 2 }},
+		{name: "version", mutate: func(candidate *Candidate) { candidate.Memory.Version = 0 }},
+		{name: "source kind", mutate: func(candidate *Candidate) { candidate.Sources = []Source{{Ref: "ref"}} }},
+		{name: "source ref", mutate: func(candidate *Candidate) { candidate.Sources = []Source{{Kind: "event"}} }},
+	}
+	request := RecallRequest{Scope: projectScope("project-1"), Keys: []string{"build.test_command"}, Now: fixedNow}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := Candidate{Memory: memory("invalid", 10), Rank: 1, Channel: ChannelExact}
+			test.mutate(&candidate)
+			assertInvalidRecallSet(t, testRecallPolicy(), request, CandidateSet{Exact: []Candidate{candidate}}, nil)
+		})
+	}
+}
+
+func TestRecallerFailsClosedOnCrossChannelCorruption(t *testing.T) {
+	request := RecallRequest{
+		Scope: projectScope("project-1"), Text: "query", Keys: []string{"build.test_command"}, Now: fixedNow,
+	}
+	base := memory("same", 10)
+
+	t.Run("memory mismatch", func(t *testing.T) {
+		changed := base
+		changed.Content = "different content"
+		assertInvalidRecallSet(t, testRecallPolicy(), request, CandidateSet{
+			Exact:  []Candidate{{Memory: base, Rank: 1, Channel: ChannelExact}},
+			Vector: []Candidate{{Memory: changed, Rank: 1, Channel: ChannelVector, Similarity: 0.9}},
+		}, nil)
+	})
+
+	t.Run("normalized source refs mismatch", func(t *testing.T) {
+		assertInvalidRecallSet(t, testRecallPolicy(), request, CandidateSet{
+			Exact:  []Candidate{{Memory: base, Sources: []Source{{Kind: "event", Ref: "a"}}, Rank: 1, Channel: ChannelExact}},
+			Vector: []Candidate{{Memory: base, Sources: []Source{{Kind: "event", Ref: "b"}}, Rank: 1, Channel: ChannelVector, Similarity: 0.9}},
+		}, nil)
+	})
+
+	t.Run("filtered status still must match", func(t *testing.T) {
+		changed := base
+		changed.Status = StatusInactive
+		assertInvalidRecallSet(t, testRecallPolicy(), request, CandidateSet{
+			Exact:  []Candidate{{Memory: base, Rank: 1, Channel: ChannelExact}},
+			Vector: []Candidate{{Memory: changed, Rank: 1, Channel: ChannelVector, Similarity: 0.9}},
+		}, nil)
+	})
+}
+
+func TestRecallerAcceptsEquivalentNormalizedSourceRefsAcrossChannels(t *testing.T) {
+	shared := memory("same", 10)
+	store := &fakeRecallStore{set: CandidateSet{
+		Exact: []Candidate{{
+			Memory:  shared,
+			Sources: []Source{{Kind: "event", Ref: "b"}, {Kind: "event", Ref: "a"}, {Kind: "duplicate", Ref: "b"}},
+			Rank:    1, Channel: ChannelExact,
+		}},
+		Vector: []Candidate{{
+			Memory: shared, Sources: []Source{{Kind: "event", Ref: "a"}, {Kind: "event", Ref: "b"}},
+			Rank: 1, Channel: ChannelVector, Similarity: 0.9,
+		}},
+	}}
+	recaller := newTestRecaller(t, store, fixedEmbedder{vector: []float32{1, 0, 0}}, testRecallPolicy())
+	got, err := recaller.Recall(context.Background(), RecallRequest{
+		Scope: projectScope("project-1"), Text: "query", Keys: []string{"build.test_command"}, Now: fixedNow,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids := recallItemIDs(got.Items); !reflect.DeepEqual(ids, []string{"same"}) {
+		t.Fatalf("ids = %v", ids)
+	}
+}
+
+func TestRecallerFailsClosedOnInvalidRecoverableVectorChannelError(t *testing.T) {
+	recoverableVector := &ChannelError{Channel: ChannelVector, Err: &BackendError{
+		Op: "vector", Recoverable: true, Err: errors.New("offline"),
+	}}
+
+	t.Run("vector was disabled", func(t *testing.T) {
+		assertInvalidRecallSet(t, testRecallPolicy(), RecallRequest{
+			Scope: projectScope("project-1"), Keys: []string{"build.test_command"}, Now: fixedNow,
+		}, CandidateSet{}, recoverableVector)
+	})
+
+	t.Run("partial vector rows", func(t *testing.T) {
+		assertInvalidRecallSet(t, testRecallPolicy(), RecallRequest{
+			Scope: projectScope("project-1"), Text: "query", Now: fixedNow,
+		}, CandidateSet{Vector: []Candidate{{
+			Memory: memory("partial", 10), Rank: 1, Channel: ChannelVector, Similarity: 0.9,
+		}}}, recoverableVector)
+	})
 }
 
 func TestRecallerOrdersTiesByImportanceUpdatedAtAndID(t *testing.T) {
@@ -429,6 +625,31 @@ func TestRecallerEnforcesDeadlineWhenDependenciesIgnoreCancellation(t *testing.T
 	})
 }
 
+func TestRecallerDeadlineCoversTokenBudgetPacking(t *testing.T) {
+	store := &fakeRecallStore{set: CandidateSet{Exact: []Candidate{{
+		Memory: memory("late-item", 10), Rank: 1, Channel: ChannelExact,
+	}}}}
+	policy := testRecallPolicy()
+	policy.Deadline = 10 * time.Millisecond
+	recaller, err := NewRecaller(RecallConfig{
+		Store: store, Embedder: fixedEmbedder{vector: []float32{1, 0, 0}}, Policy: policy,
+		CountTokens: func(string) int {
+			time.Sleep(30 * time.Millisecond)
+			return 1
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := recaller.Recall(context.Background(), RecallRequest{
+		Scope: projectScope("project-1"), Keys: []string{"build.test_command"}, Now: fixedNow,
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, result = %#v", err, got)
+	}
+}
+
 func TestRecallerRejectsInvalidEmbeddingResponseBeforeStore(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -487,6 +708,37 @@ func newTestRecaller(t *testing.T, store RecallStore, embedder Embedder, policy 
 		t.Fatal(err)
 	}
 	return recaller
+}
+
+func assertInvalidRecallSet(t *testing.T, policy RecallPolicy, request RecallRequest, set CandidateSet, storeErr error) {
+	t.Helper()
+	store := &fakeRecallStore{set: set, err: storeErr}
+	recaller := newTestRecaller(t, store, fixedEmbedder{vector: []float32{1, 0, 0}}, policy)
+	_, err := recaller.Recall(context.Background(), request)
+	if !errors.Is(err, ErrInvalidRecallResult) {
+		t.Fatalf("err = %v, want ErrInvalidRecallResult", err)
+	}
+}
+
+func assertSafeDependencyError(t *testing.T, err, original error, recoverable bool) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected dependency error")
+	}
+	for _, secret := range []string{"query-sentinel", "content-sentinel", "vector-sentinel"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("error leaked %q: %v", secret, err)
+		}
+	}
+	if errors.Is(err, original) {
+		t.Fatalf("error retained raw dependency cause: %v", err)
+	}
+	if !errors.Is(err, ErrRecallDependency) {
+		t.Fatalf("err = %v, want ErrRecallDependency", err)
+	}
+	if IsRecoverable(err) != recoverable {
+		t.Fatalf("IsRecoverable(%v) = %v", err, IsRecoverable(err))
+	}
 }
 
 func recallItemIDs(items []RecallItem) []string {

@@ -143,8 +143,11 @@ func (r *Recaller) Recall(ctx context.Context, request RecallRequest) (RecallRes
 			return RecallResult{}, err
 		}
 		if embedErr != nil {
+			if contextErr := dependencyContextError(embedErr); contextErr != nil {
+				return RecallResult{}, contextErr
+			}
 			if !IsRecoverable(embedErr) {
-				return RecallResult{}, embedErr
+				return RecallResult{}, safeRecallDependencyError(embedErr)
 			}
 			result.DegradedChannels = append(result.DegradedChannels, ChannelVector)
 		} else {
@@ -160,7 +163,11 @@ func (r *Recaller) Recall(ctx context.Context, request RecallRequest) (RecallRes
 		}
 	}
 	if query.ExactLimit == 0 && query.FullTextLimit == 0 && query.VectorLimit == 0 {
-		return copyRecallResult(result), nil
+		copied := copyRecallResult(result)
+		if err := recallCtx.Err(); err != nil {
+			return RecallResult{}, err
+		}
+		return copied, nil
 	}
 
 	set, searchErr := r.store.SearchCandidates(recallCtx, query)
@@ -168,17 +175,34 @@ func (r *Recaller) Recall(ctx context.Context, request RecallRequest) (RecallRes
 		return RecallResult{}, err
 	}
 	if searchErr != nil {
+		if contextErr := dependencyContextError(searchErr); contextErr != nil {
+			return RecallResult{}, contextErr
+		}
 		var channelErr *ChannelError
+		if errors.As(searchErr, &channelErr) && !validChannel(channelErr.Channel) {
+			return RecallResult{}, ErrInvalidRecallResult
+		}
+		vectorEnabled := query.VectorLimit > 0 && len(query.QueryVector) > 0
+		if errors.As(searchErr, &channelErr) && channelErr.Channel == ChannelVector && IsRecoverable(searchErr) &&
+			(!vectorEnabled || len(set.Vector) != 0) {
+			return RecallResult{}, ErrInvalidRecallResult
+		}
 		if !errors.As(searchErr, &channelErr) || channelErr.Channel != ChannelVector || !IsRecoverable(searchErr) {
-			return RecallResult{}, searchErr
+			return RecallResult{}, safeRecallDependencyError(searchErr)
 		}
 		if !containsChannel(result.DegradedChannels, ChannelVector) {
 			result.DegradedChannels = append(result.DegradedChannels, ChannelVector)
 		}
-		set.Vector = nil
+	}
+	set, err = r.validateCandidateSet(recallCtx, set, query)
+	if err != nil {
+		return RecallResult{}, err
 	}
 
-	fused, err := r.fuse(set, request)
+	if err := recallCtx.Err(); err != nil {
+		return RecallResult{}, err
+	}
+	fused, err := r.fuse(recallCtx, set)
 	if err != nil {
 		return RecallResult{}, err
 	}
@@ -192,6 +216,9 @@ func (r *Recaller) Recall(ctx context.Context, request RecallRequest) (RecallRes
 			return RecallResult{}, err
 		}
 		cost := r.countTokens(payload)
+		if err := recallCtx.Err(); err != nil {
+			return RecallResult{}, err
+		}
 		if cost < 0 {
 			return RecallResult{}, fmt.Errorf("%w: token counter returned a negative value", ErrInvalidMemory)
 		}
@@ -201,7 +228,11 @@ func (r *Recaller) Recall(ctx context.Context, request RecallRequest) (RecallRes
 		remainingTokens -= cost
 		result.Items = append(result.Items, copyRecallItem(item))
 	}
-	return copyRecallResult(result), nil
+	copied := copyRecallResult(result)
+	if err := recallCtx.Err(); err != nil {
+		return RecallResult{}, err
+	}
+	return copied, nil
 }
 
 func (r *Recaller) validateAndCopyRequest(request RecallRequest) (RecallRequest, error) {
@@ -237,46 +268,126 @@ func (r *Recaller) validateAndCopyRequest(request RecallRequest) (RecallRequest,
 	return request, nil
 }
 
+type candidateSetChannel struct {
+	channel    Channel
+	candidates []Candidate
+	limit      int
+	enabled    bool
+}
+
+type recalledIdentity struct {
+	memory     Memory
+	sourceRefs []string
+}
+
+func (r *Recaller) validateCandidateSet(ctx context.Context, set CandidateSet, query CandidateQuery) (CandidateSet, error) {
+	channels := []candidateSetChannel{
+		{
+			channel: ChannelExact, candidates: set.Exact, limit: query.ExactLimit,
+			enabled: query.ExactLimit > 0 && len(query.Keys) > 0,
+		},
+		{
+			channel: ChannelFullText, candidates: set.FullText, limit: query.FullTextLimit,
+			enabled: query.FullTextLimit > 0 && strings.TrimSpace(query.Text) != "",
+		},
+		{
+			channel: ChannelVector, candidates: set.Vector, limit: query.VectorLimit,
+			enabled: query.VectorLimit > 0 && len(query.QueryVector) > 0,
+		},
+	}
+	validated := CandidateSet{
+		Exact: make([]Candidate, 0, len(set.Exact)), FullText: make([]Candidate, 0, len(set.FullText)),
+		Vector: make([]Candidate, 0, len(set.Vector)),
+	}
+	identities := make(map[string]recalledIdentity)
+	for _, listed := range channels {
+		if err := ctx.Err(); err != nil {
+			return CandidateSet{}, err
+		}
+		if (!listed.enabled && len(listed.candidates) != 0) || len(listed.candidates) > listed.limit {
+			return CandidateSet{}, ErrInvalidRecallResult
+		}
+		seen := make(map[string]struct{}, len(listed.candidates))
+		for _, candidate := range listed.candidates {
+			if err := ctx.Err(); err != nil {
+				return CandidateSet{}, err
+			}
+			if candidate.Channel != listed.channel || candidate.Rank <= 0 || candidate.Rank > listed.limit ||
+				strings.TrimSpace(candidate.Memory.ID) == "" {
+				return CandidateSet{}, ErrInvalidRecallResult
+			}
+			if _, duplicate := seen[candidate.Memory.ID]; duplicate {
+				return CandidateSet{}, ErrInvalidRecallResult
+			}
+			seen[candidate.Memory.ID] = struct{}{}
+			memory := candidate.Memory
+			if memory.Scope != query.Scope || !memory.Kind.IsValid() || !memory.Status.IsValid() ||
+				strings.TrimSpace(memory.Key) == "" || strings.TrimSpace(memory.Content) == "" ||
+				memory.Importance < 0 || memory.Importance > 100 || math.IsNaN(memory.Confidence) ||
+				math.IsInf(memory.Confidence, 0) || memory.Confidence < 0 || memory.Confidence > 1 ||
+				memory.Version <= 0 || (!memory.ValidUntil.IsZero() && !memory.ValidUntil.After(memory.ValidFrom)) {
+				return CandidateSet{}, ErrInvalidRecallResult
+			}
+			refs, err := normalizedSourceRefs(candidate.Sources)
+			if err != nil {
+				return CandidateSet{}, err
+			}
+			if listed.channel == ChannelVector {
+				if math.IsNaN(candidate.Similarity) || math.IsInf(candidate.Similarity, 0) ||
+					candidate.Similarity < 0 || candidate.Similarity > 1 {
+					return CandidateSet{}, ErrInvalidRecallResult
+				}
+			}
+			if previous, exists := identities[memory.ID]; exists {
+				if previous.memory != memory || !equalStrings(previous.sourceRefs, refs) {
+					return CandidateSet{}, ErrInvalidRecallResult
+				}
+			} else {
+				identities[memory.ID] = recalledIdentity{memory: memory, sourceRefs: refs}
+			}
+			if memory.Status != StatusActive || query.Now.Before(memory.ValidFrom) ||
+				(!memory.ValidUntil.IsZero() && !query.Now.Before(memory.ValidUntil)) {
+				continue
+			}
+			if listed.channel == ChannelVector && candidate.Similarity < query.MinVectorSimilarity {
+				continue
+			}
+			candidate.Sources = append([]Source(nil), candidate.Sources...)
+			switch listed.channel {
+			case ChannelExact:
+				validated.Exact = append(validated.Exact, candidate)
+			case ChannelFullText:
+				validated.FullText = append(validated.FullText, candidate)
+			case ChannelVector:
+				validated.Vector = append(validated.Vector, candidate)
+			}
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return CandidateSet{}, err
+	}
+	return validated, nil
+}
+
 type fusedRecallItem struct {
 	item  RecallItem
 	score float64
 }
 
-func (r *Recaller) fuse(set CandidateSet, request RecallRequest) ([]RecallItem, error) {
-	byID := make(map[string]*fusedRecallItem)
-	channels := []struct {
-		channel    Channel
-		candidates []Candidate
-	}{
-		{channel: ChannelExact, candidates: set.Exact},
-		{channel: ChannelFullText, candidates: set.FullText},
-		{channel: ChannelVector, candidates: set.Vector},
+func (r *Recaller) fuse(ctx context.Context, set CandidateSet) ([]RecallItem, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	for _, listed := range channels {
-		seen := make(map[string]struct{}, len(listed.candidates))
-		for _, candidate := range listed.candidates {
-			if candidate.Channel != listed.channel || candidate.Rank <= 0 || strings.TrimSpace(candidate.Memory.ID) == "" {
-				return nil, fmt.Errorf("%w: malformed recall candidate", ErrInvalidMemory)
-			}
-			if _, duplicate := seen[candidate.Memory.ID]; duplicate {
-				return nil, fmt.Errorf("%w: duplicate candidate in channel", ErrInvalidMemory)
-			}
-			seen[candidate.Memory.ID] = struct{}{}
-			if candidate.Memory.Scope != request.Scope || candidate.Memory.Status != StatusActive ||
-				request.Now.Before(candidate.Memory.ValidFrom) ||
-				(!candidate.Memory.ValidUntil.IsZero() && !request.Now.Before(candidate.Memory.ValidUntil)) {
-				continue
-			}
-			if !candidate.Memory.Kind.IsValid() || strings.TrimSpace(candidate.Memory.Key) == "" || strings.TrimSpace(candidate.Memory.Content) == "" {
-				return nil, fmt.Errorf("%w: malformed recalled memory", ErrInvalidMemory)
-			}
-			if listed.channel == ChannelVector {
-				if math.IsNaN(candidate.Similarity) || math.IsInf(candidate.Similarity, 0) || candidate.Similarity < 0 || candidate.Similarity > 1 {
-					return nil, fmt.Errorf("%w: invalid vector similarity", ErrInvalidMemory)
-				}
-				if candidate.Similarity < r.policy.MinVectorSimilarity {
-					continue
-				}
+	byID := make(map[string]*fusedRecallItem)
+	channels := [][]Candidate{
+		set.Exact,
+		set.FullText,
+		set.Vector,
+	}
+	for _, candidates := range channels {
+		for _, candidate := range candidates {
+			if err := ctx.Err(); err != nil {
+				return nil, err
 			}
 			fused, exists := byID[candidate.Memory.ID]
 			if !exists {
@@ -289,6 +400,9 @@ func (r *Recaller) fuse(set CandidateSet, request RecallRequest) ([]RecallItem, 
 		}
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	ranked := make([]fusedRecallItem, 0, len(byID))
 	for _, item := range byID {
 		ranked = append(ranked, *item)
@@ -306,6 +420,9 @@ func (r *Recaller) fuse(set CandidateSet, request RecallRequest) ([]RecallItem, 
 		}
 		return left.ID < right.ID
 	})
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	result := make([]RecallItem, len(ranked))
 	for index := range ranked {
 		result[index] = copyRecallItem(ranked[index].item)
@@ -322,16 +439,10 @@ type canonicalRecallRecord struct {
 }
 
 func canonicalRecallPayload(item RecallItem) (string, error) {
-	refs := make([]string, 0, len(item.Sources))
-	seen := make(map[string]struct{}, len(item.Sources))
-	for _, source := range item.Sources {
-		if _, exists := seen[source.Ref]; exists {
-			continue
-		}
-		seen[source.Ref] = struct{}{}
-		refs = append(refs, source.Ref)
+	refs, err := normalizedSourceRefs(item.Sources)
+	if err != nil {
+		return "", err
 	}
-	sort.Strings(refs)
 	payload, err := json.Marshal(canonicalRecallRecord{
 		ID: item.Memory.ID, Kind: item.Memory.Kind, Key: item.Memory.Key,
 		Content: item.Memory.Content, SourceRefs: refs,
@@ -340,6 +451,35 @@ func canonicalRecallPayload(item RecallItem) (string, error) {
 		return "", fmt.Errorf("%w: encode recall token payload", ErrInvalidMemory)
 	}
 	return string(payload), nil
+}
+
+func normalizedSourceRefs(sources []Source) ([]string, error) {
+	refs := make([]string, 0, len(sources))
+	seen := make(map[string]struct{}, len(sources))
+	for _, source := range sources {
+		if strings.TrimSpace(source.Kind) == "" || strings.TrimSpace(source.Ref) == "" {
+			return nil, ErrInvalidRecallResult
+		}
+		if _, exists := seen[source.Ref]; exists {
+			continue
+		}
+		seen[source.Ref] = struct{}{}
+		refs = append(refs, source.Ref)
+	}
+	sort.Strings(refs)
+	return refs, nil
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func validateEmbeddingResult(vectors [][]float32, dimensions int) ([]float32, error) {
@@ -362,6 +502,35 @@ func containsChannel(channels []Channel, target Channel) bool {
 		}
 	}
 	return false
+}
+
+func validChannel(channel Channel) bool {
+	return channel == ChannelExact || channel == ChannelFullText || channel == ChannelVector
+}
+
+func dependencyContextError(err error) error {
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+func safeRecallDependencyError(err error) error {
+	if contextErr := dependencyContextError(err); contextErr != nil {
+		return contextErr
+	}
+	var safeCause error = ErrRecallDependency
+	if IsRecoverable(err) {
+		safeCause = &BackendError{Op: "recall", Recoverable: true, Err: ErrRecallDependency}
+	}
+	var channelErr *ChannelError
+	if errors.As(err, &channelErr) && validChannel(channelErr.Channel) {
+		return &ChannelError{Channel: channelErr.Channel, Err: safeCause}
+	}
+	return safeCause
 }
 
 func copyRecallItem(item RecallItem) RecallItem {

@@ -359,6 +359,7 @@ func (s *Store) Erase(ctx context.Context, command memorykit.VersionedCommand) e
 	memory.UpdatedAt = command.Now
 	s.memories[memory.ID] = memory
 	s.sources[memory.ID] = make([]memorykit.Source, 0)
+	delete(s.embeddings, memory.ID)
 	for identity, record := range s.creates {
 		if record.id != memory.ID {
 			continue
