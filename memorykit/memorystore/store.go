@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -14,12 +15,19 @@ import (
 )
 
 type Store struct {
-	mu        sync.RWMutex
-	limits    memorykit.Limits
-	memories  map[string]memorykit.Memory
-	sources   map[string][]memorykit.Source
-	revisions map[string][]memorykit.Revision
-	creates   map[idempotencyIdentity]createRecord
+	mu         sync.RWMutex
+	limits     memorykit.Limits
+	memories   map[string]memorykit.Memory
+	sources    map[string][]memorykit.Source
+	revisions  map[string][]memorykit.Revision
+	creates    map[idempotencyIdentity]createRecord
+	embeddings map[string]storedEmbedding
+}
+
+type storedEmbedding struct {
+	profileID  string
+	dimensions int
+	vector     []float32
 }
 
 type idempotencyIdentity struct {
@@ -40,11 +48,12 @@ func New(limits memorykit.Limits) (*Store, error) {
 		return nil, err
 	}
 	return &Store{
-		limits:    limits,
-		memories:  make(map[string]memorykit.Memory),
-		sources:   make(map[string][]memorykit.Source),
-		revisions: make(map[string][]memorykit.Revision),
-		creates:   make(map[idempotencyIdentity]createRecord),
+		limits:     limits,
+		memories:   make(map[string]memorykit.Memory),
+		sources:    make(map[string][]memorykit.Source),
+		revisions:  make(map[string][]memorykit.Revision),
+		creates:    make(map[idempotencyIdentity]createRecord),
+		embeddings: make(map[string]storedEmbedding),
 	}, nil
 }
 
@@ -186,6 +195,80 @@ func (s *Store) List(ctx context.Context, query memorykit.ListQuery) ([]memoryki
 	if len(result) > query.Limit {
 		result = result[:query.Limit]
 	}
+	return result, nil
+}
+
+// SearchCandidates is a deterministic reference implementation for tests and local use.
+func (s *Store) SearchCandidates(ctx context.Context, query memorykit.CandidateQuery) (memorykit.CandidateSet, error) {
+	if err := ctx.Err(); err != nil {
+		return memorykit.CandidateSet{}, err
+	}
+	if err := memorykit.ValidateCandidateQuery(query, s.limits); err != nil {
+		return memorykit.CandidateSet{}, err
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := ctx.Err(); err != nil {
+		return memorykit.CandidateSet{}, err
+	}
+
+	keys := make(map[string]struct{}, len(query.Keys))
+	for _, key := range query.Keys {
+		keys[key] = struct{}{}
+	}
+	kinds := make(map[memorykit.Kind]struct{}, len(query.Kinds))
+	for _, kind := range query.Kinds {
+		kinds[kind] = struct{}{}
+	}
+	foldedText := strings.ToLower(query.Text)
+	result := memorykit.CandidateSet{
+		Exact: make([]memorykit.Candidate, 0), FullText: make([]memorykit.Candidate, 0),
+		Vector: make([]memorykit.Candidate, 0),
+	}
+	for id, memory := range s.memories {
+		if memory.Scope != query.Scope || memory.Status != memorykit.StatusActive ||
+			query.Now.Before(memory.ValidFrom) ||
+			(!memory.ValidUntil.IsZero() && !query.Now.Before(memory.ValidUntil)) ||
+			(len(kinds) > 0 && !containsKind(kinds, memory.Kind)) {
+			continue
+		}
+		sources := copySources(s.sources[id])
+		if query.ExactLimit > 0 {
+			if _, matches := keys[memory.Key]; matches {
+				result.Exact = append(result.Exact, memorykit.Candidate{Memory: memory, Sources: sources})
+			}
+		}
+		if query.FullTextLimit > 0 && foldedText != "" &&
+			(strings.Contains(strings.ToLower(memory.Key), foldedText) || strings.Contains(strings.ToLower(memory.Content), foldedText)) {
+			result.FullText = append(result.FullText, memorykit.Candidate{Memory: memory, Sources: copySources(sources)})
+		}
+		if query.VectorLimit > 0 {
+			embedding, exists := s.embeddings[id]
+			if !exists || embedding.profileID != query.EmbeddingProfileID || embedding.dimensions != query.EmbeddingDimensions {
+				continue
+			}
+			similarity, ok := cosineSimilarity(query.QueryVector, embedding.vector)
+			if !ok || similarity < query.MinVectorSimilarity {
+				continue
+			}
+			result.Vector = append(result.Vector, memorykit.Candidate{
+				Memory: memory, Sources: copySources(sources), Similarity: similarity,
+			})
+		}
+	}
+
+	sort.Slice(result.Exact, func(i, j int) bool { return candidateMetadataLess(result.Exact[i], result.Exact[j]) })
+	sort.Slice(result.FullText, func(i, j int) bool { return candidateMetadataLess(result.FullText[i], result.FullText[j]) })
+	sort.Slice(result.Vector, func(i, j int) bool {
+		if result.Vector[i].Similarity != result.Vector[j].Similarity {
+			return result.Vector[i].Similarity > result.Vector[j].Similarity
+		}
+		return candidateMetadataLess(result.Vector[i], result.Vector[j])
+	})
+	result.Exact = rankCandidates(result.Exact, query.ExactLimit, memorykit.ChannelExact)
+	result.FullText = rankCandidates(result.FullText, query.FullTextLimit, memorykit.ChannelFullText)
+	result.Vector = rankCandidates(result.Vector, query.VectorLimit, memorykit.ChannelVector)
 	return result, nil
 }
 
@@ -394,6 +477,58 @@ func createFingerprint(request memorykit.CreateRequest) ([sha256.Size]byte, erro
 
 func copySources(sources []memorykit.Source) []memorykit.Source {
 	return append([]memorykit.Source{}, sources...)
+}
+
+func containsKind(kinds map[memorykit.Kind]struct{}, kind memorykit.Kind) bool {
+	_, exists := kinds[kind]
+	return exists
+}
+
+func candidateMetadataLess(left, right memorykit.Candidate) bool {
+	if left.Memory.Importance != right.Memory.Importance {
+		return left.Memory.Importance > right.Memory.Importance
+	}
+	if !left.Memory.UpdatedAt.Equal(right.Memory.UpdatedAt) {
+		return left.Memory.UpdatedAt.After(right.Memory.UpdatedAt)
+	}
+	return left.Memory.ID < right.Memory.ID
+}
+
+func rankCandidates(candidates []memorykit.Candidate, limit int, channel memorykit.Channel) []memorykit.Candidate {
+	if len(candidates) > limit {
+		candidates = candidates[:limit]
+	}
+	result := make([]memorykit.Candidate, len(candidates))
+	for index := range candidates {
+		result[index] = candidates[index]
+		result[index].Sources = copySources(candidates[index].Sources)
+		result[index].Channel = channel
+		result[index].Rank = index + 1
+	}
+	return result
+}
+
+func cosineSimilarity(left, right []float32) (float64, bool) {
+	if len(left) == 0 || len(left) != len(right) {
+		return 0, false
+	}
+	var dot, leftNorm, rightNorm float64
+	for index := range left {
+		leftValue, rightValue := float64(left[index]), float64(right[index])
+		dot += leftValue * rightValue
+		leftNorm += leftValue * leftValue
+		rightNorm += rightValue * rightValue
+	}
+	if leftNorm == 0 || rightNorm == 0 {
+		return 0, false
+	}
+	similarity := dot / (math.Sqrt(leftNorm) * math.Sqrt(rightNorm))
+	if similarity > 1 {
+		similarity = 1
+	} else if similarity < -1 {
+		similarity = -1
+	}
+	return similarity, true
 }
 
 func validateIdentity(scope memorykit.Scope, id string) error {
