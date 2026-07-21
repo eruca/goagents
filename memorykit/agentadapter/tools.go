@@ -468,6 +468,11 @@ func validateReadMemorySnapshot(memory memorykit.Memory, expectedID string, scop
 	if memory.ID != expectedID || memory.Scope != scope {
 		return memorykit.ErrInvalidRecallResult
 	}
+	// Erase intentionally keeps an inactive row while scrubbing its content.
+	// Validate every other persisted field through the normal create contract.
+	if memory.Status == memorykit.StatusInactive && memory.Content == "" {
+		memory.Content = "x"
+	}
 	return validateStoredMemory(memory, nil, limits)
 }
 

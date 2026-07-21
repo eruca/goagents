@@ -237,6 +237,14 @@ func TestReadMemoryRejectsMixedSnapshotsAndDisappearingRecordsAsNotFound(t *test
 			value.Version++
 			return value
 		}()},
+		{name: "erase tombstone", second: func() memorykit.Memory {
+			value := first
+			value.Status = memorykit.StatusInactive
+			value.Content = ""
+			value.Version++
+			value.UpdatedAt = value.UpdatedAt.Add(time.Minute)
+			return value
+		}()},
 	}
 	for _, test := range mutations {
 		t.Run(test.name, func(t *testing.T) {
@@ -301,13 +309,6 @@ func TestReadMemoryRejectsMalformedSnapshotsBeforeClassifyingRaces(t *testing.T)
 		{name: "foreign scope in second", first: valid, second: func() memorykit.Memory { value := valid; value.Scope.SubjectID = "foreign"; return value }()},
 		{name: "zero version in second", first: valid, second: func() memorykit.Memory { value := valid; value.Version = 0; return value }()},
 		{name: "nan confidence in second", first: valid, second: func() memorykit.Memory { value := valid; value.Confidence = math.NaN(); return value }()},
-		{name: "blank erased second", first: valid, second: func() memorykit.Memory {
-			value := valid
-			value.Status = memorykit.StatusInactive
-			value.Content = ""
-			value.Version++
-			return value
-		}()},
 		{name: "same nan snapshot twice", first: func() memorykit.Memory { value := valid; value.Confidence = math.NaN(); return value }(), second: func() memorykit.Memory { value := valid; value.Confidence = math.NaN(); return value }()},
 	}
 	for _, test := range tests {
@@ -317,6 +318,64 @@ func TestReadMemoryRejectsMalformedSnapshotsBeforeClassifyingRaces(t *testing.T)
 				sources:    []memorykit.Source{{Kind: "run", Ref: "source:1"}},
 			}
 			result, err := executeReadTool(t, store, toolMemoryID1)
+			if result != nil || !errors.Is(err, memorykit.ErrInvalidRecallResult) {
+				t.Fatalf("result=%#v err=%v", result, err)
+			}
+		})
+	}
+}
+
+func TestReadMemoryReturnsNotFoundForMemorystoreEraseTombstone(t *testing.T) {
+	store := newToolMemoryStore(t)
+	scope := toolScope("tenant-1", "project-1")
+	createToolMemory(t, store, toolMemoryID1, scope, memorykit.StatusActive, adapterNow.Add(-time.Hour), time.Time{}, "content")
+	created, err := store.Get(context.Background(), scope, toolMemoryID1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Erase(context.Background(), memorykit.VersionedCommand{
+		Scope: scope, ID: created.ID, ExpectedVersion: created.Version,
+		Actor: "privacy", Reason: "erase", Now: adapterNow,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := executeReadTool(t, store, toolMemoryID1)
+	if err != nil || result == nil || result.IsError || result.ForLLM != `{"found":false}` {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+}
+
+func TestReadMemoryRejectsInvalidEmptyContentSnapshots(t *testing.T) {
+	valid := validToolMemory(toolMemoryID1, "content")
+	tests := []struct {
+		name   string
+		memory memorykit.Memory
+	}{
+		{name: "active", memory: func() memorykit.Memory { value := valid; value.Content = ""; return value }()},
+		{name: "candidate", memory: func() memorykit.Memory {
+			value := valid
+			value.Status = memorykit.StatusCandidate
+			value.Content = ""
+			return value
+		}()},
+		{name: "tombstone zero version", memory: func() memorykit.Memory {
+			value := valid
+			value.Status = memorykit.StatusInactive
+			value.Content = ""
+			value.Version = 0
+			return value
+		}()},
+		{name: "tombstone nan confidence", memory: func() memorykit.Memory {
+			value := valid
+			value.Status = memorykit.StatusInactive
+			value.Content = ""
+			value.Confidence = math.NaN()
+			return value
+		}()},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := executeReadTool(t, &toolLifecycleStore{getMemory: test.memory}, toolMemoryID1)
 			if result != nil || !errors.Is(err, memorykit.ErrInvalidRecallResult) {
 				t.Fatalf("result=%#v err=%v", result, err)
 			}
