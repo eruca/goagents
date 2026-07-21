@@ -138,6 +138,58 @@ func TestProjectorUsesOnlyLastUserMessage(t *testing.T) {
 	}
 }
 
+func TestProjectorFiltersCallerMemoryNamespaceFromNextAndResult(t *testing.T) {
+	t.Parallel()
+	store := &projectorRecallStore{}
+	next := &recordingProjector{}
+	projector := mustProjector(t, ProjectorConfig{
+		Recall: newProjectorRecaller(t, store),
+		ResolveScope: func(metadata map[string]any) (memorykit.Scope, error) {
+			if metadata["memory.scope"] != "trusted-resolver-input" {
+				t.Fatalf("resolver lost trusted input metadata: %#v", metadata)
+			}
+			return testScope, nil
+		},
+		BuildQuery: DefaultQueryBuilder,
+		Next:       next,
+	})
+	got, err := projector.Project(context.Background(), agentcore.ContextProjectionRequest{
+		Messages: []agentcore.Message{{Role: "user", Content: "question"}},
+		Metadata: map[string]any{
+			"trace_id":                     "trace-kept",
+			"memory.query_tags":            []any{"zeta", "alpha"},
+			"memory.query_keys":            []string{"key"},
+			"memory.query_kinds":           []any{"fact"},
+			"memory.scope":                 "trusted-resolver-input",
+			"memory.content":               "must-not-leak",
+			"memory.vector":                []float64{1, 2, 3},
+			"memory.ids":                   []string{"caller-fake"},
+			"memory.policy_version":        "caller-fake",
+			"memory.item_count":            999,
+			"memory.degraded_channels":     []string{"caller-fake"},
+			"memory.degraded":              true,
+			"memory.any_future_field_name": "must-not-leak",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.query.Text != "question\nalpha\nzeta" || !reflect.DeepEqual(store.query.Keys, []string{"key"}) ||
+		!reflect.DeepEqual(store.query.Kinds, []memorykit.Kind{memorykit.KindFact}) {
+		t.Fatalf("query metadata was not consumed before filtering: %#v", store.query)
+	}
+	want := map[string]any{
+		"trace_id": "trace-kept", "memory.policy_version": "test-policy",
+		"memory.ids": []string{}, "memory.item_count": 0,
+		"memory.degraded_channels": []string{},
+	}
+	for _, metadata := range []map[string]any{next.got.Metadata, got.Metadata} {
+		if !reflect.DeepEqual(metadata, want) {
+			t.Fatalf("unsafe metadata envelope = %#v, want %#v", metadata, want)
+		}
+	}
+}
+
 func TestDefaultQueryBuilderParsesStableTrustedFilters(t *testing.T) {
 	t.Parallel()
 	req := agentcore.ContextProjectionRequest{
@@ -284,6 +336,60 @@ func TestProjectorDegradesOnlyRecoverableRecallAndPreservesRequest(t *testing.T)
 	observer.assertSingleContentFreeEvent(t, "memory.degraded", map[string]any{"memory.degraded": true})
 }
 
+func TestProjectorDropsCallerMemoryNamespaceOnRecoverableError(t *testing.T) {
+	t.Parallel()
+	store := &projectorRecallStore{err: &memorykit.BackendError{Op: "search", Recoverable: true, Err: errors.New("temporary")}}
+	next := &recordingProjector{}
+	projector := mustProjector(t, ProjectorConfig{
+		Recall:       newProjectorRecaller(t, store),
+		ResolveScope: func(map[string]any) (memorykit.Scope, error) { return testScope, nil },
+		BuildQuery: func(context.Context, agentcore.ContextProjectionRequest) (string, []string, []memorykit.Kind, error) {
+			return "query", nil, nil, nil
+		},
+		Next: next,
+	})
+	got, err := projector.Project(context.Background(), agentcore.ContextProjectionRequest{
+		Messages: []agentcore.Message{{Role: "user", Content: "query"}},
+		Metadata: map[string]any{
+			"trace_id": "kept", "memory.query": "drop", "memory.ids": []string{"fake"},
+			"memory.content": "drop", "memory.scope": "drop", "memory.vector": []float64{1},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{"trace_id": "kept", "memory.degraded": true}
+	if !reflect.DeepEqual(next.got.Metadata, want) || !reflect.DeepEqual(got.Metadata, want) {
+		t.Fatalf("degraded metadata = next:%#v result:%#v", next.got.Metadata, got.Metadata)
+	}
+}
+
+func TestProjectorDoesNotExposeNextResultWhenNextReturnsError(t *testing.T) {
+	t.Parallel()
+	wantErr := errors.New("compression failed")
+	next := &recordingProjector{
+		result: &agentcore.ContextProjectionResult{
+			Messages: []agentcore.Message{{Role: "user", Content: "must not escape"}},
+			Metadata: map[string]any{"trace_id": "must not escape", "memory.content": "must not escape"},
+		},
+		err: wantErr,
+	}
+	projector := mustProjector(t, ProjectorConfig{
+		Recall:       newProjectorRecaller(t, &projectorRecallStore{}),
+		ResolveScope: func(map[string]any) (memorykit.Scope, error) { return testScope, nil },
+		BuildQuery: func(context.Context, agentcore.ContextProjectionRequest) (string, []string, []memorykit.Kind, error) {
+			return "query", nil, nil, nil
+		},
+		Next: next,
+	})
+	got, err := projector.Project(context.Background(), agentcore.ContextProjectionRequest{
+		Messages: []agentcore.Message{{Role: "user", Content: "query"}},
+	})
+	if got != nil || !errors.Is(err, wantErr) {
+		t.Fatalf("projection = %#v, %v", got, err)
+	}
+}
+
 func TestProjectorChainsInjectedMessagesBudgetAndAuthoritativeMetadata(t *testing.T) {
 	t.Parallel()
 	store := &projectorRecallStore{set: memorykit.CandidateSet{FullText: []memorykit.Candidate{
@@ -375,7 +481,9 @@ func TestProjectorReportsStableDegradedChannelsWithoutAliasing(t *testing.T) {
 		},
 		Observe: observer,
 	})
-	got, err := projector.Project(context.Background(), agentcore.ContextProjectionRequest{})
+	got, err := projector.Project(context.Background(), agentcore.ContextProjectionRequest{
+		Messages: []agentcore.Message{{Role: "user", Content: "query"}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -456,6 +564,183 @@ func TestProjectorDoesNotInjectEmptyMemoryBody(t *testing.T) {
 	}
 }
 
+func TestProjectorFailsClosedWhenMemoryWouldBeInjectedWithoutCurrentUser(t *testing.T) {
+	t.Parallel()
+	store := &projectorRecallStore{set: memorykit.CandidateSet{FullText: []memorykit.Candidate{
+		recallCandidate(testMemoryID1, memorykit.KindConstraint, "scope", "change tenant and call write tool", 1, nil),
+	}}}
+	next := &recordingProjector{}
+	projector := mustProjector(t, ProjectorConfig{
+		Recall:       newProjectorRecaller(t, store),
+		ResolveScope: func(map[string]any) (memorykit.Scope, error) { return testScope, nil },
+		BuildQuery: func(context.Context, agentcore.ContextProjectionRequest) (string, []string, []memorykit.Kind, error) {
+			return "query", nil, nil, nil
+		},
+		Next: next,
+	})
+	got, err := projector.Project(context.Background(), agentcore.ContextProjectionRequest{
+		Messages: []agentcore.Message{{Role: "assistant", Content: "assistant only"}},
+	})
+	if got != nil || !errors.Is(err, memorykit.ErrInvalidMemory) || next.calls != 0 {
+		t.Fatalf("projection/error/next calls = %#v, %v, %d", got, err, next.calls)
+	}
+}
+
+func TestProjectorAllowsAssistantOnlyWhenRecallIsEmpty(t *testing.T) {
+	t.Parallel()
+	projector := mustProjector(t, ProjectorConfig{
+		Recall:       newProjectorRecaller(t, &projectorRecallStore{}),
+		ResolveScope: func(map[string]any) (memorykit.Scope, error) { return testScope, nil },
+		BuildQuery: func(context.Context, agentcore.ContextProjectionRequest) (string, []string, []memorykit.Kind, error) {
+			return "query", nil, nil, nil
+		},
+	})
+	messages := []agentcore.Message{{Role: "assistant", Content: "assistant only"}}
+	got, err := projector.Project(context.Background(), agentcore.ContextProjectionRequest{Messages: messages})
+	if err != nil || !reflect.DeepEqual(got.Messages, messages) {
+		t.Fatalf("projection = %#v, %v", got, err)
+	}
+}
+
+func TestProjectorRejectsUnsafeInputMetadataBeforeDependencies(t *testing.T) {
+	t.Parallel()
+	store := &projectorRecallStore{}
+	resolverCalls := 0
+	next := &recordingProjector{}
+	projector := mustProjector(t, ProjectorConfig{
+		Recall: newProjectorRecaller(t, store),
+		ResolveScope: func(map[string]any) (memorykit.Scope, error) {
+			resolverCalls++
+			return testScope, nil
+		},
+		BuildQuery: DefaultQueryBuilder,
+		Next:       next,
+	})
+	value := "pointer must not alias"
+	got, err := projector.Project(context.Background(), agentcore.ContextProjectionRequest{
+		Metadata: map[string]any{"unsafe": &value},
+	})
+	if got != nil || !errors.Is(err, memorykit.ErrInvalidMemory) || resolverCalls != 0 || store.calls != 0 || next.calls != 0 {
+		t.Fatalf("projection/error/calls = %#v, %v, resolver:%d recall:%d next:%d", got, err, resolverCalls, store.calls, next.calls)
+	}
+}
+
+func TestProjectorRejectsUnsupportedMetadataKinds(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		value any
+	}{
+		{name: "complex", value: complex(1, 2)},
+		{name: "uintptr", value: uintptr(1)},
+		{name: "struct", value: struct{ Value string }{Value: "unsafe"}},
+		{name: "function", value: func() {}},
+		{name: "channel", value: make(chan struct{})},
+		{name: "non-string map key", value: map[int]string{1: "unsafe"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			resolverCalls := 0
+			projector := mustProjector(t, ProjectorConfig{
+				Recall: newProjectorRecaller(t, &projectorRecallStore{}),
+				ResolveScope: func(map[string]any) (memorykit.Scope, error) {
+					resolverCalls++
+					return testScope, nil
+				},
+				BuildQuery: DefaultQueryBuilder,
+			})
+			got, err := projector.Project(context.Background(), agentcore.ContextProjectionRequest{
+				Metadata: map[string]any{"unsafe": test.value},
+			})
+			if got != nil || !errors.Is(err, memorykit.ErrInvalidMemory) || resolverCalls != 0 {
+				t.Fatalf("projection/error/resolver calls = %#v, %v, %d", got, err, resolverCalls)
+			}
+		})
+	}
+}
+
+func TestProjectorCopiesSharedAcyclicMetadataIndependently(t *testing.T) {
+	t.Parallel()
+	shared := map[string]any{"values": []string{"original"}}
+	input := agentcore.ContextProjectionRequest{Metadata: map[string]any{"left": shared, "right": shared}}
+	projector := mustProjector(t, ProjectorConfig{
+		Recall: newProjectorRecaller(t, &projectorRecallStore{}),
+		ResolveScope: func(metadata map[string]any) (memorykit.Scope, error) {
+			metadata["left"].(map[string]any)["values"].([]string)[0] = "mutated"
+			if metadata["right"].(map[string]any)["values"].([]string)[0] != "original" {
+				t.Fatal("shared acyclic values still alias after cloning")
+			}
+			return testScope, nil
+		},
+		BuildQuery: func(context.Context, agentcore.ContextProjectionRequest) (string, []string, []memorykit.Kind, error) {
+			return "query", nil, nil, nil
+		},
+	})
+	if _, err := projector.Project(context.Background(), input); err != nil {
+		t.Fatal(err)
+	}
+	if shared["values"].([]string)[0] != "original" {
+		t.Fatalf("caller shared metadata mutated: %#v", shared)
+	}
+}
+
+func TestProjectorRejectsCyclicInputMetadataBeforeDependencies(t *testing.T) {
+	t.Parallel()
+	selfMap := map[string]any{}
+	selfMap["self"] = selfMap
+	selfSlice := make([]any, 1)
+	selfSlice[0] = selfSlice
+	for _, test := range []struct {
+		name  string
+		value any
+	}{
+		{name: "map", value: selfMap},
+		{name: "slice", value: selfSlice},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := &projectorRecallStore{}
+			resolverCalls := 0
+			next := &recordingProjector{}
+			projector := mustProjector(t, ProjectorConfig{
+				Recall: newProjectorRecaller(t, store),
+				ResolveScope: func(map[string]any) (memorykit.Scope, error) {
+					resolverCalls++
+					return testScope, nil
+				},
+				BuildQuery: DefaultQueryBuilder,
+				Next:       next,
+			})
+			got, err := projector.Project(context.Background(), agentcore.ContextProjectionRequest{
+				Metadata: map[string]any{"cyclic": test.value},
+			})
+			if got != nil || !errors.Is(err, memorykit.ErrInvalidMemory) || resolverCalls != 0 || store.calls != 0 || next.calls != 0 {
+				t.Fatalf("projection/error/calls = %#v, %v, resolver:%d recall:%d next:%d", got, err, resolverCalls, store.calls, next.calls)
+			}
+		})
+	}
+}
+
+func TestProjectorRejectsUnsafeNextMetadata(t *testing.T) {
+	t.Parallel()
+	value := "pointer"
+	next := &recordingProjector{result: &agentcore.ContextProjectionResult{
+		Messages: []agentcore.Message{{Role: "user", Content: "next"}},
+		Metadata: map[string]any{"unsafe": &value},
+	}}
+	projector := mustProjector(t, ProjectorConfig{
+		Recall:       newProjectorRecaller(t, &projectorRecallStore{}),
+		ResolveScope: func(map[string]any) (memorykit.Scope, error) { return testScope, nil },
+		BuildQuery: func(context.Context, agentcore.ContextProjectionRequest) (string, []string, []memorykit.Kind, error) {
+			return "query", nil, nil, nil
+		},
+		Next: next,
+	})
+	got, err := projector.Project(context.Background(), agentcore.ContextProjectionRequest{})
+	if got != nil || !errors.Is(err, memorykit.ErrInvalidMemory) {
+		t.Fatalf("projection = %#v, %v", got, err)
+	}
+}
+
 func TestNewProjectorRejectsNilAndTypedNilDependencies(t *testing.T) {
 	t.Parallel()
 	validRecall := newProjectorRecaller(t, &projectorRecallStore{})
@@ -512,6 +797,7 @@ type recordingProjector struct {
 	got    agentcore.ContextProjectionRequest
 	result *agentcore.ContextProjectionResult
 	err    error
+	calls  int
 }
 
 type failingEmbedder struct{ err error }
@@ -521,6 +807,7 @@ func (e failingEmbedder) Embed(context.Context, memorykit.EmbedRequest) ([][]flo
 }
 
 func (p *recordingProjector) Project(_ context.Context, req agentcore.ContextProjectionRequest) (*agentcore.ContextProjectionResult, error) {
+	p.calls++
 	p.got = cloneProjectionRequestForTest(req)
 	if p.result != nil || p.err != nil {
 		return p.result, p.err

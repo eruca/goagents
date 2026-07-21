@@ -42,8 +42,15 @@ func NewProjector(cfg ProjectorConfig) (*Projector, error) {
 }
 
 func (p *Projector) Project(ctx context.Context, request agentcore.ContextProjectionRequest) (*agentcore.ContextProjectionResult, error) {
-	canonical := cloneProjectionRequest(request)
-	scope, err := p.cfg.ResolveScope(cloneMetadata(canonical.Metadata))
+	canonical, err := cloneProjectionRequest(request)
+	if err != nil {
+		return nil, err
+	}
+	resolverMetadata, err := cloneMetadata(canonical.Metadata)
+	if err != nil {
+		return nil, err
+	}
+	scope, err := p.cfg.ResolveScope(resolverMetadata)
 	if err != nil {
 		return nil, err
 	}
@@ -51,7 +58,11 @@ func (p *Projector) Project(ctx context.Context, request agentcore.ContextProjec
 		return nil, err
 	}
 
-	text, keys, kinds, err := p.cfg.BuildQuery(ctx, cloneProjectionRequest(canonical))
+	queryRequest, err := cloneProjectionRequest(canonical)
+	if err != nil {
+		return nil, err
+	}
+	text, keys, kinds, err := p.cfg.BuildQuery(ctx, queryRequest)
 	if err != nil {
 		return nil, err
 	}
@@ -66,27 +77,40 @@ func (p *Projector) Project(ctx context.Context, request agentcore.ContextProjec
 		if !memorykit.IsRecoverable(err) {
 			return nil, err
 		}
-		metadata := cloneMetadata(canonical.Metadata)
+		metadata, metadataErr := projectionBaseMetadata(canonical.Metadata)
+		if metadataErr != nil {
+			return nil, metadataErr
+		}
 		metadata = ensureMetadata(metadata)
 		metadata["memory.degraded"] = true
 		p.record(ctx, "memory.degraded", map[string]any{"memory.degraded": true})
 		return p.projectNext(ctx, canonical.Messages, canonical.Budget, metadata)
 	}
 
-	metadata := successMetadata(canonical.Metadata, result)
+	metadata, err := successMetadata(canonical.Metadata, result)
+	if err != nil {
+		return nil, err
+	}
 	messages := canonical.Messages
 	if len(result.Items) != 0 {
 		memoryMessage, renderErr := renderMemoryMessage(result.Items)
 		if renderErr != nil {
 			return nil, renderErr
 		}
-		messages = insertBeforeLastUser(canonical.Messages, memoryMessage)
+		messages, renderErr = insertBeforeLastUser(canonical.Messages, memoryMessage)
+		if renderErr != nil {
+			return nil, renderErr
+		}
 	}
 	event := "memory.recall"
 	if len(result.DegradedChannels) != 0 {
 		event = "memory.degraded"
 	}
-	p.record(ctx, event, memoryEventPayload(result))
+	eventPayload, err := memoryEventPayload(result)
+	if err != nil {
+		return nil, err
+	}
+	p.record(ctx, event, eventPayload)
 	return p.projectNext(ctx, messages, canonical.Budget, metadata)
 }
 
@@ -169,23 +193,30 @@ func renderMemoryMessage(items []memorykit.RecallItem) (agentcore.Message, error
 	return agentcore.Message{Role: "user", Content: content}, nil
 }
 
-func insertBeforeLastUser(messages []agentcore.Message, memoryMessage agentcore.Message) []agentcore.Message {
-	insertAt := len(messages)
+func insertBeforeLastUser(messages []agentcore.Message, memoryMessage agentcore.Message) ([]agentcore.Message, error) {
+	insertAt := -1
 	for index := len(messages) - 1; index >= 0; index-- {
 		if messages[index].Role == "user" {
 			insertAt = index
 			break
 		}
 	}
+	if insertAt < 0 {
+		return nil, fmt.Errorf("%w: memory context requires a current user message", memorykit.ErrInvalidMemory)
+	}
 	result := make([]agentcore.Message, 0, len(messages)+1)
 	result = append(result, cloneMessages(messages[:insertAt])...)
 	result = append(result, memoryMessage)
 	result = append(result, cloneMessages(messages[insertAt:])...)
-	return result
+	return result, nil
 }
 
-func successMetadata(original map[string]any, result memorykit.RecallResult) map[string]any {
-	metadata := ensureMetadata(cloneMetadata(original))
+func successMetadata(original map[string]any, result memorykit.RecallResult) (map[string]any, error) {
+	metadata, err := projectionBaseMetadata(original)
+	if err != nil {
+		return nil, err
+	}
+	metadata = ensureMetadata(metadata)
 	ids := make([]string, len(result.Items))
 	for index := range result.Items {
 		ids[index] = result.Items[index].Memory.ID
@@ -208,35 +239,57 @@ func successMetadata(original map[string]any, result memorykit.RecallResult) map
 	if len(channels) != 0 {
 		metadata["memory.degraded"] = true
 	}
-	return metadata
+	return metadata, nil
 }
 
-func memoryEventPayload(result memorykit.RecallResult) map[string]any {
+func memoryEventPayload(result memorykit.RecallResult) (map[string]any, error) {
 	return successMetadata(nil, result)
 }
 
 func (p *Projector) projectNext(ctx context.Context, messages []agentcore.Message, budget agentcore.Budget, metadata map[string]any) (*agentcore.ContextProjectionResult, error) {
 	if p.cfg.Next == nil {
+		resultMetadata, err := cloneMetadata(metadata)
+		if err != nil {
+			return nil, err
+		}
 		return &agentcore.ContextProjectionResult{
-			Messages: cloneMessages(messages), Metadata: cloneMetadata(metadata),
+			Messages: cloneMessages(messages), Metadata: resultMetadata,
 		}, nil
 	}
-	nextResult, err := p.cfg.Next.Project(ctx, agentcore.ContextProjectionRequest{
-		Messages: cloneMessages(messages), Budget: budget, Metadata: cloneMetadata(metadata),
-	})
-	if err != nil || nextResult == nil {
-		return nextResult, err
+	nextMetadata, err := cloneMetadata(metadata)
+	if err != nil {
+		return nil, err
 	}
-	merged := cloneMetadata(metadata)
-	for key, value := range nextResult.Metadata {
+	nextResult, err := p.cfg.Next.Project(ctx, agentcore.ContextProjectionRequest{
+		Messages: cloneMessages(messages), Budget: budget, Metadata: nextMetadata,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if nextResult == nil {
+		return nil, nil
+	}
+	filteredNext, err := cloneMetadata(nextResult.Metadata)
+	if err != nil {
+		return nil, err
+	}
+	merged, err := cloneMetadata(metadata)
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range filteredNext {
 		if strings.HasPrefix(key, "memory.") {
 			continue
 		}
 		merged = ensureMetadata(merged)
-		merged[key] = cloneMetadataValue(value)
+		merged[key] = value
+	}
+	resultMetadata, err := cloneMetadata(merged)
+	if err != nil {
+		return nil, err
 	}
 	return &agentcore.ContextProjectionResult{
-		Messages: cloneMessages(nextResult.Messages), Metadata: merged,
+		Messages: cloneMessages(nextResult.Messages), Metadata: resultMetadata,
 	}, nil
 }
 
@@ -246,7 +299,29 @@ func (p *Projector) record(ctx context.Context, event string, payload map[string
 	}
 	// Observability is intentionally best-effort and cannot alter projection.
 	defer func() { _ = recover() }()
-	p.cfg.Observe.RecordMemoryEvent(ctx, event, cloneMetadata(payload))
+	cloned, err := cloneMetadata(payload)
+	if err != nil {
+		return
+	}
+	p.cfg.Observe.RecordMemoryEvent(ctx, event, cloned)
+}
+
+func projectionBaseMetadata(metadata map[string]any) (map[string]any, error) {
+	if metadata == nil {
+		return nil, nil
+	}
+	result := make(map[string]any, len(metadata))
+	for key, value := range metadata {
+		if strings.HasPrefix(key, "memory.") {
+			continue
+		}
+		cloned, err := cloneMetadataValue(value)
+		if err != nil {
+			return nil, err
+		}
+		result[key] = cloned
+	}
+	return result, nil
 }
 
 func metadataStrings(metadata map[string]any, key string) ([]string, error) {
@@ -272,10 +347,14 @@ func metadataStrings(metadata map[string]any, key string) ([]string, error) {
 	}
 }
 
-func cloneProjectionRequest(request agentcore.ContextProjectionRequest) agentcore.ContextProjectionRequest {
+func cloneProjectionRequest(request agentcore.ContextProjectionRequest) (agentcore.ContextProjectionRequest, error) {
 	request.Messages = cloneMessages(request.Messages)
-	request.Metadata = cloneMetadata(request.Metadata)
-	return request
+	metadata, err := cloneMetadata(request.Metadata)
+	if err != nil {
+		return agentcore.ContextProjectionRequest{}, err
+	}
+	request.Metadata = metadata
+	return request, nil
 }
 
 func cloneMessages(messages []agentcore.Message) []agentcore.Message {
@@ -292,66 +371,113 @@ func cloneMessages(messages []agentcore.Message) []agentcore.Message {
 	return result
 }
 
-func cloneMetadata(metadata map[string]any) map[string]any {
+func cloneMetadata(metadata map[string]any) (map[string]any, error) {
 	if metadata == nil {
-		return nil
+		return nil, nil
 	}
-	result := make(map[string]any, len(metadata))
-	for key, value := range metadata {
-		result[key] = cloneMetadataValue(value)
+	cloned, err := cloneMetadataReflect(reflect.ValueOf(metadata), make(map[metadataVisit]struct{}))
+	if err != nil {
+		return nil, err
 	}
-	return result
+	return cloned.Interface().(map[string]any), nil
 }
 
-func cloneMetadataValue(value any) any {
-	cloned := cloneMetadataReflect(reflect.ValueOf(value))
+func cloneMetadataValue(value any) (any, error) {
+	cloned, err := cloneMetadataReflect(reflect.ValueOf(value), make(map[metadataVisit]struct{}))
+	if err != nil {
+		return nil, err
+	}
 	if !cloned.IsValid() {
-		return nil
+		return nil, nil
 	}
-	return cloned.Interface()
+	return cloned.Interface(), nil
 }
 
-func cloneMetadataReflect(value reflect.Value) reflect.Value {
+type metadataVisit struct {
+	kind    reflect.Kind
+	pointer uintptr
+}
+
+func cloneMetadataReflect(value reflect.Value, stack map[metadataVisit]struct{}) (reflect.Value, error) {
 	if !value.IsValid() {
-		return reflect.Value{}
+		return reflect.Value{}, nil
 	}
 	switch value.Kind() {
 	case reflect.Interface:
 		if value.IsNil() {
-			return reflect.Zero(value.Type())
+			return reflect.Zero(value.Type()), nil
 		}
-		cloned := cloneMetadataReflect(value.Elem())
+		cloned, err := cloneMetadataReflect(value.Elem(), stack)
+		if err != nil {
+			return reflect.Value{}, err
+		}
 		result := reflect.New(value.Type()).Elem()
 		result.Set(cloned)
-		return result
+		return result, nil
 	case reflect.Map:
 		if value.IsNil() {
-			return reflect.Zero(value.Type())
+			return reflect.Zero(value.Type()), nil
 		}
+		if value.Type().Key().Kind() != reflect.String {
+			return reflect.Value{}, invalidProjectionMetadata()
+		}
+		visit := metadataVisit{kind: value.Kind(), pointer: uintptr(value.UnsafePointer())}
+		if _, cyclic := stack[visit]; cyclic {
+			return reflect.Value{}, invalidProjectionMetadata()
+		}
+		stack[visit] = struct{}{}
+		defer delete(stack, visit)
 		result := reflect.MakeMapWithSize(value.Type(), value.Len())
 		iterator := value.MapRange()
 		for iterator.Next() {
-			result.SetMapIndex(iterator.Key(), cloneMetadataReflect(iterator.Value()))
+			cloned, err := cloneMetadataReflect(iterator.Value(), stack)
+			if err != nil {
+				return reflect.Value{}, err
+			}
+			result.SetMapIndex(iterator.Key(), cloned)
 		}
-		return result
+		return result, nil
 	case reflect.Slice:
 		if value.IsNil() {
-			return reflect.Zero(value.Type())
+			return reflect.Zero(value.Type()), nil
 		}
+		visit := metadataVisit{kind: value.Kind(), pointer: uintptr(value.UnsafePointer())}
+		if _, cyclic := stack[visit]; cyclic {
+			return reflect.Value{}, invalidProjectionMetadata()
+		}
+		stack[visit] = struct{}{}
+		defer delete(stack, visit)
 		result := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
 		for index := 0; index < value.Len(); index++ {
-			result.Index(index).Set(cloneMetadataReflect(value.Index(index)))
+			cloned, err := cloneMetadataReflect(value.Index(index), stack)
+			if err != nil {
+				return reflect.Value{}, err
+			}
+			result.Index(index).Set(cloned)
 		}
-		return result
+		return result, nil
 	case reflect.Array:
 		result := reflect.New(value.Type()).Elem()
 		for index := 0; index < value.Len(); index++ {
-			result.Index(index).Set(cloneMetadataReflect(value.Index(index)))
+			cloned, err := cloneMetadataReflect(value.Index(index), stack)
+			if err != nil {
+				return reflect.Value{}, err
+			}
+			result.Index(index).Set(cloned)
 		}
-		return result
+		return result, nil
+	case reflect.Bool, reflect.String,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64:
+		return value, nil
 	default:
-		return value
+		return reflect.Value{}, invalidProjectionMetadata()
 	}
+}
+
+func invalidProjectionMetadata() error {
+	return fmt.Errorf("%w: unsafe projection metadata", memorykit.ErrInvalidMemory)
 }
 
 func ensureMetadata(metadata map[string]any) map[string]any {
