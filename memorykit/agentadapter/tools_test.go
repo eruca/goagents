@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"sort"
 	"strings"
@@ -236,13 +237,6 @@ func TestReadMemoryRejectsMixedSnapshotsAndDisappearingRecordsAsNotFound(t *test
 			value.Version++
 			return value
 		}()},
-		{name: "erase", second: func() memorykit.Memory {
-			value := first
-			value.Status = memorykit.StatusInactive
-			value.Content = ""
-			value.Version++
-			return value
-		}()},
 	}
 	for _, test := range mutations {
 		t.Run(test.name, func(t *testing.T) {
@@ -291,6 +285,39 @@ func TestReadMemoryClassifiesSecondGetFailures(t *testing.T) {
 				return
 			}
 			if err != nil || result == nil || result.ForLLM != test.wantLLM || result.IsError != test.wantIsErr {
+				t.Fatalf("result=%#v err=%v", result, err)
+			}
+		})
+	}
+}
+
+func TestReadMemoryRejectsMalformedSnapshotsBeforeClassifyingRaces(t *testing.T) {
+	valid := validToolMemory(toolMemoryID1, "content")
+	tests := []struct {
+		name   string
+		first  memorykit.Memory
+		second memorykit.Memory
+	}{
+		{name: "foreign scope in second", first: valid, second: func() memorykit.Memory { value := valid; value.Scope.SubjectID = "foreign"; return value }()},
+		{name: "zero version in second", first: valid, second: func() memorykit.Memory { value := valid; value.Version = 0; return value }()},
+		{name: "nan confidence in second", first: valid, second: func() memorykit.Memory { value := valid; value.Confidence = math.NaN(); return value }()},
+		{name: "blank erased second", first: valid, second: func() memorykit.Memory {
+			value := valid
+			value.Status = memorykit.StatusInactive
+			value.Content = ""
+			value.Version++
+			return value
+		}()},
+		{name: "same nan snapshot twice", first: func() memorykit.Memory { value := valid; value.Confidence = math.NaN(); return value }(), second: func() memorykit.Memory { value := valid; value.Confidence = math.NaN(); return value }()},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := &toolLifecycleStore{
+				getResults: []toolGetResult{{memory: test.first}, {memory: test.second}},
+				sources:    []memorykit.Source{{Kind: "run", Ref: "source:1"}},
+			}
+			result, err := executeReadTool(t, store, toolMemoryID1)
+			if result != nil || !errors.Is(err, memorykit.ErrInvalidRecallResult) {
 				t.Fatalf("result=%#v err=%v", result, err)
 			}
 		})

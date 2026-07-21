@@ -189,8 +189,8 @@ func (p *ToolProvider) newReadTool(scope memorykit.Scope) tools.Tool {
 				}
 				return nil, getErr
 			}
-			if memory.ID != parsed.MemoryID || memory.Scope != scope || !memory.Status.IsValid() {
-				return nil, memorykit.ErrInvalidRecallResult
+			if err := validateReadMemorySnapshot(memory, parsed.MemoryID, scope, p.cfg.Limits); err != nil {
+				return nil, err
 			}
 			if !effectiveMemory(memory, now) {
 				return memoryNotFound(), nil
@@ -221,7 +221,10 @@ func (p *ToolProvider) newReadTool(scope memorykit.Scope) tools.Tool {
 				}
 				return nil, confirmErr
 			}
-			if confirmed != memory || !effectiveMemory(confirmed, now) {
+			if err := validateReadMemorySnapshot(confirmed, parsed.MemoryID, scope, p.cfg.Limits); err != nil {
+				return nil, err
+			}
+			if !effectiveMemory(confirmed, now) || confirmed != memory {
 				return memoryNotFound(), nil
 			}
 			if err := validateStoredMemory(confirmed, sources, p.cfg.Limits); err != nil {
@@ -459,6 +462,13 @@ func recallToolRecords(items []memorykit.RecallItem, scope memorykit.Scope, now 
 func effectiveMemory(memory memorykit.Memory, now time.Time) bool {
 	return memory.Status == memorykit.StatusActive && !now.Before(memory.ValidFrom) &&
 		(memory.ValidUntil.IsZero() || now.Before(memory.ValidUntil))
+}
+
+func validateReadMemorySnapshot(memory memorykit.Memory, expectedID string, scope memorykit.Scope, limits memorykit.Limits) error {
+	if memory.ID != expectedID || memory.Scope != scope {
+		return memorykit.ErrInvalidRecallResult
+	}
+	return validateStoredMemory(memory, nil, limits)
 }
 
 func validateStoredMemory(memory memorykit.Memory, sources []memorykit.Source, limits memorykit.Limits) error {
