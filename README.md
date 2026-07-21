@@ -6,7 +6,8 @@ tested independently.
 
 ## Modules
 
-The current release layout contains 13 independently versioned modules:
+The current release layout contains 14 workspace modules: 13 released modules
+plus unreleased `memorykit`.
 
 - [`goagent`](goagent/README.md): agent loop, typed tools, approvals, events, and provider adapters.
 - [`workflowkit`](workflowkit/README.md): durable workflow lifecycle, retries, approvals, and queue leases.

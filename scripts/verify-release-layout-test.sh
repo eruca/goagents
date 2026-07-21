@@ -80,6 +80,38 @@ if [[ "$output" != *"release layout error: release delta set mismatch"* ]]; then
   exit 1
 fi
 
+if ! cp "$source_script" "$test_script" >/dev/null 2>&1; then
+  printf 'release layout test error: source copy failed\n' >&2
+  exit 1
+fi
+if ! awk '
+  BEGIN { in_delta = 0; changed = 0 }
+  /^release_delta_tags=\(/ { in_delta = 1 }
+  in_delta && /^\)$/ && !changed {
+    print "  \"memorykit/v0.0.0\""
+    changed = 1
+    in_delta = 0
+  }
+  { print }
+  END { exit(changed ? 0 : 1) }
+' "$test_script" >"$rewrite_script" 2>/dev/null; then
+  printf 'release layout test error: release delta set not found\n' >&2
+  exit 1
+fi
+if ! mv "$rewrite_script" "$test_script" >/dev/null 2>&1; then
+  printf 'release layout test error: rewrite install failed\n' >&2
+  exit 1
+fi
+
+if output="$(bash "$test_script" 2>&1)"; then
+  printf 'release layout test error: unreleased module was accepted in release delta\n' >&2
+  exit 1
+fi
+if [[ "$output" != *"release layout error: release delta set mismatch"* ]]; then
+  printf 'release layout test error: unreleased delta mismatch was not reported\n' >&2
+  exit 1
+fi
+
 if ! cleanup; then
   cleanup_error_reported=1
   printf 'release layout test error: cleanup failed\n' >&2

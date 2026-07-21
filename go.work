@@ -10,6 +10,7 @@ use (
 	./goagent
 	./hostkit
 	./llmkit
+	./memorykit
 	./mcpkit
 	./mcpkit/officialsdk
 	./ocrs
@@ -46,3 +47,5 @@ replace github.com/eruca/goagents/skillkit v0.1.0 => ./skillkit
 replace github.com/eruca/goagents/workflowkit/agentstep v0.1.0 => ./workflowkit/agentstep
 
 replace github.com/eruca/goagents/mcpkit/officialsdk v0.1.0 => ./mcpkit/officialsdk
+
+replace github.com/eruca/goagents/memorykit v0.0.0 => ./memorykit

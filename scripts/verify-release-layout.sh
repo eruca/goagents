@@ -21,6 +21,10 @@ published_modules=(
   "mcpkit/officialsdk|${MODULE_PREFIX}mcpkit/officialsdk|v0.1.0|mcpkit/officialsdk/v0.1.0|existing"
 )
 
+unreleased_modules=(
+  "memorykit|${MODULE_PREFIX}memorykit|v0.0.0"
+)
+
 release_delta_tags=(
   "hostkit/v0.1.0"
   "workflowkit/v0.1.1"
@@ -191,6 +195,10 @@ expected_module_dirs() {
     IFS='|' read -r dir module version tag release_status <<<"$spec"
     printf '%s\n' "$dir"
   done
+  for spec in "${unreleased_modules[@]}"; do
+    IFS='|' read -r dir _ <<<"$spec"
+    printf '%s\n' "$dir"
+  done
   for spec in "${example_modules[@]}"; do
     IFS='|' read -r dir _ <<<"$spec"
     printf '%s\n' "$dir"
@@ -230,6 +238,10 @@ expected_workspace_replaces() {
 
   for spec in "${published_modules[@]}"; do
     IFS='|' read -r dir module version tag release_status <<<"$spec"
+    printf '%s %s => ./%s\n' "$module" "$version" "$dir"
+  done
+  for spec in "${unreleased_modules[@]}"; do
+    IFS='|' read -r dir module version <<<"$spec"
     printf '%s %s => ./%s\n' "$module" "$version" "$dir"
   done
 }
@@ -366,6 +378,13 @@ for spec in "${published_modules[@]}"; do
   check_no_internal_replace "$dir"
   check_workspace_replace "$dir" "$module" "$version"
   printf 'release module: %-28s tag=%s\n' "$module" "$tag"
+done
+
+for spec in "${unreleased_modules[@]}"; do
+  IFS='|' read -r dir module version <<<"$spec"
+  check_module_path "$dir" "$module"
+  check_workspace_replace "$dir" "$module" "$version"
+  printf 'unreleased module: %-26s version=%s\n' "$module" "$version"
 done
 
 for spec in "${example_modules[@]}"; do
