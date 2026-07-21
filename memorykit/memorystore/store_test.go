@@ -10,6 +10,21 @@ import (
 	"github.com/eruca/goagents/memorykit/storetest"
 )
 
+const (
+	memoryIDExact      = "10000000-0000-4000-8000-000000000001"
+	memoryIDFullText   = "10000000-0000-4000-8000-000000000002"
+	memoryIDVector     = "10000000-0000-4000-8000-000000000003"
+	memoryIDCandidate  = "10000000-0000-4000-8000-000000000004"
+	memoryIDInactive   = "10000000-0000-4000-8000-000000000005"
+	memoryIDFuture     = "10000000-0000-4000-8000-000000000006"
+	memoryIDExpired    = "10000000-0000-4000-8000-000000000007"
+	memoryIDOtherScope = "10000000-0000-4000-8000-000000000008"
+	memoryIDOtherKind  = "10000000-0000-4000-8000-000000000009"
+	memoryIDLower      = "10000000-0000-4000-8000-000000000010"
+	memoryIDHigher     = "10000000-0000-4000-8000-000000000011"
+	memoryIDErase      = "10000000-0000-4000-8000-000000000012"
+)
+
 func TestNewRejectsInvalidLimits(t *testing.T) {
 	if _, err := New(memorykit.Limits{}); err == nil {
 		t.Fatal("New accepted empty limits")
@@ -37,23 +52,23 @@ func TestSearchCandidatesFindsExactFullTextAndPrivateVectorFixtures(t *testing.T
 	scope := memorykit.Scope{TenantID: "tenant-1", SubjectType: memorykit.SubjectProject, SubjectID: "project-1"}
 	otherScope := memorykit.Scope{TenantID: "tenant-1", SubjectType: memorykit.SubjectProject, SubjectID: "project-2"}
 
-	createTestMemory(t, store, testMemoryRequest("m-exact", scope, memorykit.KindDecision, "build.test_command", "Run the verified command", memorykit.StatusActive, now, 80))
-	createTestMemory(t, store, testMemoryRequest("m-fts", scope, memorykit.KindDecision, "testing.pg", "Verify VECTOR STORAGE against the real database", memorykit.StatusActive, now, 70))
-	createTestMemory(t, store, testMemoryRequest("m-vector", scope, memorykit.KindDecision, "semantic.database", "Check semantic persistence", memorykit.StatusActive, now, 60))
-	createTestMemory(t, store, testMemoryRequest("m-candidate", scope, memorykit.KindDecision, "build.test_command", "VECTOR STORAGE candidate", memorykit.StatusCandidate, now, 100))
-	createTestMemory(t, store, testMemoryRequest("m-inactive", scope, memorykit.KindDecision, "inactive.key", "VECTOR STORAGE inactive", memorykit.StatusInactive, now, 100))
-	future := testMemoryRequest("m-future", scope, memorykit.KindDecision, "future.key", "VECTOR STORAGE future", memorykit.StatusActive, now, 100)
+	createTestMemory(t, store, testMemoryRequest(memoryIDExact, scope, memorykit.KindDecision, "build.test_command", "Run the verified command", memorykit.StatusActive, now, 80))
+	createTestMemory(t, store, testMemoryRequest(memoryIDFullText, scope, memorykit.KindDecision, "testing.pg", "Verify VECTOR STORAGE against the real database", memorykit.StatusActive, now, 70))
+	createTestMemory(t, store, testMemoryRequest(memoryIDVector, scope, memorykit.KindDecision, "semantic.database", "Check semantic persistence", memorykit.StatusActive, now, 60))
+	createTestMemory(t, store, testMemoryRequest(memoryIDCandidate, scope, memorykit.KindDecision, "build.test_command", "VECTOR STORAGE candidate", memorykit.StatusCandidate, now, 100))
+	createTestMemory(t, store, testMemoryRequest(memoryIDInactive, scope, memorykit.KindDecision, "inactive.key", "VECTOR STORAGE inactive", memorykit.StatusInactive, now, 100))
+	future := testMemoryRequest(memoryIDFuture, scope, memorykit.KindDecision, "future.key", "VECTOR STORAGE future", memorykit.StatusActive, now, 100)
 	future.ValidFrom = now.Add(time.Minute)
 	createTestMemory(t, store, future)
-	expired := testMemoryRequest("m-expired", scope, memorykit.KindDecision, "expired.key", "VECTOR STORAGE expired", memorykit.StatusActive, now, 100)
+	expired := testMemoryRequest(memoryIDExpired, scope, memorykit.KindDecision, "expired.key", "VECTOR STORAGE expired", memorykit.StatusActive, now, 100)
 	expired.ValidUntil = now
 	createTestMemory(t, store, expired)
-	createTestMemory(t, store, testMemoryRequest("m-other-scope", otherScope, memorykit.KindDecision, "build.test_command", "VECTOR STORAGE other", memorykit.StatusActive, now, 100))
-	createTestMemory(t, store, testMemoryRequest("m-other-kind", scope, memorykit.KindFact, "other.kind", "VECTOR STORAGE fact", memorykit.StatusActive, now, 100))
+	createTestMemory(t, store, testMemoryRequest(memoryIDOtherScope, otherScope, memorykit.KindDecision, "build.test_command", "VECTOR STORAGE other", memorykit.StatusActive, now, 100))
+	createTestMemory(t, store, testMemoryRequest(memoryIDOtherKind, scope, memorykit.KindFact, "other.kind", "VECTOR STORAGE fact", memorykit.StatusActive, now, 100))
 
-	putTestEmbedding(t, store, "m-vector", "test-3d", []float32{1, 0, 0})
-	putTestEmbedding(t, store, "m-fts", "test-3d", []float32{0, 1, 0})
-	putTestEmbedding(t, store, "m-candidate", "test-3d", []float32{1, 0, 0})
+	putTestEmbedding(t, store, memoryIDVector, "test-3d", []float32{1, 0, 0})
+	putTestEmbedding(t, store, memoryIDFullText, "test-3d", []float32{0, 1, 0})
+	putTestEmbedding(t, store, memoryIDCandidate, "test-3d", []float32{1, 0, 0})
 
 	got, err := store.SearchCandidates(context.Background(), memorykit.CandidateQuery{
 		Scope: scope, Text: "vector storage", Keys: []string{"build.test_command"},
@@ -64,15 +79,15 @@ func TestSearchCandidatesFindsExactFullTextAndPrivateVectorFixtures(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertCandidateIDs(t, got.Exact, []string{"m-exact"})
-	assertCandidateIDs(t, got.FullText, []string{"m-fts"})
-	assertCandidateIDs(t, got.Vector, []string{"m-vector"})
+	assertCandidateIDs(t, got.Exact, []string{memoryIDExact})
+	assertCandidateIDs(t, got.FullText, []string{memoryIDFullText})
+	assertCandidateIDs(t, got.Vector, []string{memoryIDVector})
 	if got.Exact[0].Rank != 1 || got.Exact[0].Channel != memorykit.ChannelExact ||
 		got.FullText[0].Rank != 1 || got.FullText[0].Channel != memorykit.ChannelFullText ||
 		got.Vector[0].Rank != 1 || got.Vector[0].Channel != memorykit.ChannelVector || got.Vector[0].Similarity != 1 {
 		t.Fatalf("unexpected candidates: %#v", got)
 	}
-	if !reflect.DeepEqual(got.Exact[0].Sources, []memorykit.Source{{Kind: "event", Ref: "ref-m-exact", EvidenceHash: "hash"}}) {
+	if !reflect.DeepEqual(got.Exact[0].Sources, []memorykit.Source{{Kind: "event", Ref: "ref-" + memoryIDExact, EvidenceHash: "hash"}}) {
 		t.Fatalf("sources = %#v", got.Exact[0].Sources)
 	}
 }
@@ -81,10 +96,10 @@ func TestSearchCandidatesAppliesDeterministicLimitsAndReturnsCopies(t *testing.T
 	store := newTestStore(t)
 	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
 	scope := memorykit.Scope{TenantID: "tenant-1", SubjectType: memorykit.SubjectProject, SubjectID: "project-1"}
-	createTestMemory(t, store, testMemoryRequest("lower", scope, memorykit.KindDecision, "same.key", "shared phrase lower", memorykit.StatusActive, now, 10))
-	createTestMemory(t, store, testMemoryRequest("higher", scope, memorykit.KindLesson, "same.key", "shared phrase higher", memorykit.StatusActive, now, 90))
-	putTestEmbedding(t, store, "lower", "test-3d", []float32{0.8, 0.6, 0})
-	putTestEmbedding(t, store, "higher", "test-3d", []float32{1, 0, 0})
+	createTestMemory(t, store, testMemoryRequest(memoryIDLower, scope, memorykit.KindDecision, "same.key", "shared phrase lower", memorykit.StatusActive, now, 10))
+	createTestMemory(t, store, testMemoryRequest(memoryIDHigher, scope, memorykit.KindLesson, "same.key", "shared phrase higher", memorykit.StatusActive, now, 90))
+	putTestEmbedding(t, store, memoryIDLower, "test-3d", []float32{0.8, 0.6, 0})
+	putTestEmbedding(t, store, memoryIDHigher, "test-3d", []float32{1, 0, 0})
 	queryVector := []float32{1, 0, 0}
 
 	got, err := store.SearchCandidates(context.Background(), memorykit.CandidateQuery{
@@ -95,17 +110,17 @@ func TestSearchCandidatesAppliesDeterministicLimitsAndReturnsCopies(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertCandidateIDs(t, got.Exact, []string{"higher"})
-	assertCandidateIDs(t, got.FullText, []string{"higher"})
-	assertCandidateIDs(t, got.Vector, []string{"higher"})
+	assertCandidateIDs(t, got.Exact, []string{memoryIDHigher})
+	assertCandidateIDs(t, got.FullText, []string{memoryIDHigher})
+	assertCandidateIDs(t, got.Vector, []string{memoryIDHigher})
 	got.Exact[0].Sources[0].Ref = "mutated"
 	queryVector[0] = 0
-	sources, err := store.Sources(context.Background(), scope, "higher")
+	sources, err := store.Sources(context.Background(), scope, memoryIDHigher)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sources[0].Ref != "ref-higher" || store.embeddings["higher"].vector[0] != 1 {
-		t.Fatalf("store state mutated: sources=%#v embedding=%#v", sources, store.embeddings["higher"])
+	if sources[0].Ref != "ref-"+memoryIDHigher || store.embeddings[memoryIDHigher].vector[0] != 1 {
+		t.Fatalf("store state mutated: sources=%#v embedding=%#v", sources, store.embeddings[memoryIDHigher])
 	}
 }
 
@@ -130,19 +145,19 @@ func TestEraseRemovesPrivateEmbeddingAndAllRecallCandidates(t *testing.T) {
 	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
 	scope := memorykit.Scope{TenantID: "tenant-1", SubjectType: memorykit.SubjectProject, SubjectID: "project-1"}
 	createTestMemory(t, store, testMemoryRequest(
-		"erase-me", scope, memorykit.KindDecision, "vector.storage", "verify vector storage",
+		memoryIDErase, scope, memorykit.KindDecision, "vector.storage", "verify vector storage",
 		memorykit.StatusActive, now, 80,
 	))
-	putTestEmbedding(t, store, "erase-me", "test-3d", []float32{1, 0, 0})
+	putTestEmbedding(t, store, memoryIDErase, "test-3d", []float32{1, 0, 0})
 
 	if err := store.Erase(context.Background(), memorykit.VersionedCommand{
-		Scope: scope, ID: "erase-me", ExpectedVersion: 1,
+		Scope: scope, ID: memoryIDErase, ExpectedVersion: 1,
 		Actor: "test", Reason: "erase fixture", Now: now.Add(time.Minute),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	store.mu.RLock()
-	_, embeddingExists := store.embeddings["erase-me"]
+	_, embeddingExists := store.embeddings[memoryIDErase]
 	store.mu.RUnlock()
 	if embeddingExists {
 		t.Fatal("Erase retained private embedding")

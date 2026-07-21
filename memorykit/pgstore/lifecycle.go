@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/eruca/goagents/memorykit"
@@ -66,7 +65,7 @@ func (s *Store) Create(ctx context.Context, request memorykit.CreateRequest) (me
 		CreatedAt: canonicalTime(request.Now), UpdatedAt: canonicalTime(request.Now),
 	}
 	if memory.Status == memorykit.StatusActive {
-		if err := s.supersedeCurrentActive(ctx, tx, memory, memory.ID, request.Actor, request.Reason, request.Now, false); err != nil {
+		if err := s.supersedeCurrentActive(ctx, tx, memory, memory.ID, request.Actor, request.Reason, request.Now); err != nil {
 			return memorykit.Memory{}, err
 		}
 	}
@@ -197,7 +196,7 @@ func (s *Store) Activate(ctx context.Context, command memorykit.VersionedCommand
 	if err := memorykit.ValidateCommand(command, s.cfg.Limits); err != nil {
 		return memorykit.Memory{}, err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return memorykit.Memory{}, wrapBackend("activate transaction", err)
 	}
@@ -210,7 +209,7 @@ func (s *Store) Activate(ctx context.Context, command memorykit.VersionedCommand
 	if target.Status != memorykit.StatusCandidate {
 		return memorykit.Memory{}, memorykit.ErrConflict
 	}
-	if err := s.supersedeCurrentActive(ctx, tx, target, target.ID, command.Actor, command.Reason, command.Now, true); err != nil {
+	if err := s.supersedeCurrentActive(ctx, tx, target, target.ID, command.Actor, command.Reason, command.Now); err != nil {
 		return memorykit.Memory{}, err
 	}
 	activated, err := updateStatus(ctx, tx, command, memorykit.StatusActive)
@@ -471,7 +470,6 @@ func (s *Store) supersedeCurrentActive(
 	target memorykit.Memory,
 	excludeID, actor, reason string,
 	now time.Time,
-	rejectAtOrAfter bool,
 ) error {
 	active, err := scanMemory(tx.QueryRowContext(ctx, `SELECT `+memoryColumns+` FROM memories
 		WHERE tenant_id = $1 AND subject_type = $2 AND subject_id = $3
@@ -483,14 +481,7 @@ func (s *Store) supersedeCurrentActive(
 		return nil
 	}
 	if err != nil {
-		return wrapBackend("lock active memory", err)
-	}
-	// Two reviewers can approve sibling candidates at the same logical time.
-	// Once one activation has advanced the key to that time, the sibling is a
-	// stale competing decision and must conflict instead of immediately
-	// superseding the winner. A later explicit activation can still supersede it.
-	if rejectAtOrAfter && !active.UpdatedAt.Before(now) {
-		return memorykit.ErrConflict
+		return lifecycleWriteError("lock active memory", err)
 	}
 	command := memorykit.VersionedCommand{
 		Scope: active.Scope, ID: active.ID, ExpectedVersion: active.Version,
@@ -511,7 +502,7 @@ func lockCommandTarget(ctx context.Context, tx *sql.Tx, command memorykit.Versio
 		return memorykit.Memory{}, memorykit.ErrNotFound
 	}
 	if err != nil {
-		return memorykit.Memory{}, wrapBackend("lock memory", err)
+		return memorykit.Memory{}, lifecycleWriteError("lock memory", err)
 	}
 	if memory.Version != command.ExpectedVersion {
 		return memorykit.Memory{}, memorykit.ErrConflict
@@ -643,10 +634,7 @@ func validateIdentity(scope memorykit.Scope, id string) error {
 	if err := scope.Validate(); err != nil {
 		return err
 	}
-	if strings.TrimSpace(id) == "" {
-		return fmt.Errorf("%w: memory ID is required", memorykit.ErrInvalidMemory)
-	}
-	return nil
+	return memorykit.ValidateMemoryID(id)
 }
 
 func lifecycleWriteError(op string, err error) error {
@@ -657,7 +645,7 @@ func lifecycleWriteError(op string, err error) error {
 		return err
 	}
 	var pgError *pgconn.PgError
-	if errors.As(err, &pgError) && pgError.Code == "23505" {
+	if errors.As(err, &pgError) && (pgError.Code == "23505" || pgError.Code == "40001") {
 		return memorykit.ErrConflict
 	}
 	return wrapBackend(op, err)

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/google/uuid"
 )
 
 // Validate checks that a scope identifies exactly one supported subject.
@@ -35,6 +37,16 @@ func (s Status) IsValid() bool {
 	return s == StatusCandidate || s == StatusActive || s == StatusInactive
 }
 
+// ValidateMemoryID accepts only the canonical lowercase UUID text form. Storage
+// implementations must not normalize alternate representations implicitly.
+func ValidateMemoryID(id string) error {
+	parsed, err := uuid.Parse(id)
+	if err != nil || parsed.String() != id {
+		return fmt.Errorf("%w: memory ID must be a canonical lowercase UUID", ErrInvalidMemory)
+	}
+	return nil
+}
+
 func ValidateCreateRequest(request CreateRequest, limits Limits) error {
 	if err := limits.Validate(); err != nil {
 		return err
@@ -42,7 +54,10 @@ func ValidateCreateRequest(request CreateRequest, limits Limits) error {
 	if err := request.Scope.Validate(); err != nil {
 		return err
 	}
-	if strings.TrimSpace(request.ID) == "" || !request.Kind.IsValid() || !request.Status.IsValid() ||
+	if err := ValidateMemoryID(request.ID); err != nil {
+		return err
+	}
+	if !request.Kind.IsValid() || !request.Status.IsValid() ||
 		!validKey(request.Key, limits.MaxKeyRunes) || !validContent(request.Content, limits.MaxContentRunes) ||
 		!validTimeRange(request.ValidFrom, request.ValidUntil) || !validImportance(request.Importance) ||
 		!validConfidence(request.Confidence) ||
@@ -72,7 +87,10 @@ func ValidateCommand(command VersionedCommand, limits Limits) error {
 	if err := command.Scope.Validate(); err != nil {
 		return err
 	}
-	if strings.TrimSpace(command.ID) == "" || command.ExpectedVersion <= 0 ||
+	if err := ValidateMemoryID(command.ID); err != nil {
+		return err
+	}
+	if command.ExpectedVersion <= 0 ||
 		!validMetadata(command.Actor, limits) || !validMetadata(command.Reason, limits) {
 		return fmt.Errorf("%w: invalid versioned command", ErrInvalidMemory)
 	}
@@ -100,7 +118,10 @@ func ValidateRevisionQuery(query RevisionQuery, limits Limits) error {
 	if err := query.Scope.Validate(); err != nil {
 		return err
 	}
-	if strings.TrimSpace(query.MemoryID) == "" || query.BeforeVersion < 0 ||
+	if err := ValidateMemoryID(query.MemoryID); err != nil {
+		return err
+	}
+	if query.BeforeVersion < 0 ||
 		query.Limit <= 0 || query.Limit > limits.MaxListItems {
 		return fmt.Errorf("%w: invalid revision query", ErrInvalidMemory)
 	}
@@ -114,11 +135,18 @@ func ValidateSources(sources []Source, limits Limits) error {
 	if len(sources) > limits.MaxSourcesPerMemory {
 		return fmt.Errorf("%w: too many sources", ErrInvalidMemory)
 	}
+	type sourceIdentity struct{ kind, ref string }
+	seen := make(map[sourceIdentity]struct{}, len(sources))
 	for _, source := range sources {
 		if !validMetadata(source.Kind, limits) || !validMetadata(source.Ref, limits) ||
 			!validMetadata(source.EvidenceHash, limits) {
 			return fmt.Errorf("%w: invalid source", ErrInvalidMemory)
 		}
+		identity := sourceIdentity{kind: source.Kind, ref: source.Ref}
+		if _, exists := seen[identity]; exists {
+			return fmt.Errorf("%w: duplicate source", ErrInvalidMemory)
+		}
+		seen[identity] = struct{}{}
 	}
 	return nil
 }

@@ -288,6 +288,9 @@ func (s *Store) Activate(ctx context.Context, command memorykit.VersionedCommand
 	if err != nil {
 		return memorykit.Memory{}, err
 	}
+	if memory.Status != memorykit.StatusCandidate {
+		return memorykit.Memory{}, memorykit.ErrConflict
+	}
 
 	s.supersedeActiveLocked(memory, memory.ID, command.Actor, command.Reason, command.Now)
 	memory.Status = memorykit.StatusActive
@@ -329,11 +332,11 @@ func (s *Store) Correct(ctx context.Context, request memorykit.CorrectRequest) (
 }
 
 func (s *Store) Dismiss(ctx context.Context, command memorykit.VersionedCommand) (memorykit.Memory, error) {
-	return s.transitionInactive(ctx, command, memorykit.RevisionDismiss)
+	return s.transitionInactive(ctx, command, memorykit.StatusCandidate, memorykit.RevisionDismiss)
 }
 
 func (s *Store) Forget(ctx context.Context, command memorykit.VersionedCommand) (memorykit.Memory, error) {
-	return s.transitionInactive(ctx, command, memorykit.RevisionForget)
+	return s.transitionInactive(ctx, command, memorykit.StatusActive, memorykit.RevisionForget)
 }
 
 func (s *Store) Erase(ctx context.Context, command memorykit.VersionedCommand) error {
@@ -407,7 +410,12 @@ func (s *Store) Revisions(ctx context.Context, query memorykit.RevisionQuery) ([
 	return result, nil
 }
 
-func (s *Store) transitionInactive(ctx context.Context, command memorykit.VersionedCommand, action memorykit.RevisionAction) (memorykit.Memory, error) {
+func (s *Store) transitionInactive(
+	ctx context.Context,
+	command memorykit.VersionedCommand,
+	requiredStatus memorykit.Status,
+	action memorykit.RevisionAction,
+) (memorykit.Memory, error) {
 	if err := ctx.Err(); err != nil {
 		return memorykit.Memory{}, err
 	}
@@ -422,6 +430,9 @@ func (s *Store) transitionInactive(ctx context.Context, command memorykit.Versio
 	memory, err := s.commandTargetLocked(command)
 	if err != nil {
 		return memorykit.Memory{}, err
+	}
+	if memory.Status != requiredStatus {
+		return memorykit.Memory{}, memorykit.ErrConflict
 	}
 	memory.Status = memorykit.StatusInactive
 	memory.Version++
@@ -536,8 +547,5 @@ func validateIdentity(scope memorykit.Scope, id string) error {
 	if err := scope.Validate(); err != nil {
 		return err
 	}
-	if strings.TrimSpace(id) == "" {
-		return fmt.Errorf("%w: memory ID is required", memorykit.ErrInvalidMemory)
-	}
-	return nil
+	return memorykit.ValidateMemoryID(id)
 }

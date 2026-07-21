@@ -116,10 +116,30 @@ func TestEraseScrubsPrivateDataFromAllPostgreSQLTables(t *testing.T) {
 
 func TestConcurrentActivationHasExactlyOneWinner(t *testing.T) {
 	store := openIsolatedStore(t)
+	current, err := store.Create(context.Background(), lifecycleCreateRequest(
+		"e3000000-0000-4000-8000-000000000000", memorykit.StatusActive, "current active"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	first, err := store.Create(context.Background(), lifecycleCreateRequest(
 		"e3111111-1111-1111-1111-111111111111", memorykit.StatusCandidate, "first candidate"))
 	if err != nil {
 		t.Fatal(err)
+	}
+
+	// Hold the current active row until both serializable Activate transactions
+	// have established snapshots and are waiting on its lock. This proves real
+	// transaction overlap instead of relying on goroutine scheduling.
+	blocker, err := store.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = blocker.Rollback() })
+	var lockedID string
+	if err := blocker.QueryRowContext(context.Background(), `
+		SELECT id FROM memories WHERE id = $1 FOR UPDATE
+	`, current.ID).Scan(&lockedID); err != nil {
+		t.Fatalf("lock current active: %v", err)
 	}
 	secondRequest := lifecycleCreateRequest(
 		"e3222222-2222-2222-2222-222222222222", memorykit.StatusCandidate, "second candidate")
@@ -132,7 +152,7 @@ func TestConcurrentActivationHasExactlyOneWinner(t *testing.T) {
 	errorsByCall := make([]error, 2)
 	commands := []memorykit.VersionedCommand{
 		{Scope: first.Scope, ID: first.ID, ExpectedVersion: first.Version, Actor: "reviewer", Reason: "race", Now: first.UpdatedAt.Add(time.Minute)},
-		{Scope: second.Scope, ID: second.ID, ExpectedVersion: second.Version, Actor: "reviewer", Reason: "race", Now: second.UpdatedAt.Add(time.Minute)},
+		{Scope: second.Scope, ID: second.ID, ExpectedVersion: second.Version, Actor: "reviewer", Reason: "race", Now: second.UpdatedAt.Add(2 * time.Minute)},
 	}
 	var workers sync.WaitGroup
 	for i := range commands {
@@ -144,6 +164,10 @@ func TestConcurrentActivationHasExactlyOneWinner(t *testing.T) {
 		}(i)
 	}
 	close(start)
+	waitForLockWaiters(t, store, 2)
+	if err := blocker.Rollback(); err != nil {
+		t.Fatalf("release current active lock: %v", err)
+	}
 	workers.Wait()
 
 	succeeded, conflicted := 0, 0
@@ -166,6 +190,28 @@ func TestConcurrentActivationHasExactlyOneWinner(t *testing.T) {
 	if err != nil || len(active) != 1 {
 		t.Fatalf("active memories = %#v, %v", active, err)
 	}
+}
+
+func waitForLockWaiters(t *testing.T, store *Store, want int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var count int
+		if err := store.db.QueryRowContext(context.Background(), `
+			SELECT count(*) FROM pg_stat_activity
+			WHERE datname = current_database()
+			  AND pid <> pg_backend_pid()
+			  AND wait_event_type = 'Lock'
+			  AND query LIKE '%FOR UPDATE%'
+		`).Scan(&count); err != nil {
+			t.Fatalf("query lock waiters: %v", err)
+		}
+		if count >= want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d activation lock waiters", want)
 }
 
 func TestCreateIdempotencyReturnsExistingRecordWithoutRevision(t *testing.T) {
@@ -194,26 +240,6 @@ func TestCreateIdempotencyReturnsExistingRecordWithoutRevision(t *testing.T) {
 	request.Content = "different content"
 	if _, err := store.Create(context.Background(), request); !errors.Is(err, memorykit.ErrConflict) {
 		t.Fatalf("changed idempotency replay error = %v, want ErrConflict", err)
-	}
-}
-
-func TestCreateIdempotencyFingerprintIncludesSourceOrder(t *testing.T) {
-	store := openIsolatedStore(t)
-	request := lifecycleCreateRequest(
-		"e5111111-1111-1111-1111-111111111111", memorykit.StatusCandidate, "ordered sources")
-	request.IdempotencyKey = "create:idempotency:source-order"
-	request.Sources = []memorykit.Source{
-		{Kind: "artifact", Ref: "artifact:first", EvidenceHash: "sha256:first"},
-		{Kind: "message", Ref: "message:second", EvidenceHash: "sha256:second"},
-	}
-	if _, err := store.Create(context.Background(), request); err != nil {
-		t.Fatal(err)
-	}
-
-	reordered := request
-	reordered.Sources = []memorykit.Source{request.Sources[1], request.Sources[0]}
-	if _, err := store.Create(context.Background(), reordered); !errors.Is(err, memorykit.ErrConflict) {
-		t.Fatalf("reordered source replay error = %v, want ErrConflict", err)
 	}
 }
 
@@ -251,54 +277,6 @@ func TestConcurrentIdenticalCreateIsIdempotent(t *testing.T) {
 	})
 	if err != nil || len(revisions) != 1 {
 		t.Fatalf("concurrent create revisions = %#v, %v", revisions, err)
-	}
-}
-
-func TestLifecycleTransitionsRejectWrongStartingStatus(t *testing.T) {
-	store := openIsolatedStore(t)
-	active, err := store.Create(context.Background(), lifecycleCreateRequest(
-		"e6111111-1111-1111-1111-111111111111", memorykit.StatusActive, "active content"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	candidateRequest := lifecycleCreateRequest(
-		"e6222222-2222-2222-2222-222222222222", memorykit.StatusCandidate, "candidate content")
-	candidateRequest.Key = "build.other_command"
-	candidate, err := store.Create(context.Background(), candidateRequest)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	commands := []struct {
-		name string
-		run  func() error
-	}{
-		{name: "activate active", run: func() error {
-			_, err := store.Activate(context.Background(), memorykit.VersionedCommand{
-				Scope: active.Scope, ID: active.ID, ExpectedVersion: active.Version,
-				Actor: "reviewer", Reason: "invalid", Now: active.UpdatedAt.Add(time.Minute),
-			})
-			return err
-		}},
-		{name: "dismiss active", run: func() error {
-			_, err := store.Dismiss(context.Background(), memorykit.VersionedCommand{
-				Scope: active.Scope, ID: active.ID, ExpectedVersion: active.Version,
-				Actor: "reviewer", Reason: "invalid", Now: active.UpdatedAt.Add(time.Minute),
-			})
-			return err
-		}},
-		{name: "forget candidate", run: func() error {
-			_, err := store.Forget(context.Background(), memorykit.VersionedCommand{
-				Scope: candidate.Scope, ID: candidate.ID, ExpectedVersion: candidate.Version,
-				Actor: "reviewer", Reason: "invalid", Now: candidate.UpdatedAt.Add(time.Minute),
-			})
-			return err
-		}},
-	}
-	for _, command := range commands {
-		if err := command.run(); !errors.Is(err, memorykit.ErrConflict) {
-			t.Fatalf("%s error = %v, want ErrConflict", command.name, err)
-		}
 	}
 }
 

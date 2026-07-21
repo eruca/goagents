@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,7 +21,9 @@ func RunLifecycleConformance(t *testing.T, newStore func(*testing.T) memorykit.L
 		{"active create supersedes same scope kind key", assertActiveCreateSupersedes},
 		{"different project remains isolated", assertProjectIsolation},
 		{"activate candidate atomically supersedes active", assertActivationSupersedes},
+		{"sequential activation with equal time supersedes active", assertSequentialActivationWithEqualTime},
 		{"stale expected version conflicts", assertStaleVersionConflicts},
+		{"wrong starting status conflicts without side effects", assertWrongStartingStatusConflicts},
 		{"correct increments version and preserves history", assertCorrectionHistory},
 		{"dismiss makes candidate inactive", assertDismissedCandidateInactive},
 		{"forget stops active reads and keeps content history", assertForgetSemantics},
@@ -28,8 +31,10 @@ func RunLifecycleConformance(t *testing.T, newStore func(*testing.T) memorykit.L
 		{"returns defensive copies", assertDefensiveCopies},
 		{"honors context cancellation", assertCancellation},
 		{"identical idempotent replay has no side effects", assertIdempotentReplay},
+		{"source order participates in idempotent replay", assertSourceOrderParticipatesInIdempotency},
 		{"idempotency conflicts do not overwrite", assertIdempotencyConflicts},
 		{"erase invalidates idempotent replay", assertEraseInvalidatesReplay},
+		{"non canonical identity is rejected", assertNonCanonicalIdentityRejected},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) { tc.run(t, newStore(t)) })
@@ -136,6 +141,88 @@ func assertActivationSupersedes(t *testing.T, store memorykit.LifecycleStore) {
 	old, err := store.Get(context.Background(), active.Scope, active.ID)
 	if err != nil || old.Status != memorykit.StatusInactive {
 		t.Fatalf("old = %#v, %v", old, err)
+	}
+}
+
+func assertSequentialActivationWithEqualTime(t *testing.T, store memorykit.LifecycleStore) {
+	active, err := store.Create(context.Background(), baseCreate(
+		"43333333-3333-4333-8333-333333333333", "project-1", memorykit.StatusActive))
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateRequest := baseCreate(
+		"44444444-4444-4444-8444-444444444444", "project-1", memorykit.StatusCandidate)
+	candidateRequest.Content = "Approve a sequential replacement"
+	candidate, err := store.Create(context.Background(), candidateRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activated, err := store.Activate(context.Background(), memorykit.VersionedCommand{
+		Scope: candidate.Scope, ID: candidate.ID, ExpectedVersion: candidate.Version,
+		Actor: "reviewer-1", Reason: "sequential replacement", Now: active.UpdatedAt,
+	})
+	if err != nil || activated.Status != memorykit.StatusActive {
+		t.Fatalf("Activate with equal timestamp = %#v, %v", activated, err)
+	}
+	previous, err := store.Get(context.Background(), active.Scope, active.ID)
+	if err != nil || previous.Status != memorykit.StatusInactive {
+		t.Fatalf("previous active after equal-time activation = %#v, %v", previous, err)
+	}
+}
+
+func assertWrongStartingStatusConflicts(t *testing.T, store memorykit.LifecycleStore) {
+	tests := []struct {
+		name   string
+		id     string
+		status memorykit.Status
+		run    func(memorykit.LifecycleStore, memorykit.VersionedCommand) error
+	}{
+		{name: "activate active", id: "e8111111-1111-4111-8111-111111111111", status: memorykit.StatusActive,
+			run: func(store memorykit.LifecycleStore, command memorykit.VersionedCommand) error {
+				_, err := store.Activate(context.Background(), command)
+				return err
+			}},
+		{name: "dismiss active", id: "e8222222-2222-4222-8222-222222222222", status: memorykit.StatusActive,
+			run: func(store memorykit.LifecycleStore, command memorykit.VersionedCommand) error {
+				_, err := store.Dismiss(context.Background(), command)
+				return err
+			}},
+		{name: "forget candidate", id: "e8333333-3333-4333-8333-333333333333", status: memorykit.StatusCandidate,
+			run: func(store memorykit.LifecycleStore, command memorykit.VersionedCommand) error {
+				_, err := store.Forget(context.Background(), command)
+				return err
+			}},
+	}
+	for index, test := range tests {
+		request := baseCreate(test.id, "project-1", test.status)
+		request.Key = "wrong.status." + string(rune('a'+index))
+		created, err := store.Create(context.Background(), request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		beforeRevisions, err := store.Revisions(context.Background(), memorykit.RevisionQuery{
+			Scope: created.Scope, MemoryID: created.ID, Limit: 10,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		command := memorykit.VersionedCommand{
+			Scope: created.Scope, ID: created.ID, ExpectedVersion: created.Version,
+			Actor: "reviewer", Reason: "wrong status", Now: created.UpdatedAt.Add(time.Minute),
+		}
+		if err := test.run(store, command); !errors.Is(err, memorykit.ErrConflict) {
+			t.Fatalf("%s error = %v, want ErrConflict", test.name, err)
+		}
+		after, err := store.Get(context.Background(), created.Scope, created.ID)
+		if err != nil || !reflect.DeepEqual(after, created) {
+			t.Fatalf("%s changed memory = %#v/%#v, %v", test.name, created, after, err)
+		}
+		afterRevisions, err := store.Revisions(context.Background(), memorykit.RevisionQuery{
+			Scope: created.Scope, MemoryID: created.ID, Limit: 10,
+		})
+		if err != nil || !reflect.DeepEqual(afterRevisions, beforeRevisions) {
+			t.Fatalf("%s changed revisions = %#v/%#v, %v", test.name, beforeRevisions, afterRevisions, err)
+		}
 	}
 }
 
@@ -365,6 +452,29 @@ func assertIdempotentReplay(t *testing.T, store memorykit.LifecycleStore) {
 	}
 }
 
+func assertSourceOrderParticipatesInIdempotency(t *testing.T, store memorykit.LifecycleStore) {
+	request := baseCreate("b2222222-2222-4222-8222-222222222222", "project-1", memorykit.StatusCandidate)
+	request.IdempotencyKey = "create:decision:source-order"
+	request.Sources = []memorykit.Source{
+		{Kind: "artifact", Ref: "artifact:first", EvidenceHash: "sha256:first"},
+		{Kind: "message", Ref: "message:second", EvidenceHash: "sha256:second"},
+	}
+	if _, err := store.Create(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	reordered := request
+	reordered.Sources = []memorykit.Source{request.Sources[1], request.Sources[0]}
+	if _, err := store.Create(context.Background(), reordered); !errors.Is(err, memorykit.ErrConflict) {
+		t.Fatalf("reordered source replay error = %v, want ErrConflict", err)
+	}
+	revisions, err := store.Revisions(context.Background(), memorykit.RevisionQuery{
+		Scope: request.Scope, MemoryID: request.ID, Limit: 10,
+	})
+	if err != nil || len(revisions) != 1 {
+		t.Fatalf("revisions after reordered replay = %#v, %v", revisions, err)
+	}
+}
+
 func assertIdempotencyConflicts(t *testing.T, store memorykit.LifecycleStore) {
 	original := baseCreate("c1111111-1111-1111-1111-111111111111", "project-1", memorykit.StatusCandidate)
 	original.IdempotencyKey = "create:decision:2"
@@ -432,5 +542,20 @@ func assertEraseInvalidatesReplay(t *testing.T, store memorykit.LifecycleStore) 
 	revisions, err := store.Revisions(context.Background(), memorykit.RevisionQuery{Scope: created.Scope, MemoryID: created.ID, Limit: 10})
 	if err != nil || len(revisions) != 2 {
 		t.Fatalf("revisions after erased replay = %#v, %v", revisions, err)
+	}
+}
+
+func assertNonCanonicalIdentityRejected(t *testing.T, store memorykit.LifecycleStore) {
+	request := baseCreate("f1111111-1111-4111-8111-111111111111", "project-1", memorykit.StatusCandidate)
+	created, err := store.Create(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonCanonical := strings.ToUpper(created.ID)
+	if _, err := store.Get(context.Background(), created.Scope, nonCanonical); !errors.Is(err, memorykit.ErrInvalidMemory) {
+		t.Fatalf("Get non-canonical ID error = %v, want ErrInvalidMemory", err)
+	}
+	if _, err := store.Sources(context.Background(), created.Scope, nonCanonical); !errors.Is(err, memorykit.ErrInvalidMemory) {
+		t.Fatalf("Sources non-canonical ID error = %v, want ErrInvalidMemory", err)
 	}
 }
