@@ -9,16 +9,17 @@ require (
 	github.com/eruca/goagents/goagent v0.1.0
 	github.com/eruca/goagents/hostkit v0.1.0
 	github.com/eruca/goagents/llmkit v0.1.0
+	github.com/eruca/goagents/memorykit v0.0.0
 	github.com/eruca/goagents/runkit v0.1.1
 	github.com/eruca/goagents/skillkit v0.1.0
 	github.com/eruca/goagents/workflowkit v0.1.1
+	github.com/google/uuid v1.6.0
 )
 
 require (
 	github.com/99designs/go-keychain v0.0.0-20191008050251-8e49817e8af4 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
@@ -42,6 +43,8 @@ replace github.com/eruca/goagents/goagent => ../../goagent
 replace github.com/eruca/goagents/hostkit => ../../hostkit
 
 replace github.com/eruca/goagents/llmkit => ../../llmkit
+
+replace github.com/eruca/goagents/memorykit => ../../memorykit
 
 replace github.com/eruca/goagents/runkit => ../../runkit
 

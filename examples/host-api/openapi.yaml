@@ -13,6 +13,7 @@ tags:
   - name: agent-runs
   - name: llmkit
   - name: workers
+  - name: memories
 paths:
   /workflows:
     get:
@@ -325,6 +326,314 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/QueuedWorkerStatus'
+  /projects/{projectID}/memories:
+    get:
+      tags:
+        - memories
+      summary: List governed project memories
+      description: Defaults to active memories. Candidate and inactive filters require memory.review.
+      operationId: listProjectMemories
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectID'
+        - name: kind
+          in: query
+          schema:
+            $ref: '#/components/schemas/MemoryKind'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/MemoryStatus'
+        - name: key
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+          description: Defaults to and cannot exceed the Host memory MaxListItems limit.
+      responses:
+        '200':
+          description: Scope-bound project memory list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryListResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '403':
+          $ref: '#/components/responses/ErrorResponse'
+        '503':
+          $ref: '#/components/responses/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+    post:
+      tags:
+        - memories
+      summary: Create an explicit active project memory
+      operationId: createProjectMemory
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateMemoryRequest'
+      responses:
+        '201':
+          description: Created active memory or the durable result of an exact idempotent replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Memory'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '403':
+          $ref: '#/components/responses/ErrorResponse'
+        '409':
+          $ref: '#/components/responses/ErrorResponse'
+        '503':
+          $ref: '#/components/responses/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+  /projects/{projectID}/memories/{memoryID}:
+    get:
+      tags:
+        - memories
+      summary: Get a governed project memory
+      description: Active records require memory.read; non-active records additionally require memory.review before content is returned.
+      operationId: getProjectMemory
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectID'
+        - $ref: '#/components/parameters/MemoryID'
+      responses:
+        '200':
+          description: Scope-bound memory and source references. Tenant identity is intentionally omitted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Memory'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '403':
+          $ref: '#/components/responses/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+        '503':
+          $ref: '#/components/responses/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+  /projects/{projectID}/memories/{memoryID}/revisions:
+    get:
+      tags:
+        - memories
+      summary: List governed memory revisions
+      operationId: listProjectMemoryRevisions
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectID'
+        - $ref: '#/components/parameters/MemoryID'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+        - name: before_version
+          in: query
+          description: Exclusive positive version cursor.
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        '200':
+          description: Newest-first revision page authorized by memory.review.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryRevisionListResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '403':
+          $ref: '#/components/responses/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+        '503':
+          $ref: '#/components/responses/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+  /projects/{projectID}/memories/{memoryID}/activate:
+    post:
+      tags:
+        - memories
+      summary: Activate a reviewed candidate memory
+      operationId: activateProjectMemory
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectID'
+        - $ref: '#/components/parameters/MemoryID'
+      requestBody:
+        $ref: '#/components/requestBodies/VersionedMemoryRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/MemoryResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '403':
+          $ref: '#/components/responses/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+        '409':
+          $ref: '#/components/responses/ErrorResponse'
+        '503':
+          $ref: '#/components/responses/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+  /projects/{projectID}/memories/{memoryID}/dismiss:
+    post:
+      tags:
+        - memories
+      summary: Dismiss a reviewed candidate memory
+      operationId: dismissProjectMemory
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectID'
+        - $ref: '#/components/parameters/MemoryID'
+      requestBody:
+        $ref: '#/components/requestBodies/VersionedMemoryRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/MemoryResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '403':
+          $ref: '#/components/responses/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+        '409':
+          $ref: '#/components/responses/ErrorResponse'
+        '503':
+          $ref: '#/components/responses/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+  /projects/{projectID}/memories/{memoryID}/correct:
+    post:
+      tags:
+        - memories
+      summary: Correct a project memory with optimistic concurrency
+      operationId: correctProjectMemory
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectID'
+        - $ref: '#/components/parameters/MemoryID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CorrectMemoryRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/MemoryResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '403':
+          $ref: '#/components/responses/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+        '409':
+          $ref: '#/components/responses/ErrorResponse'
+        '503':
+          $ref: '#/components/responses/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+  /projects/{projectID}/memories/{memoryID}/forget:
+    post:
+      tags:
+        - memories
+      summary: Forget an active project memory
+      description: Makes the memory inactive for recall while retaining governed revision history.
+      operationId: forgetProjectMemory
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectID'
+        - $ref: '#/components/parameters/MemoryID'
+      requestBody:
+        $ref: '#/components/requestBodies/VersionedMemoryRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/MemoryResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '403':
+          $ref: '#/components/responses/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+        '409':
+          $ref: '#/components/responses/ErrorResponse'
+        '503':
+          $ref: '#/components/responses/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+  /projects/{projectID}/memories/{memoryID}/erase:
+    post:
+      tags:
+        - memories
+      summary: Administratively erase private memory content
+      description: Separate memory.erase action that scrubs content, sources, embeddings, and revision snapshots. It is neither DELETE nor forget.
+      operationId: eraseProjectMemory
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectID'
+        - $ref: '#/components/parameters/MemoryID'
+      requestBody:
+        $ref: '#/components/requestBodies/VersionedMemoryRequest'
+      responses:
+        '204':
+          description: Memory content was erased; no response body is returned.
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '403':
+          $ref: '#/components/responses/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+        '409':
+          $ref: '#/components/responses/ErrorResponse'
+        '503':
+          $ref: '#/components/responses/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
 components:
   securitySchemes:
     bearerAuth:
@@ -340,6 +649,29 @@ components:
       description: Workflow id.
       schema:
         type: string
+    ProjectID:
+      name: projectID
+      in: path
+      required: true
+      description: Stable project identity authorized by the Host.
+      schema:
+        type: string
+        minLength: 1
+    MemoryID:
+      name: memoryID
+      in: path
+      required: true
+      description: Canonical lowercase memory UUID.
+      schema:
+        type: string
+        format: uuid
+  requestBodies:
+    VersionedMemoryRequest:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/VersionedMemoryRequest'
   responses:
     ErrorResponse:
       description: Handler-level error.
@@ -347,6 +679,12 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
+    MemoryResponse:
+      description: Updated scope-bound memory.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Memory'
     HostDrainingResponse:
       description: The host is draining and cannot accept a new long-running execution.
       content:
@@ -371,6 +709,240 @@ components:
                     type: string
                     const: host is draining
   schemas:
+    MemoryKind:
+      type: string
+      enum:
+        - fact
+        - decision
+        - constraint
+        - lesson
+    MemoryStatus:
+      type: string
+      enum:
+        - candidate
+        - active
+        - inactive
+    MemorySource:
+      type: object
+      additionalProperties: false
+      required:
+        - kind
+        - ref
+      properties:
+        kind:
+          type: string
+        ref:
+          type: string
+        evidence_hash:
+          type: string
+    Memory:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - subject_type
+        - subject_id
+        - kind
+        - key
+        - status
+        - content
+        - valid_from
+        - importance
+        - confidence
+        - sources
+        - version
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        subject_type:
+          type: string
+          const: project
+        subject_id:
+          type: string
+        kind:
+          $ref: '#/components/schemas/MemoryKind'
+        key:
+          type: string
+        status:
+          $ref: '#/components/schemas/MemoryStatus'
+        content:
+          type: string
+        valid_from:
+          type: string
+          format: date-time
+        valid_until:
+          type: string
+          format: date-time
+        importance:
+          type: integer
+          minimum: 0
+          maximum: 100
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+        source_agent_id:
+          type: string
+        created_by:
+          type: string
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/MemorySource'
+        version:
+          type: integer
+          minimum: 1
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    MemoryListResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - memories
+      properties:
+        memories:
+          type: array
+          items:
+            $ref: '#/components/schemas/Memory'
+    CreateMemoryRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - kind
+        - key
+        - content
+        - reason
+        - importance
+        - confidence
+      properties:
+        kind:
+          $ref: '#/components/schemas/MemoryKind'
+        key:
+          type: string
+        content:
+          type: string
+        valid_until:
+          type: string
+          format: date-time
+        reason:
+          type: string
+        idempotency_key:
+          type: string
+        importance:
+          type: integer
+          minimum: 0
+          maximum: 100
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/MemorySource'
+    VersionedMemoryRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - expected_version
+        - reason
+      properties:
+        expected_version:
+          type: integer
+          minimum: 1
+        reason:
+          type: string
+    CorrectMemoryRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - expected_version
+        - content
+        - valid_from
+        - reason
+        - importance
+        - confidence
+      properties:
+        expected_version:
+          type: integer
+          minimum: 1
+        content:
+          type: string
+        valid_from:
+          type: string
+          format: date-time
+        valid_until:
+          type: string
+          format: date-time
+        reason:
+          type: string
+        importance:
+          type: integer
+          minimum: 0
+          maximum: 100
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/MemorySource'
+    MemoryRevision:
+      type: object
+      additionalProperties: false
+      required:
+        - memory_id
+        - version
+        - action
+        - snapshot
+        - content_erased
+        - created_at
+      properties:
+        memory_id:
+          type: string
+          format: uuid
+        version:
+          type: integer
+          minimum: 1
+        action:
+          type: string
+          enum:
+            - create
+            - activate
+            - correct
+            - supersede
+            - forget
+            - erase
+            - dismiss
+        actor:
+          type: string
+        reason:
+          type: string
+        snapshot:
+          $ref: '#/components/schemas/Memory'
+        content_erased:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+    MemoryRevisionListResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - revisions
+      properties:
+        revisions:
+          type: array
+          items:
+            $ref: '#/components/schemas/MemoryRevision'
     CreateWorkflowRequest:
       type: object
       additionalProperties: false
@@ -870,7 +1442,15 @@ components:
             - run_error
             - not_found
             - unauthorized
+            - forbidden
             - approval_conflict
+            - memory_not_found
+            - memory_conflict
+            - memory_unavailable
+            - memory_integrity_error
+            - memory_configuration_error
+            - memory_error
+            - invalid_memory_content
         message:
           type: string
     ScoreBreakdown:

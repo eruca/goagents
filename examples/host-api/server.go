@@ -50,6 +50,9 @@ type Config struct {
 	SkillCatalog *skillkit.Catalog
 	// SkillGateContext supplies host-owned facts used only to report availability.
 	SkillGateContext skillkit.GateContext
+	// Memory enables the optional governed project-memory boundary. A nil value
+	// preserves the existing Host behavior and routes.
+	Memory *memoryRuntimeConfig
 }
 
 type Server struct {
@@ -70,6 +73,7 @@ type Server struct {
 	agentApprovals          *hostAgentApprovalService
 	skillCatalog            *skillkit.Catalog
 	skillGateContext        skillkit.GateContext
+	memory                  *memoryRuntimeConfig
 	worker                  queuedWorkerStatus
 	workerCfg               queuedWorkerConfig
 	workerWake              chan struct{}
@@ -451,6 +455,14 @@ type hostDrainingError struct {
 }
 
 func NewServer(config Config) (*Server, error) {
+	if err := validateMemoryManagementConfig(config.Memory); err != nil {
+		return nil, err
+	}
+	var memoryConfig *memoryRuntimeConfig
+	if config.Memory != nil {
+		copy := *config.Memory
+		memoryConfig = &copy
+	}
 	approvalKeychain, err := resolveAgentApprovalKeychainConfig(
 		config.AgentApprovalKeychainService,
 		config.AgentApprovalKeyID,
@@ -529,6 +541,7 @@ func NewServer(config Config) (*Server, error) {
 		agentApprovals:          agentApprovals,
 		skillCatalog:            config.SkillCatalog,
 		skillGateContext:        config.SkillGateContext,
+		memory:                  memoryConfig,
 	}
 	if server.approvalAuthenticator == nil {
 		server.approvalAuthenticator = rejectingApprovalAuthenticator{}
@@ -665,6 +678,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /agent-runs/{id}", s.handleGetAgentRun)
 	mux.HandleFunc("GET /llmkit/models", s.handleModels)
 	mux.HandleFunc("GET /workers/queued", s.handleQueuedWorker)
+	if s.memory != nil {
+		mux.HandleFunc("GET /projects/{projectID}/memories", s.handleListMemories)
+		mux.HandleFunc("GET /projects/{projectID}/memories/{memoryID}", s.handleGetMemory)
+		mux.HandleFunc("GET /projects/{projectID}/memories/{memoryID}/revisions", s.handleMemoryRevisions)
+		mux.HandleFunc("POST /projects/{projectID}/memories", s.handleCreateMemory)
+		mux.HandleFunc("POST /projects/{projectID}/memories/{memoryID}/activate", s.handleActivateMemory)
+		mux.HandleFunc("POST /projects/{projectID}/memories/{memoryID}/dismiss", s.handleDismissMemory)
+		mux.HandleFunc("POST /projects/{projectID}/memories/{memoryID}/correct", s.handleCorrectMemory)
+		mux.HandleFunc("POST /projects/{projectID}/memories/{memoryID}/forget", s.handleForgetMemory)
+		mux.HandleFunc("POST /projects/{projectID}/memories/{memoryID}/erase", s.handleEraseMemory)
+	}
 	return mux
 }
 

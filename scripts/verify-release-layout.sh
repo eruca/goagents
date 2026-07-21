@@ -47,6 +47,7 @@ internal_requirements=(
   "examples/host-api|${MODULE_PREFIX}goagent|v0.1.0"
   "examples/host-api|${MODULE_PREFIX}hostkit|v0.1.0"
   "examples/host-api|${MODULE_PREFIX}llmkit|v0.1.0"
+  "examples/host-api|${MODULE_PREFIX}memorykit|v0.0.0"
   "examples/host-api|${MODULE_PREFIX}runkit|v0.1.1"
   "examples/host-api|${MODULE_PREFIX}skillkit|v0.1.0"
   "examples/host-api|${MODULE_PREFIX}workflowkit|v0.1.1"
