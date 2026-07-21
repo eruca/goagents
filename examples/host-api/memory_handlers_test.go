@@ -6,12 +6,15 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/eruca/goagents/memorykit"
 	"github.com/eruca/goagents/memorykit/memorystore"
+	"github.com/eruca/goagents/memorykit/pgstore"
 	"github.com/google/uuid"
 )
 
@@ -106,6 +109,46 @@ func TestMemoryHandlersRejectUnknownAndUnboundedInput(t *testing.T) {
 	}
 }
 
+func TestMemoryHandlersRequireExactJSONShapeAndPresence(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "duplicate top key", body: `{"kind":"fact","kind":"lesson","key":"json-1","content":"content","reason":"reason","importance":0,"confidence":0}`},
+		{name: "wrong case top key", body: `{"Kind":"fact","key":"json-2","content":"content","reason":"reason","importance":0,"confidence":0}`},
+		{name: "missing reason", body: `{"kind":"fact","key":"json-3","content":"content","importance":0,"confidence":0}`},
+		{name: "missing importance", body: `{"kind":"fact","key":"json-4","content":"content","reason":"reason","confidence":0}`},
+		{name: "missing confidence", body: `{"kind":"fact","key":"json-5","content":"content","reason":"reason","importance":0}`},
+		{name: "duplicate source key", body: `{"kind":"fact","key":"json-6","content":"content","reason":"reason","importance":0,"confidence":0,"sources":[{"kind":"git","kind":"todo","ref":"ref"}]}`},
+		{name: "wrong case source key", body: `{"kind":"fact","key":"json-7","content":"content","reason":"reason","importance":0,"confidence":0,"sources":[{"Kind":"git","ref":"ref"}]}`},
+		{name: "missing source ref", body: `{"kind":"fact","key":"json-8","content":"content","reason":"reason","importance":0,"confidence":0,"sources":[{"kind":"git"}]}`},
+		{name: "null sources", body: `{"kind":"fact","key":"json-9","content":"content","reason":"reason","importance":0,"confidence":0,"sources":null}`},
+		{name: "trailing value", body: `{"kind":"fact","key":"json-10","content":"content","reason":"reason","importance":0,"confidence":0} {}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server, store := newMemoryHandlerServer(t, validMemoryAuthorizer())
+			response := memoryRequest(t, server.Handler(), http.MethodPost, "/projects/project-a/memories", test.body)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s, want 400", response.Code, response.Body.String())
+			}
+			if response.Body.String() != "{\"error\":\"invalid_json\",\"message\":\"invalid memory request body\"}\n" {
+				t.Fatalf("unsafe/noncanonical JSON error: %s", response.Body.String())
+			}
+			if len(store.calls) != 0 {
+				t.Fatalf("store calls=%v, want none", store.calls)
+			}
+		})
+	}
+
+	server, _ := newMemoryHandlerServer(t, validMemoryAuthorizer())
+	validZero := `{"kind":"fact","key":"json-zero","content":"content","reason":"","importance":0,"confidence":0}`
+	response := memoryRequest(t, server.Handler(), http.MethodPost, "/projects/project-a/memories", validZero)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("explicit zero status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestMemoryHandlersMapSafeErrors(t *testing.T) {
 	secret := "postgres password=private"
 	tests := []struct {
@@ -117,6 +160,8 @@ func TestMemoryHandlersMapSafeErrors(t *testing.T) {
 		{name: "not found", err: errors.Join(memorykit.ErrNotFound, errors.New(secret)), want: http.StatusNotFound},
 		{name: "invalid", err: errors.Join(memorykit.ErrInvalidMemory, errors.New(secret)), want: http.StatusBadRequest},
 		{name: "recoverable", err: &memorykit.BackendError{Op: "create", Recoverable: true, Err: errors.New(secret)}, want: http.StatusServiceUnavailable},
+		{name: "canceled", err: context.Canceled, want: http.StatusServiceUnavailable},
+		{name: "deadline", err: context.DeadlineExceeded, want: http.StatusServiceUnavailable},
 		{name: "other", err: errors.New(secret), want: http.StatusInternalServerError},
 	}
 	for _, test := range tests {
@@ -130,6 +175,26 @@ func TestMemoryHandlersMapSafeErrors(t *testing.T) {
 			}
 			if strings.Contains(response.Body.String(), secret) {
 				t.Fatalf("response leaked store error: %s", response.Body.String())
+			}
+		})
+	}
+}
+
+func TestMemoryHandlersMapSafeContextErrorsFromAuthorizationAndValidation(t *testing.T) {
+	for _, contextErr := range []error{context.Canceled, context.DeadlineExceeded} {
+		t.Run(contextErr.Error(), func(t *testing.T) {
+			authConfig := validMemoryRuntimeConfig(t, &recordingMemoryAuthorizer{err: contextErr})
+			authResponse := memoryRequest(t, (&Server{memory: authConfig}).Handler(), http.MethodGet, "/projects/project-a/memories", "")
+			if authResponse.Code != http.StatusServiceUnavailable {
+				t.Fatalf("authorization status=%d body=%s", authResponse.Code, authResponse.Body.String())
+			}
+
+			validationConfig := validMemoryRuntimeConfig(t, validMemoryAuthorizer())
+			validationConfig.ContentValidator = &acceptingMemoryContentValidator{err: contextErr}
+			validationResponse := memoryRequest(t, (&Server{memory: validationConfig}).Handler(), http.MethodPost,
+				"/projects/project-a/memories", validCreateMemoryBody("context-error", ""))
+			if validationResponse.Code != http.StatusServiceUnavailable {
+				t.Fatalf("validation status=%d body=%s", validationResponse.Code, validationResponse.Body.String())
 			}
 		})
 	}
@@ -221,6 +286,101 @@ func TestMemoryHandlersReturnErasedRevisionHistory(t *testing.T) {
 	}
 }
 
+func TestMemoryHandlersProveEraseBeforeReturningNoContent(t *testing.T) {
+	config := validMemoryRuntimeConfig(t, validMemoryAuthorizer())
+	recorder := config.Store.(*recordingMemoryStore)
+	scope := memorykit.Scope{TenantID: "tenant-a", SubjectType: memorykit.SubjectProject, SubjectID: "project-a"}
+	id := seedMemory(t, recorder.Store, scope, memorykit.StatusActive, "noop-erase", "private content")
+	config.Store = &noOpEraseMemoryStore{Store: recorder}
+
+	response := memoryRequest(t, (&Server{memory: config}).Handler(), http.MethodPost,
+		"/projects/project-a/memories/"+id+"/erase", `{"expected_version":1,"reason":"privacy request"}`)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s, want 500", response.Code, response.Body.String())
+	}
+}
+
+func TestMemoryHandlersRejectMalformedRevisionSequenceAndTombstoneHistory(t *testing.T) {
+	tests := []struct {
+		name   string
+		erase  bool
+		mutate func([]memorykit.Revision)
+	}{
+		{name: "duplicate version", mutate: func(revisions []memorykit.Revision) { revisions[1] = revisions[0] }},
+		{name: "created at mismatch", mutate: func(revisions []memorykit.Revision) { revisions[0].CreatedAt = revisions[0].CreatedAt.Add(time.Second) }},
+		{name: "action status mismatch", mutate: func(revisions []memorykit.Revision) { revisions[0].Action = memorykit.RevisionDismiss }},
+		{name: "tombstone has nonerased history", erase: true, mutate: func(revisions []memorykit.Revision) {
+			revisions[len(revisions)-1].ContentErased = false
+			revisions[len(revisions)-1].Snapshot.Content = "restored content"
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := validMemoryRuntimeConfig(t, validMemoryAuthorizer())
+			recorder := config.Store.(*recordingMemoryStore)
+			scope := memorykit.Scope{TenantID: "tenant-a", SubjectType: memorykit.SubjectProject, SubjectID: "project-a"}
+			id := seedMemory(t, recorder.Store, scope, memorykit.StatusCandidate, "bad-revisions-"+test.name, "content")
+			if _, err := recorder.Store.Activate(context.Background(), memorykit.VersionedCommand{
+				Scope: scope, ID: id, ExpectedVersion: 1, Actor: "reviewer", Reason: "approve",
+				Now: time.Date(2026, 7, 21, 7, 30, 0, 0, time.UTC),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if test.erase {
+				if err := recorder.Store.Erase(context.Background(), memorykit.VersionedCommand{
+					Scope: scope, ID: id, ExpectedVersion: 2, Actor: "privacy-admin", Reason: "erase",
+					Now: time.Date(2026, 7, 21, 8, 0, 0, 0, time.UTC),
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			config.Store = &mutatingRevisionMemoryStore{Store: recorder, mutate: test.mutate}
+			response := memoryRequest(t, (&Server{memory: config}).Handler(), http.MethodGet,
+				"/projects/project-a/memories/"+id+"/revisions", "")
+			if response.Code != http.StatusInternalServerError {
+				t.Fatalf("status=%d body=%s, want 500", response.Code, response.Body.String())
+			}
+			if strings.Contains(response.Body.String(), "restored content") {
+				t.Fatalf("malformed history leaked content: %s", response.Body.String())
+			}
+		})
+	}
+}
+
+func TestMemoryHandlersRejectClockRollbackBeforeMutation(t *testing.T) {
+	tests := []struct {
+		status    memorykit.Status
+		operation string
+		body      string
+	}{
+		{status: memorykit.StatusCandidate, operation: "activate", body: `{"expected_version":1,"reason":"approve"}`},
+		{status: memorykit.StatusCandidate, operation: "dismiss", body: `{"expected_version":1,"reason":"dismiss"}`},
+		{status: memorykit.StatusActive, operation: "correct", body: `{"expected_version":1,"content":"replacement","valid_from":"2026-07-21T06:00:00Z","reason":"correct","importance":1,"confidence":1}`},
+		{status: memorykit.StatusActive, operation: "forget", body: `{"expected_version":1,"reason":"forget"}`},
+		{status: memorykit.StatusActive, operation: "erase", body: `{"expected_version":1,"reason":"erase"}`},
+	}
+	for _, test := range tests {
+		t.Run(test.operation, func(t *testing.T) {
+			config := validMemoryRuntimeConfig(t, validMemoryAuthorizer())
+			config.Now = func() time.Time { return time.Date(2026, 7, 21, 6, 0, 0, 0, time.UTC) }
+			recorder := config.Store.(*recordingMemoryStore)
+			scope := memorykit.Scope{TenantID: "tenant-a", SubjectType: memorykit.SubjectProject, SubjectID: "project-a"}
+			id := seedMemory(t, recorder.Store, scope, test.status, "rollback-"+test.operation, "content")
+			recorder.calls = nil
+			response := memoryRequest(t, (&Server{memory: config}).Handler(), http.MethodPost,
+				"/projects/project-a/memories/"+id+"/"+test.operation, test.body)
+			if response.Code != http.StatusInternalServerError {
+				t.Fatalf("status=%d body=%s, want 500", response.Code, response.Body.String())
+			}
+			for _, call := range recorder.calls {
+				if call == test.operation {
+					t.Fatalf("mutation called after clock rollback: %v", recorder.calls)
+				}
+			}
+		})
+	}
+}
+
 func TestMemoryHandlersRejectMalformedCreateResults(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -264,6 +424,210 @@ func TestMemoryHandlersCorrectReturnsOnlyPersistedSources(t *testing.T) {
 	}
 	if strings.Contains(response.Body.String(), "commit:expected") || strings.Contains(response.Body.String(), "commit:wrong") {
 		t.Fatalf("integrity response leaked sources: %s", response.Body.String())
+	}
+}
+
+func TestMemoryHandlersTreatSourcesAsCanonicalSet(t *testing.T) {
+	config := validMemoryRuntimeConfig(t, validMemoryAuthorizer())
+	ordered := &canonicalSourceOrderMemoryStore{Store: config.Store}
+	config.Store = ordered
+	server := &Server{memory: config}
+	createBody := `{"kind":"fact","key":"source-set","content":"content","reason":"create","importance":1,"confidence":1,"sources":[{"kind":"todo","ref":"todo:2","evidence_hash":"hash:2"},{"kind":"git","ref":"commit:1","evidence_hash":"hash:1"}]}`
+	created := memoryRequest(t, server.Handler(), http.MethodPost, "/projects/project-a/memories", createBody)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	createdID := responseMemoryID(t, created)
+	if got := responseSourceKinds(t, created); !equalStrings(got, []string{"git", "todo"}) {
+		t.Fatalf("create source order=%v", got)
+	}
+	correctBody := `{"expected_version":1,"content":"corrected","valid_from":"2026-07-21T08:00:00Z","reason":"correct","importance":1,"confidence":1,"sources":[{"kind":"todo","ref":"todo:4","evidence_hash":"hash:4"},{"kind":"git","ref":"commit:3","evidence_hash":"hash:3"}]}`
+	corrected := memoryRequest(t, server.Handler(), http.MethodPost, "/projects/project-a/memories/"+createdID+"/correct", correctBody)
+	if corrected.Code != http.StatusOK {
+		t.Fatalf("correct status=%d body=%s", corrected.Code, corrected.Body.String())
+	}
+	if got := responseSourceKinds(t, corrected); !equalStrings(got, []string{"git", "todo"}) {
+		t.Fatalf("correct source order=%v", got)
+	}
+	if ordered.sourcesCalls < 2 {
+		t.Fatalf("Sources calls=%d, want persisted reads for create and correct", ordered.sourcesCalls)
+	}
+}
+
+func TestMemoryHandlersCorrectUnorderedSourcesWithRealPostgres(t *testing.T) {
+	dsn := strings.TrimSpace(os.Getenv("MEMORYKIT_POSTGRES_TEST_DSN"))
+	if dsn == "" {
+		t.Skip("set MEMORYKIT_POSTGRES_TEST_DSN")
+	}
+	limits := memoryLimitsForTest()
+	store, err := pgstore.Open(context.Background(), dsn, pgstore.Config{
+		Limits: limits, EmbeddingProfileID: "host-handler-test", EmbeddingDimensions: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	config := &memoryRuntimeConfig{
+		Store: store,
+		Authorizer: &recordingMemoryAuthorizer{identity: memoryIdentity{
+			TenantID: "host-handler-" + uuid.NewString(), Subject: "user-a",
+		}},
+		ContentValidator: &acceptingMemoryContentValidator{}, Limits: limits,
+		NewID:            func() string { return uuid.NewString() },
+		Now:              func() time.Time { return time.Date(2026, 7, 21, 8, 0, 0, 0, time.UTC) },
+		MaxHTTPBodyBytes: 4096,
+	}
+	server := &Server{memory: config}
+	created := memoryRequest(t, server.Handler(), http.MethodPost, "/projects/project-a/memories",
+		`{"kind":"fact","key":"pg-source-set","content":"content","reason":"create","importance":1,"confidence":1,"sources":[{"kind":"todo","ref":"todo:2","evidence_hash":"hash:2"},{"kind":"git","ref":"commit:1","evidence_hash":"hash:1"}]}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	id := responseMemoryID(t, created)
+	corrected := memoryRequest(t, server.Handler(), http.MethodPost, "/projects/project-a/memories/"+id+"/correct",
+		`{"expected_version":1,"content":"corrected","valid_from":"2026-07-21T08:00:00Z","reason":"correct","importance":1,"confidence":1,"sources":[{"kind":"todo","ref":"todo:4","evidence_hash":"hash:4"},{"kind":"git","ref":"commit:3","evidence_hash":"hash:3"}]}`)
+	if corrected.Code != http.StatusOK || !equalStrings(responseSourceKinds(t, corrected), []string{"git", "todo"}) {
+		t.Fatalf("correct status=%d body=%s", corrected.Code, corrected.Body.String())
+	}
+}
+
+func TestMemoryHandlersRetryStableGetWithoutReturningOldContent(t *testing.T) {
+	config := validMemoryRuntimeConfig(t, validMemoryAuthorizer())
+	recorder := config.Store.(*recordingMemoryStore)
+	scope := memorykit.Scope{TenantID: "tenant-a", SubjectType: memorykit.SubjectProject, SubjectID: "project-a"}
+	id := seedMemory(t, recorder.Store, scope, memorykit.StatusActive, "stable-get", "old content")
+	old, err := recorder.Store.Get(context.Background(), scope, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newer := old
+	newer.Content = "new content"
+	newer.Version = 2
+	newer.UpdatedAt = old.UpdatedAt.Add(time.Minute)
+	config.Store = &scriptedSnapshotMemoryStore{Store: recorder, getResults: []memorykit.Memory{old, newer, newer, newer}}
+	server := &Server{memory: config}
+
+	response := memoryRequest(t, server.Handler(), http.MethodGet, "/projects/project-a/memories/"+id, "")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "new content") || strings.Contains(response.Body.String(), "old content") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestMemoryHandlersFailClosedWhenGetNeverStabilizes(t *testing.T) {
+	config := validMemoryRuntimeConfig(t, validMemoryAuthorizer())
+	recorder := config.Store.(*recordingMemoryStore)
+	scope := memorykit.Scope{TenantID: "tenant-a", SubjectType: memorykit.SubjectProject, SubjectID: "project-a"}
+	id := seedMemory(t, recorder.Store, scope, memorykit.StatusActive, "unstable-get", "v1 content")
+	v1, err := recorder.Store.Get(context.Background(), scope, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v2, v3 := v1, v1
+	v2.Content, v2.Version, v2.UpdatedAt = "v2 content", 2, v1.UpdatedAt.Add(time.Minute)
+	v3.Content, v3.Version, v3.UpdatedAt = "v3 content", 3, v1.UpdatedAt.Add(2*time.Minute)
+	config.Store = &scriptedSnapshotMemoryStore{Store: recorder, getResults: []memorykit.Memory{v1, v2, v2, v3}}
+	server := &Server{memory: config}
+
+	response := memoryRequest(t, server.Handler(), http.MethodGet, "/projects/project-a/memories/"+id, "")
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s, want 500", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "v1 content") || strings.Contains(response.Body.String(), "v2 content") || strings.Contains(response.Body.String(), "v3 content") {
+		t.Fatalf("unstable response leaked content: %s", response.Body.String())
+	}
+}
+
+func TestMemoryHandlersReauthorizeEachGetAttempt(t *testing.T) {
+	authorizer := &capabilityMemoryAuthorizer{identity: memoryIdentity{TenantID: "tenant-a", Subject: "user-a"}, deny: map[memoryCapability]error{}}
+	config := validMemoryRuntimeConfig(t, authorizer)
+	recorder := config.Store.(*recordingMemoryStore)
+	scope := memorykit.Scope{TenantID: "tenant-a", SubjectType: memorykit.SubjectProject, SubjectID: "project-a"}
+	id := seedMemory(t, recorder.Store, scope, memorykit.StatusCandidate, "reauthorize", "candidate content")
+	candidate, err := recorder.Store.Get(context.Background(), scope, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := candidate
+	active.Status, active.Version, active.UpdatedAt = memorykit.StatusActive, 2, candidate.UpdatedAt.Add(time.Minute)
+	config.Store = &scriptedSnapshotMemoryStore{Store: recorder, getResults: []memorykit.Memory{candidate, active, active, active}}
+	server := &Server{memory: config}
+
+	response := memoryRequest(t, server.Handler(), http.MethodGet, "/projects/project-a/memories/"+id, "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	want := []memoryCapability{memoryRead, memoryReview, memoryRead}
+	if !equalCapabilities(authorizer.capabilities, want) {
+		t.Fatalf("capabilities=%v want=%v", authorizer.capabilities, want)
+	}
+}
+
+func TestMemoryHandlersRetryStableListAndValidateOrder(t *testing.T) {
+	config := validMemoryRuntimeConfig(t, validMemoryAuthorizer())
+	recorder := config.Store.(*recordingMemoryStore)
+	scope := memorykit.Scope{TenantID: "tenant-a", SubjectType: memorykit.SubjectProject, SubjectID: "project-a"}
+	id := seedMemory(t, recorder.Store, scope, memorykit.StatusActive, "stable-list", "old list content")
+	old, err := recorder.Store.Get(context.Background(), scope, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newer := old
+	newer.Content, newer.Version, newer.UpdatedAt = "new list content", 2, old.UpdatedAt.Add(time.Minute)
+	config.Store = &scriptedSnapshotMemoryStore{
+		Store: recorder, listResults: [][]memorykit.Memory{{old}, {newer}},
+		getResults: []memorykit.Memory{newer, newer},
+	}
+	server := &Server{memory: config}
+	response := memoryRequest(t, server.Handler(), http.MethodGet, "/projects/project-a/memories", "")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "new list content") || strings.Contains(response.Body.String(), "old list content") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	firstID := seedMemory(t, recorder.Store, scope, memorykit.StatusActive, "ordered-a", "a")
+	secondID := seedMemory(t, recorder.Store, scope, memorykit.StatusActive, "ordered-b", "b")
+	first, _ := recorder.Store.Get(context.Background(), scope, firstID)
+	second, _ := recorder.Store.Get(context.Background(), scope, secondID)
+	first.UpdatedAt = second.UpdatedAt.Add(-time.Minute)
+	badOrderConfig := validMemoryRuntimeConfig(t, validMemoryAuthorizer())
+	badOrderConfig.Store = &scriptedSnapshotMemoryStore{Store: recorder, listResults: [][]memorykit.Memory{{first, second}}}
+	badOrder := memoryRequest(t, (&Server{memory: badOrderConfig}).Handler(), http.MethodGet, "/projects/project-a/memories", "")
+	if badOrder.Code != http.StatusInternalServerError {
+		t.Fatalf("bad order status=%d body=%s", badOrder.Code, badOrder.Body.String())
+	}
+}
+
+func TestMemoryHandlersVerifyMutationSourcesAndStableSnapshot(t *testing.T) {
+	tests := []struct {
+		name, operation string
+		status          memorykit.Status
+		body            string
+	}{
+		{name: "activate sources", operation: "activate", status: memorykit.StatusCandidate, body: `{"expected_version":1,"reason":"approve"}`},
+		{name: "dismiss sources", operation: "dismiss", status: memorykit.StatusCandidate, body: `{"expected_version":1,"reason":"dismiss"}`},
+		{name: "forget sources", operation: "forget", status: memorykit.StatusActive, body: `{"expected_version":1,"reason":"forget"}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := validMemoryRuntimeConfig(t, validMemoryAuthorizer())
+			recorder := config.Store.(*recordingMemoryStore)
+			scope := memorykit.Scope{TenantID: "tenant-a", SubjectType: memorykit.SubjectProject, SubjectID: "project-a"}
+			id := seedMemory(t, recorder.Store, scope, test.status, "mutation-"+test.operation, "content")
+			config.Store = &postMutationTamperMemoryStore{Store: recorder, operation: test.operation, tamperSources: true}
+			response := memoryRequest(t, (&Server{memory: config}).Handler(), http.MethodPost, "/projects/project-a/memories/"+id+"/"+test.operation, test.body)
+			if response.Code != http.StatusInternalServerError {
+				t.Fatalf("status=%d body=%s, want 500", response.Code, response.Body.String())
+			}
+		})
+	}
+
+	config := validMemoryRuntimeConfig(t, validMemoryAuthorizer())
+	recorder := config.Store.(*recordingMemoryStore)
+	scope := memorykit.Scope{TenantID: "tenant-a", SubjectType: memorykit.SubjectProject, SubjectID: "project-a"}
+	id := seedMemory(t, recorder.Store, scope, memorykit.StatusCandidate, "mutation-snapshot", "content")
+	config.Store = &postMutationTamperMemoryStore{Store: recorder, operation: "activate", tamperSnapshot: true}
+	response := memoryRequest(t, (&Server{memory: config}).Handler(), http.MethodPost, "/projects/project-a/memories/"+id+"/activate", `{"expected_version":1,"reason":"approve"}`)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("snapshot status=%d body=%s, want 500", response.Code, response.Body.String())
 	}
 }
 
@@ -419,10 +783,122 @@ func (s *malformedRevisionMemoryStore) Revisions(ctx context.Context, query memo
 	return revisions, err
 }
 
+type noOpEraseMemoryStore struct{ memorykit.Store }
+
+func (*noOpEraseMemoryStore) Erase(context.Context, memorykit.VersionedCommand) error { return nil }
+
+type mutatingRevisionMemoryStore struct {
+	memorykit.Store
+	mutate func([]memorykit.Revision)
+}
+
+func (s *mutatingRevisionMemoryStore) Revisions(ctx context.Context, query memorykit.RevisionQuery) ([]memorykit.Revision, error) {
+	revisions, err := s.Store.Revisions(ctx, query)
+	if err == nil && len(revisions) > 1 {
+		s.mutate(revisions)
+	}
+	return revisions, err
+}
+
 type wrongCorrectSourcesMemoryStore struct{ memorykit.Store }
 
 func (s *wrongCorrectSourcesMemoryStore) Sources(context.Context, memorykit.Scope, string) ([]memorykit.Source, error) {
 	return []memorykit.Source{{Kind: "git", Ref: "commit:wrong", EvidenceHash: "sha256:wrong"}}, nil
+}
+
+type canonicalSourceOrderMemoryStore struct {
+	memorykit.Store
+	sourcesCalls int
+}
+
+func (s *canonicalSourceOrderMemoryStore) Sources(ctx context.Context, scope memorykit.Scope, id string) ([]memorykit.Source, error) {
+	s.sourcesCalls++
+	sources, err := s.Store.Sources(ctx, scope, id)
+	sort.Slice(sources, func(i, j int) bool {
+		if sources[i].Kind != sources[j].Kind {
+			return sources[i].Kind < sources[j].Kind
+		}
+		if sources[i].Ref != sources[j].Ref {
+			return sources[i].Ref < sources[j].Ref
+		}
+		return sources[i].EvidenceHash < sources[j].EvidenceHash
+	})
+	return sources, err
+}
+
+type scriptedSnapshotMemoryStore struct {
+	memorykit.Store
+	getResults  []memorykit.Memory
+	getCalls    int
+	listResults [][]memorykit.Memory
+	listCalls   int
+}
+
+func (s *scriptedSnapshotMemoryStore) Get(ctx context.Context, scope memorykit.Scope, id string) (memorykit.Memory, error) {
+	if len(s.getResults) == 0 {
+		return s.Store.Get(ctx, scope, id)
+	}
+	index := min(s.getCalls, len(s.getResults)-1)
+	s.getCalls++
+	return s.getResults[index], nil
+}
+
+func (s *scriptedSnapshotMemoryStore) List(ctx context.Context, query memorykit.ListQuery) ([]memorykit.Memory, error) {
+	if len(s.listResults) == 0 {
+		return s.Store.List(ctx, query)
+	}
+	index := min(s.listCalls, len(s.listResults)-1)
+	s.listCalls++
+	return append([]memorykit.Memory(nil), s.listResults[index]...), nil
+}
+
+type postMutationTamperMemoryStore struct {
+	memorykit.Store
+	operation      string
+	mutated        bool
+	tamperSources  bool
+	tamperSnapshot bool
+}
+
+func (s *postMutationTamperMemoryStore) Activate(ctx context.Context, command memorykit.VersionedCommand) (memorykit.Memory, error) {
+	memory, err := s.Store.Activate(ctx, command)
+	if err == nil && s.operation == "activate" {
+		s.mutated = true
+	}
+	return memory, err
+}
+
+func (s *postMutationTamperMemoryStore) Dismiss(ctx context.Context, command memorykit.VersionedCommand) (memorykit.Memory, error) {
+	memory, err := s.Store.Dismiss(ctx, command)
+	if err == nil && s.operation == "dismiss" {
+		s.mutated = true
+	}
+	return memory, err
+}
+
+func (s *postMutationTamperMemoryStore) Forget(ctx context.Context, command memorykit.VersionedCommand) (memorykit.Memory, error) {
+	memory, err := s.Store.Forget(ctx, command)
+	if err == nil && s.operation == "forget" {
+		s.mutated = true
+	}
+	return memory, err
+}
+
+func (s *postMutationTamperMemoryStore) Sources(ctx context.Context, scope memorykit.Scope, id string) ([]memorykit.Source, error) {
+	if s.mutated && s.tamperSources {
+		return []memorykit.Source{{Kind: "git", Ref: "commit:changed", EvidenceHash: "hash:changed"}}, nil
+	}
+	return s.Store.Sources(ctx, scope, id)
+}
+
+func (s *postMutationTamperMemoryStore) Get(ctx context.Context, scope memorykit.Scope, id string) (memorykit.Memory, error) {
+	memory, err := s.Store.Get(ctx, scope, id)
+	if err == nil && s.mutated && s.tamperSnapshot {
+		memory.Content = "concurrent content"
+		memory.Version++
+		memory.UpdatedAt = memory.UpdatedAt.Add(time.Minute)
+	}
+	return memory, err
 }
 
 func (s *unchangedMutationMemoryStore) unchanged(ctx context.Context, command memorykit.VersionedCommand) (memorykit.Memory, error) {
@@ -520,6 +996,35 @@ func responseMemoryID(t *testing.T, response *httptest.ResponseRecorder) string 
 		t.Fatalf("decode memory ID: %v body=%s", err, response.Body.String())
 	}
 	return decoded.ID
+}
+
+func responseSourceKinds(t *testing.T, response *httptest.ResponseRecorder) []string {
+	t.Helper()
+	var decoded struct {
+		Sources []struct {
+			Kind string `json:"kind"`
+		} `json:"sources"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	result := make([]string, len(decoded.Sources))
+	for index := range decoded.Sources {
+		result[index] = decoded.Sources[index].Kind
+	}
+	return result
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func storeLastListStatus(t *testing.T, store *recordingMemoryStore) memorykit.Status {

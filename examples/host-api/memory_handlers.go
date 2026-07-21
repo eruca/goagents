@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -92,6 +96,12 @@ type memoryRevisionListResponse struct {
 	Revisions []memoryRevisionResponse `json:"revisions"`
 }
 
+var (
+	errMemorySnapshotChanged    = errors.New("memory snapshot changed")
+	errMemoryInvalidStoreResult = errors.New("memory store returned invalid data")
+	errMemoryClockRollback      = errors.New("memory clock precedes stored memory")
+)
+
 func (s *Server) handleListMemories(w http.ResponseWriter, r *http.Request) {
 	queryValues, err := parseMemoryQuery(r.URL.RawQuery, map[string]struct{}{
 		"kind": {}, "status": {}, "key": {}, "limit": {},
@@ -112,94 +122,236 @@ func (s *Server) handleListMemories(w http.ResponseWriter, r *http.Request) {
 			capability = memoryReview
 		}
 	}
-	scope, _, ok := s.authorizeProjectMemory(w, r, capability)
-	if !ok {
-		return
-	}
 	limit, err := memoryQueryLimit(queryValues, s.memory.Limits.MaxListItems)
 	if err != nil {
 		writeMemoryError(w, http.StatusBadRequest, "invalid_request", "invalid memory list limit")
 		return
 	}
-	query := memorykit.ListQuery{Scope: scope, Status: status, Limit: limit}
-	if values, present := queryValues["kind"]; present {
-		query.Kind = memorykit.Kind(values[0])
-	}
-	if values, present := queryValues["key"]; present {
-		query.Key = values[0]
-	}
-	if err := memorykit.ValidateListQuery(query, s.memory.Limits); err != nil {
-		writeMemoryError(w, http.StatusBadRequest, "invalid_request", "invalid memory list query")
-		return
-	}
-	memories, err := s.memory.Store.List(r.Context(), query)
-	if err != nil {
-		writeMemoryStoreError(w, err)
-		return
-	}
-	if len(memories) > limit {
-		writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
-		return
-	}
-	response := memoryListResponse{Memories: make([]memoryResponse, 0, len(memories))}
-	for _, memory := range memories {
-		if memory.Scope != scope || memory.Status != status || validateMemorySnapshot(memory, s.memory.Limits) != nil {
-			writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
+	for attempt := 0; attempt < 2; attempt++ {
+		scope, _, ok := s.authorizeProjectMemory(w, r, capability)
+		if !ok {
 			return
 		}
-		sources, err := s.memory.Store.Sources(r.Context(), scope, memory.ID)
+		query := memorykit.ListQuery{Scope: scope, Status: status, Limit: limit}
+		if values, present := queryValues["kind"]; present {
+			query.Kind = memorykit.Kind(values[0])
+		}
+		if values, present := queryValues["key"]; present {
+			query.Key = values[0]
+		}
+		if err := memorykit.ValidateListQuery(query, s.memory.Limits); err != nil {
+			writeMemoryError(w, http.StatusBadRequest, "invalid_request", "invalid memory list query")
+			return
+		}
+		response, err := s.stableMemoryList(r, query)
+		if errors.Is(err, errMemorySnapshotChanged) {
+			continue
+		}
 		if err != nil {
 			writeMemoryStoreError(w, err)
 			return
 		}
-		if err := memorykit.ValidateSources(sources, s.memory.Limits); err != nil {
-			writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
-			return
-		}
-		response.Memories = append(response.Memories, memoryToResponse(memory, sources))
+		writeJSON(w, http.StatusOK, response)
+		return
 	}
-	writeJSON(w, http.StatusOK, response)
+	writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned unstable data")
 }
 
 func (s *Server) handleGetMemory(w http.ResponseWriter, r *http.Request) {
-	scope, _, ok := s.authorizeProjectMemory(w, r, memoryRead)
-	if !ok {
-		return
-	}
 	id := r.PathValue("memoryID")
-	if err := memorykit.ValidateMemoryID(id); err != nil {
-		writeMemoryError(w, http.StatusBadRequest, "invalid_request", "invalid memory ID")
+	for attempt := 0; attempt < 2; attempt++ {
+		scope, _, ok := s.authorizeProjectMemory(w, r, memoryRead)
+		if !ok {
+			return
+		}
+		if err := memorykit.ValidateMemoryID(id); err != nil {
+			writeMemoryError(w, http.StatusBadRequest, "invalid_request", "invalid memory ID")
+			return
+		}
+		memory, err := s.memory.Store.Get(r.Context(), scope, id)
+		if err != nil {
+			writeMemoryStoreError(w, err)
+			return
+		}
+		if memory.ID != id || memory.Scope != scope || validateMemorySnapshot(memory, s.memory.Limits) != nil {
+			writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
+			return
+		}
+		if memory.Status != memorykit.StatusActive {
+			reviewScope, _, reviewed := s.authorizeProjectMemory(w, r, memoryReview)
+			if !reviewed {
+				return
+			}
+			if reviewScope != scope {
+				writeMemoryError(w, http.StatusForbidden, "forbidden", "project memory access denied")
+				return
+			}
+		}
+		sources, err := s.readCanonicalMemorySources(r, scope, id)
+		if errors.Is(err, memorykit.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			writeMemoryStoreError(w, err)
+			return
+		}
+		confirmed, err := s.memory.Store.Get(r.Context(), scope, id)
+		if errors.Is(err, memorykit.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			writeMemoryStoreError(w, err)
+			return
+		}
+		if confirmed.ID != id || confirmed.Scope != scope || validateMemorySnapshot(confirmed, s.memory.Limits) != nil {
+			writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
+			return
+		}
+		if !sameMemorySnapshot(confirmed, memory) {
+			continue
+		}
+		writeJSON(w, http.StatusOK, memoryToResponse(confirmed, sources))
 		return
 	}
-	memory, err := s.memory.Store.Get(r.Context(), scope, id)
+	writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned unstable data")
+}
+
+// stableMemoryList rejects a mixed snapshot instead of returning content that
+// changed while its sources were read. One retry is owned by the HTTP handler.
+func (s *Server) stableMemoryList(r *http.Request, query memorykit.ListQuery) (memoryListResponse, error) {
+	memories, err := s.memory.Store.List(r.Context(), query)
 	if err != nil {
-		writeMemoryStoreError(w, err)
-		return
+		return memoryListResponse{}, err
 	}
-	if memory.ID != id || memory.Scope != scope || validateMemorySnapshot(memory, s.memory.Limits) != nil {
-		writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
-		return
+	if len(memories) > query.Limit || !validMemoryListOrder(memories) {
+		return memoryListResponse{}, errMemoryInvalidStoreResult
 	}
-	if memory.Status != memorykit.StatusActive {
-		reviewScope, _, reviewed := s.authorizeProjectMemory(w, r, memoryReview)
-		if !reviewed {
-			return
+
+	response := memoryListResponse{Memories: make([]memoryResponse, 0, len(memories))}
+	for _, listed := range memories {
+		if !memoryMatchesListQuery(listed, query) || validateMemorySnapshot(listed, s.memory.Limits) != nil {
+			return memoryListResponse{}, errMemoryInvalidStoreResult
 		}
-		if reviewScope != scope {
-			writeMemoryError(w, http.StatusForbidden, "forbidden", "project memory access denied")
-			return
+		sources, err := s.readCanonicalMemorySources(r, query.Scope, listed.ID)
+		if errors.Is(err, memorykit.ErrNotFound) {
+			return memoryListResponse{}, errMemorySnapshotChanged
 		}
+		if err != nil {
+			return memoryListResponse{}, err
+		}
+		confirmed, err := s.memory.Store.Get(r.Context(), query.Scope, listed.ID)
+		if errors.Is(err, memorykit.ErrNotFound) {
+			return memoryListResponse{}, errMemorySnapshotChanged
+		}
+		if err != nil {
+			return memoryListResponse{}, err
+		}
+		if !memoryMatchesListQuery(confirmed, query) || validateMemorySnapshot(confirmed, s.memory.Limits) != nil {
+			return memoryListResponse{}, errMemoryInvalidStoreResult
+		}
+		if !sameMemorySnapshot(listed, confirmed) {
+			return memoryListResponse{}, errMemorySnapshotChanged
+		}
+		response.Memories = append(response.Memories, memoryToResponse(confirmed, sources))
 	}
+	return response, nil
+}
+
+func (s *Server) readCanonicalMemorySources(r *http.Request, scope memorykit.Scope, id string) ([]memorykit.Source, error) {
 	sources, err := s.memory.Store.Sources(r.Context(), scope, id)
 	if err != nil {
-		writeMemoryStoreError(w, err)
-		return
+		return nil, err
 	}
 	if err := memorykit.ValidateSources(sources, s.memory.Limits); err != nil {
-		writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
-		return
+		return nil, errMemoryInvalidStoreResult
 	}
-	writeJSON(w, http.StatusOK, memoryToResponse(memory, sources))
+	return canonicalMemorySources(sources), nil
+}
+
+// readStableStoredMemory provides the bounded Memory -> Sources -> Memory
+// confirmation used before mutations.
+func (s *Server) readStableStoredMemory(r *http.Request, scope memorykit.Scope, id string) (memorykit.Memory, []memorykit.Source, error) {
+	first, err := s.memory.Store.Get(r.Context(), scope, id)
+	if err != nil {
+		return memorykit.Memory{}, nil, err
+	}
+	if first.ID != id || first.Scope != scope || validateMemorySnapshot(first, s.memory.Limits) != nil {
+		return memorykit.Memory{}, nil, errMemoryInvalidStoreResult
+	}
+	sources, err := s.readCanonicalMemorySources(r, scope, id)
+	if errors.Is(err, memorykit.ErrNotFound) {
+		return memorykit.Memory{}, nil, errMemorySnapshotChanged
+	}
+	if err != nil {
+		return memorykit.Memory{}, nil, err
+	}
+	confirmed, err := s.memory.Store.Get(r.Context(), scope, id)
+	if errors.Is(err, memorykit.ErrNotFound) {
+		return memorykit.Memory{}, nil, errMemorySnapshotChanged
+	}
+	if err != nil {
+		return memorykit.Memory{}, nil, err
+	}
+	if confirmed.ID != id || confirmed.Scope != scope || validateMemorySnapshot(confirmed, s.memory.Limits) != nil {
+		return memorykit.Memory{}, nil, errMemoryInvalidStoreResult
+	}
+	if !sameMemorySnapshot(first, confirmed) {
+		return memorykit.Memory{}, nil, errMemorySnapshotChanged
+	}
+	return confirmed, sources, nil
+}
+
+// confirmStoredMemory treats the mutation result as the first Memory read, then
+// verifies the sources and a fresh persisted Memory before responding.
+func (s *Server) confirmStoredMemory(r *http.Request, expected memorykit.Memory) (memorykit.Memory, []memorykit.Source, error) {
+	if validateMemorySnapshot(expected, s.memory.Limits) != nil {
+		return memorykit.Memory{}, nil, errMemoryInvalidStoreResult
+	}
+	sources, err := s.readCanonicalMemorySources(r, expected.Scope, expected.ID)
+	if errors.Is(err, memorykit.ErrNotFound) {
+		return memorykit.Memory{}, nil, errMemorySnapshotChanged
+	}
+	if err != nil {
+		return memorykit.Memory{}, nil, err
+	}
+	confirmed, err := s.memory.Store.Get(r.Context(), expected.Scope, expected.ID)
+	if errors.Is(err, memorykit.ErrNotFound) {
+		return memorykit.Memory{}, nil, errMemorySnapshotChanged
+	}
+	if err != nil {
+		return memorykit.Memory{}, nil, err
+	}
+	if confirmed.ID != expected.ID || confirmed.Scope != expected.Scope || validateMemorySnapshot(confirmed, s.memory.Limits) != nil {
+		return memorykit.Memory{}, nil, errMemoryInvalidStoreResult
+	}
+	if !sameMemorySnapshot(expected, confirmed) {
+		return memorykit.Memory{}, nil, errMemorySnapshotChanged
+	}
+	return confirmed, sources, nil
+}
+
+func validMemoryListOrder(memories []memorykit.Memory) bool {
+	seen := make(map[string]struct{}, len(memories))
+	for index, memory := range memories {
+		if _, exists := seen[memory.ID]; exists {
+			return false
+		}
+		seen[memory.ID] = struct{}{}
+		if index == 0 {
+			continue
+		}
+		previous := memories[index-1]
+		if memory.UpdatedAt.After(previous.UpdatedAt) ||
+			(memory.UpdatedAt.Equal(previous.UpdatedAt) && memory.ID <= previous.ID) {
+			return false
+		}
+	}
+	return true
+}
+
+func memoryMatchesListQuery(memory memorykit.Memory, query memorykit.ListQuery) bool {
+	return memory.Scope == query.Scope && memory.Status == query.Status &&
+		(query.Kind == "" || memory.Kind == query.Kind) && (query.Key == "" || memory.Key == query.Key)
 }
 
 func (s *Server) handleMemoryRevisions(w http.ResponseWriter, r *http.Request) {
@@ -229,6 +381,15 @@ func (s *Server) handleMemoryRevisions(w http.ResponseWriter, r *http.Request) {
 		writeMemoryError(w, http.StatusBadRequest, "invalid_request", "invalid memory revision query")
 		return
 	}
+	current, err := s.memory.Store.Get(r.Context(), scope, query.MemoryID)
+	if err != nil {
+		writeMemoryStoreError(w, err)
+		return
+	}
+	if current.ID != query.MemoryID || current.Scope != scope || validateMemorySnapshot(current, s.memory.Limits) != nil {
+		writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
+		return
+	}
 	revisions, err := s.memory.Store.Revisions(r.Context(), query)
 	if err != nil {
 		writeMemoryStoreError(w, err)
@@ -239,11 +400,22 @@ func (s *Server) handleMemoryRevisions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response := memoryRevisionListResponse{Revisions: make([]memoryRevisionResponse, 0, len(revisions))}
-	for _, revision := range revisions {
+	var previousVersion int64
+	currentIsTombstone := current.Status == memorykit.StatusInactive && current.Content == ""
+	for index, revision := range revisions {
 		if validateMemoryRevision(revision, query, s.memory.Limits) != nil {
 			writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
 			return
 		}
+		if index > 0 && revision.Version >= previousVersion {
+			writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
+			return
+		}
+		if currentIsTombstone && !revision.ContentErased {
+			writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
+			return
+		}
+		previousVersion = revision.Version
 		response.Revisions = append(response.Revisions, memoryRevisionToResponse(revision))
 	}
 	writeJSON(w, http.StatusOK, response)
@@ -315,19 +487,16 @@ func (s *Server) handleCreateMemory(w http.ResponseWriter, r *http.Request) {
 		writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
 		return
 	}
-	sources := request.Sources
-	if replay || created.Version > 1 {
-		sources, err = s.memory.Store.Sources(r.Context(), request.Scope, request.ID)
-		if err != nil {
-			writeMemoryStoreError(w, err)
-			return
-		}
-		if err := memorykit.ValidateSources(sources, s.memory.Limits); err != nil {
-			writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
-			return
-		}
+	confirmed, sources, err := s.confirmStoredMemory(r, created)
+	if err != nil {
+		writeMemoryStoreError(w, err)
+		return
 	}
-	writeJSON(w, http.StatusCreated, memoryToResponse(created, sources))
+	if created.Version == 1 && !sameMemorySourceSet(sources, request.Sources) {
+		writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
+		return
+	}
+	writeJSON(w, http.StatusCreated, memoryToResponse(confirmed, sources))
 }
 
 func (s *Server) restoreCreateReplayTime(r *http.Request, request memorykit.CreateRequest) (memorykit.CreateRequest, bool, error) {
@@ -359,29 +528,20 @@ func (s *Server) handleActivateMemory(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	memory, err := s.memory.Store.Get(r.Context(), scope, id)
+	memory, sources, err := s.readStableStoredMemory(r, scope, id)
 	if err != nil {
 		writeMemoryStoreError(w, err)
-		return
-	}
-	if memory.Scope != scope || memory.ID != id || validateMemorySnapshot(memory, s.memory.Limits) != nil {
-		writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
 		return
 	}
 	if memory.Status != memorykit.StatusCandidate || memory.Version != input.ExpectedVersion {
 		writeMemoryError(w, http.StatusConflict, "memory_conflict", "memory cannot be activated")
 		return
 	}
+	if command.Now.Before(memory.UpdatedAt) {
+		writeMemoryStoreError(w, errMemoryClockRollback)
+		return
+	}
 	if !s.validateMemoryContent(w, r, memory.Content) {
-		return
-	}
-	sources, err := s.memory.Store.Sources(r.Context(), scope, memory.ID)
-	if err != nil {
-		writeMemoryStoreError(w, err)
-		return
-	}
-	if err := memorykit.ValidateSources(sources, s.memory.Limits); err != nil {
-		writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
 		return
 	}
 	updated, err := s.memory.Store.Activate(r.Context(), command)
@@ -392,7 +552,16 @@ func (s *Server) handleActivateMemory(w http.ResponseWriter, r *http.Request) {
 	if !s.validTransitionResult(w, memory, updated, memorykit.StatusActive, command) {
 		return
 	}
-	writeJSON(w, http.StatusOK, memoryToResponse(updated, sources))
+	confirmed, persistedSources, err := s.confirmStoredMemory(r, updated)
+	if err != nil {
+		writeMemoryStoreError(w, err)
+		return
+	}
+	if !sameMemorySourceSet(sources, persistedSources) {
+		writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
+		return
+	}
+	writeJSON(w, http.StatusOK, memoryToResponse(confirmed, persistedSources))
 }
 
 func (s *Server) handleDismissMemory(w http.ResponseWriter, r *http.Request) {
@@ -442,17 +611,17 @@ func (s *Server) handleCorrectMemory(w http.ResponseWriter, r *http.Request) {
 	if !s.validateMemoryContent(w, r, request.Content) {
 		return
 	}
-	current, err := s.memory.Store.Get(r.Context(), scope, request.Command.ID)
+	current, _, err := s.readStableStoredMemory(r, scope, request.Command.ID)
 	if err != nil {
 		writeMemoryStoreError(w, err)
 		return
 	}
-	if current.ID != request.Command.ID || current.Scope != scope || validateMemorySnapshot(current, s.memory.Limits) != nil {
-		writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
-		return
-	}
 	if current.Version != request.Command.ExpectedVersion {
 		writeMemoryError(w, http.StatusConflict, "memory_conflict", "memory version conflict")
+		return
+	}
+	if request.Command.Now.Before(current.UpdatedAt) {
+		writeMemoryStoreError(w, errMemoryClockRollback)
 		return
 	}
 	updated, err := s.memory.Store.Correct(r.Context(), request)
@@ -463,16 +632,16 @@ func (s *Server) handleCorrectMemory(w http.ResponseWriter, r *http.Request) {
 	if !s.validCorrectionResult(w, current, updated, request) {
 		return
 	}
-	persistedSources, err := s.memory.Store.Sources(r.Context(), scope, request.Command.ID)
+	confirmed, persistedSources, err := s.confirmStoredMemory(r, updated)
 	if err != nil {
 		writeMemoryStoreError(w, err)
 		return
 	}
-	if err := memorykit.ValidateSources(persistedSources, s.memory.Limits); err != nil || !sameMemorySources(persistedSources, request.Sources) {
+	if !sameMemorySourceSet(persistedSources, request.Sources) {
 		writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
 		return
 	}
-	writeJSON(w, http.StatusOK, memoryToResponse(updated, persistedSources))
+	writeJSON(w, http.StatusOK, memoryToResponse(confirmed, persistedSources))
 }
 
 func (s *Server) handleEraseMemory(w http.ResponseWriter, r *http.Request) {
@@ -484,8 +653,43 @@ func (s *Server) handleEraseMemory(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	current, _, err := s.readStableStoredMemory(r, scope, command.ID)
+	if err != nil {
+		writeMemoryStoreError(w, err)
+		return
+	}
+	if current.Version != command.ExpectedVersion {
+		writeMemoryError(w, http.StatusConflict, "memory_conflict", "memory version conflict")
+		return
+	}
+	if command.Now.Before(current.UpdatedAt) {
+		writeMemoryStoreError(w, errMemoryClockRollback)
+		return
+	}
 	if err := s.memory.Store.Erase(r.Context(), command); err != nil {
 		writeMemoryStoreError(w, err)
+		return
+	}
+	erased, sources, err := s.readStableStoredMemory(r, scope, command.ID)
+	if err != nil {
+		writeMemoryStoreError(w, err)
+		return
+	}
+	if !validEraseResult(current, erased, sources, command) {
+		writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
+		return
+	}
+	revisions, err := s.memory.Store.Revisions(r.Context(), memorykit.RevisionQuery{
+		Scope: scope, MemoryID: command.ID, Limit: 1,
+	})
+	if err != nil {
+		writeMemoryStoreError(w, err)
+		return
+	}
+	if len(revisions) != 1 || validateMemoryRevision(revisions[0], memorykit.RevisionQuery{
+		Scope: scope, MemoryID: command.ID, Limit: 1,
+	}, s.memory.Limits) != nil || !validEraseRevision(revisions[0], erased, command) {
+		writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -501,26 +705,17 @@ func (s *Server) handleVersionedMemoryMutation(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
-	current, err := s.memory.Store.Get(r.Context(), scope, id)
+	current, sources, err := s.readStableStoredMemory(r, scope, id)
 	if err != nil {
 		writeMemoryStoreError(w, err)
-		return
-	}
-	if current.ID != id || current.Scope != scope || validateMemorySnapshot(current, s.memory.Limits) != nil {
-		writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
 		return
 	}
 	if current.Status != requiredStatus || current.Version != command.ExpectedVersion {
 		writeMemoryError(w, http.StatusConflict, "memory_conflict", "memory version conflict")
 		return
 	}
-	sources, err := s.memory.Store.Sources(r.Context(), scope, id)
-	if err != nil {
-		writeMemoryStoreError(w, err)
-		return
-	}
-	if err := memorykit.ValidateSources(sources, s.memory.Limits); err != nil {
-		writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
+	if command.Now.Before(current.UpdatedAt) {
+		writeMemoryStoreError(w, errMemoryClockRollback)
 		return
 	}
 	updated, err := mutate(command)
@@ -531,7 +726,16 @@ func (s *Server) handleVersionedMemoryMutation(w http.ResponseWriter, r *http.Re
 	if !s.validTransitionResult(w, current, updated, memorykit.StatusInactive, command) {
 		return
 	}
-	writeJSON(w, http.StatusOK, memoryToResponse(updated, sources))
+	confirmed, persistedSources, err := s.confirmStoredMemory(r, updated)
+	if err != nil {
+		writeMemoryStoreError(w, err)
+		return
+	}
+	if !sameMemorySourceSet(sources, persistedSources) {
+		writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
+		return
+	}
+	writeJSON(w, http.StatusOK, memoryToResponse(confirmed, persistedSources))
 }
 
 func (s *Server) authorizeVersionedMemory(w http.ResponseWriter, r *http.Request, capability memoryCapability) (memorykit.Scope, memoryIdentity, versionedMemoryRequest, bool) {
@@ -561,11 +765,157 @@ func (s *Server) versionedMemoryCommand(w http.ResponseWriter, scope memorykit.S
 
 func (s *Server) decodeMemoryJSONStrict(w http.ResponseWriter, r *http.Request, target any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, s.memory.MaxHTTPBodyBytes)
-	return decodeJSONStrict(w, r, target)
+	raw, err := io.ReadAll(r.Body)
+	if err != nil || validateMemoryJSONShape(raw, target) != nil || json.Unmarshal(raw, target) != nil {
+		writeMemoryError(w, http.StatusBadRequest, "invalid_json", "invalid memory request body")
+		return false
+	}
+	return true
+}
+
+type memoryJSONShape struct {
+	allowed  map[string]struct{}
+	required map[string]struct{}
+}
+
+func validateMemoryJSONShape(raw []byte, target any) error {
+	var shape memoryJSONShape
+	switch target.(type) {
+	case *createMemoryRequest:
+		shape = newMemoryJSONShape(
+			[]string{"kind", "key", "content", "valid_until", "reason", "idempotency_key", "importance", "confidence", "sources"},
+			[]string{"kind", "key", "content", "reason", "importance", "confidence"},
+		)
+	case *correctMemoryRequest:
+		shape = newMemoryJSONShape(
+			[]string{"expected_version", "content", "valid_from", "valid_until", "reason", "importance", "confidence", "sources"},
+			[]string{"expected_version", "content", "valid_from", "reason", "importance", "confidence"},
+		)
+	case *versionedMemoryRequest:
+		shape = newMemoryJSONShape(
+			[]string{"expected_version", "reason"},
+			[]string{"expected_version", "reason"},
+		)
+	default:
+		return errors.New("unsupported memory JSON target")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if err := validateMemoryJSONObject(decoder, shape, true); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return errors.New("trailing memory JSON")
+	}
+	return nil
+}
+
+func newMemoryJSONShape(allowed, required []string) memoryJSONShape {
+	shape := memoryJSONShape{allowed: make(map[string]struct{}, len(allowed)), required: make(map[string]struct{}, len(required))}
+	for _, field := range allowed {
+		shape.allowed[field] = struct{}{}
+	}
+	for _, field := range required {
+		shape.required[field] = struct{}{}
+	}
+	return shape
+}
+
+func validateMemoryJSONObject(decoder *json.Decoder, shape memoryJSONShape, topLevel bool) error {
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return errors.New("memory JSON object required")
+	}
+	seen := make(map[string]struct{}, len(shape.allowed))
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return errors.New("memory JSON key required")
+		}
+		if _, allowed := shape.allowed[key]; !allowed {
+			return errors.New("unknown memory JSON key")
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return errors.New("duplicate memory JSON key")
+		}
+		seen[key] = struct{}{}
+		if topLevel && key == "sources" {
+			if err := validateMemoryJSONSources(decoder); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := skipMemoryJSONValue(decoder); err != nil {
+			return err
+		}
+	}
+	if _, err := decoder.Token(); err != nil {
+		return err
+	}
+	for field := range shape.required {
+		if _, present := seen[field]; !present {
+			return errors.New("missing memory JSON key")
+		}
+	}
+	return nil
+}
+
+func validateMemoryJSONSources(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('[') {
+		return errors.New("memory sources array required")
+	}
+	shape := newMemoryJSONShape([]string{"kind", "ref", "evidence_hash"}, []string{"kind", "ref"})
+	for decoder.More() {
+		if err := validateMemoryJSONObject(decoder, shape, false); err != nil {
+			return err
+		}
+	}
+	_, err = decoder.Token()
+	return err
+}
+
+func skipMemoryJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, nested := token.(json.Delim)
+	if !nested {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		for decoder.More() {
+			if _, err := decoder.Token(); err != nil {
+				return err
+			}
+			if err := skipMemoryJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+	case '[':
+		for decoder.More() {
+			if err := skipMemoryJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+	default:
+		return errors.New("invalid memory JSON delimiter")
+	}
+	_, err = decoder.Token()
+	return err
 }
 
 func (s *Server) validateMemoryContent(w http.ResponseWriter, r *http.Request, content string) bool {
 	if err := s.memory.ContentValidator.ValidateMemoryContent(r.Context(), content); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			writeMemoryError(w, http.StatusServiceUnavailable, "memory_unavailable", "project memory is temporarily unavailable")
+			return false
+		}
 		writeMemoryError(w, http.StatusBadRequest, "invalid_memory_content", "memory content was rejected")
 		return false
 	}
@@ -640,6 +990,33 @@ func sameMemoryStableFields(left, right memorykit.Memory) bool {
 		left.IdempotencyKey == right.IdempotencyKey && equivalentMemoryStoreTime(left.CreatedAt, right.CreatedAt)
 }
 
+func sameMemorySnapshot(left, right memorykit.Memory) bool {
+	return left.ID == right.ID && left.Scope == right.Scope && left.Kind == right.Kind && left.Key == right.Key &&
+		left.Status == right.Status && left.Content == right.Content &&
+		equivalentMemoryStoreTime(left.ValidFrom, right.ValidFrom) && equivalentMemoryStoreTime(left.ValidUntil, right.ValidUntil) &&
+		left.Importance == right.Importance && left.Confidence == right.Confidence &&
+		left.SourceAgentID == right.SourceAgentID && left.CreatedBy == right.CreatedBy && left.IdempotencyKey == right.IdempotencyKey &&
+		left.Version == right.Version && equivalentMemoryStoreTime(left.CreatedAt, right.CreatedAt) &&
+		equivalentMemoryStoreTime(left.UpdatedAt, right.UpdatedAt)
+}
+
+func validEraseResult(before, after memorykit.Memory, sources []memorykit.Source, command memorykit.VersionedCommand) bool {
+	return after.ID == before.ID && after.Scope == before.Scope && after.Kind == before.Kind && after.Key == before.Key &&
+		after.Status == memorykit.StatusInactive && after.Content == "" && len(sources) == 0 &&
+		equivalentMemoryStoreTime(after.ValidFrom, before.ValidFrom) && equivalentMemoryStoreTime(after.ValidUntil, before.ValidUntil) &&
+		after.Importance == before.Importance && after.Confidence == before.Confidence &&
+		after.SourceAgentID == before.SourceAgentID && after.CreatedBy == before.CreatedBy && after.IdempotencyKey == before.IdempotencyKey &&
+		after.Version == before.Version+1 && after.Version == command.ExpectedVersion+1 &&
+		equivalentMemoryStoreTime(after.CreatedAt, before.CreatedAt) && equivalentMemoryStoreTime(after.UpdatedAt, command.Now)
+}
+
+func validEraseRevision(revision memorykit.Revision, erased memorykit.Memory, command memorykit.VersionedCommand) bool {
+	return revision.Action == memorykit.RevisionErase && revision.ContentErased &&
+		revision.MemoryID == command.ID && revision.Version == command.ExpectedVersion+1 &&
+		revision.Actor == command.Actor && revision.Reason == command.Reason &&
+		sameMemorySnapshot(revision.Snapshot, erased) && equivalentMemoryStoreTime(revision.CreatedAt, command.Now)
+}
+
 func equivalentMemoryStoreTime(left, right time.Time) bool {
 	if left.IsZero() != right.IsZero() {
 		return false
@@ -651,12 +1028,27 @@ func equivalentMemoryStoreTime(left, right time.Time) bool {
 	return later.Sub(earlier) <= time.Microsecond
 }
 
-func sameMemorySources(left, right []memorykit.Source) bool {
+func canonicalMemorySources(sources []memorykit.Source) []memorykit.Source {
+	canonical := append([]memorykit.Source(nil), sources...)
+	sort.Slice(canonical, func(i, j int) bool {
+		if canonical[i].Kind != canonical[j].Kind {
+			return canonical[i].Kind < canonical[j].Kind
+		}
+		if canonical[i].Ref != canonical[j].Ref {
+			return canonical[i].Ref < canonical[j].Ref
+		}
+		return canonical[i].EvidenceHash < canonical[j].EvidenceHash
+	})
+	return canonical
+}
+
+func sameMemorySourceSet(left, right []memorykit.Source) bool {
 	if len(left) != len(right) {
 		return false
 	}
-	for index := range left {
-		if left[index] != right[index] {
+	canonicalLeft, canonicalRight := canonicalMemorySources(left), canonicalMemorySources(right)
+	for index := range canonicalLeft {
+		if canonicalLeft[index] != canonicalRight[index] {
 			return false
 		}
 	}
@@ -715,6 +1107,7 @@ func memorySourcesFromRequest(input []memorySourceRequest) []memorykit.Source {
 }
 
 func memoryToResponse(memory memorykit.Memory, sources []memorykit.Source) memoryResponse {
+	sources = canonicalMemorySources(sources)
 	responseSources := make([]memorySourceResponse, len(sources))
 	for index, source := range sources {
 		responseSources[index] = memorySourceResponse{Kind: source.Kind, Ref: source.Ref, EvidenceHash: source.EvidenceHash}
@@ -786,15 +1179,27 @@ func validateHTTPCreateResult(memory memorykit.Memory, request memorykit.CreateR
 
 func validateMemoryRevision(revision memorykit.Revision, query memorykit.RevisionQuery, limits memorykit.Limits) error {
 	if revision.MemoryID != query.MemoryID || revision.Version <= 0 || revision.Snapshot.ID != query.MemoryID ||
-		revision.Snapshot.Scope != query.Scope || revision.Snapshot.Version != revision.Version || revision.CreatedAt.IsZero() {
+		revision.Snapshot.Scope != query.Scope || revision.Snapshot.Version != revision.Version || revision.CreatedAt.IsZero() ||
+		!equivalentMemoryStoreTime(revision.CreatedAt, revision.Snapshot.UpdatedAt) {
 		return errors.New("invalid memory revision")
 	}
 	if query.BeforeVersion > 0 && revision.Version >= query.BeforeVersion {
 		return errors.New("invalid memory revision cursor result")
 	}
 	switch revision.Action {
-	case memorykit.RevisionCreate, memorykit.RevisionActivate, memorykit.RevisionCorrect, memorykit.RevisionSupersede,
-		memorykit.RevisionForget, memorykit.RevisionErase, memorykit.RevisionDismiss:
+	case memorykit.RevisionCreate, memorykit.RevisionCorrect:
+	case memorykit.RevisionActivate:
+		if revision.Snapshot.Status != memorykit.StatusActive {
+			return errors.New("invalid activation revision")
+		}
+	case memorykit.RevisionSupersede, memorykit.RevisionForget, memorykit.RevisionDismiss:
+		if revision.Snapshot.Status != memorykit.StatusInactive {
+			return errors.New("invalid inactive revision")
+		}
+	case memorykit.RevisionErase:
+		if revision.Snapshot.Status != memorykit.StatusInactive || !revision.ContentErased {
+			return errors.New("invalid erase revision")
+		}
 	default:
 		return errors.New("invalid memory revision action")
 	}
@@ -807,8 +1212,13 @@ func validateMemoryRevision(revision memorykit.Revision, query memorykit.Revisio
 		if err := validateMemorySnapshot(erasedSnapshot, limits); err != nil {
 			return err
 		}
-	} else if err := validateMemorySnapshot(revision.Snapshot, limits); err != nil {
-		return err
+	} else {
+		if strings.TrimSpace(revision.Snapshot.Content) == "" {
+			return errors.New("invalid blank memory revision")
+		}
+		if err := validateMemorySnapshot(revision.Snapshot, limits); err != nil {
+			return err
+		}
 	}
 	return memorykit.ValidateCommand(memorykit.VersionedCommand{
 		Scope: query.Scope, ID: query.MemoryID, ExpectedVersion: revision.Version,
@@ -818,6 +1228,12 @@ func validateMemoryRevision(revision memorykit.Revision, query memorykit.Revisio
 
 func writeMemoryStoreError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		writeMemoryError(w, http.StatusServiceUnavailable, "memory_unavailable", "project memory is temporarily unavailable")
+	case errors.Is(err, errMemorySnapshotChanged), errors.Is(err, errMemoryInvalidStoreResult):
+		writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
+	case errors.Is(err, errMemoryClockRollback):
+		writeMemoryError(w, http.StatusInternalServerError, "memory_clock_error", "memory clock precedes stored data")
 	case errors.Is(err, memorykit.ErrNotFound):
 		writeMemoryError(w, http.StatusNotFound, "memory_not_found", "memory not found")
 	case errors.Is(err, memorykit.ErrConflict):

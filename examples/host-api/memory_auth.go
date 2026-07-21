@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -93,6 +94,10 @@ func (s *Server) authorizeProjectMemory(w http.ResponseWriter, r *http.Request, 
 		return memorykit.Scope{}, memoryIdentity{}, false
 	}
 	identity, err := s.memory.Authorizer.AuthorizeMemory(r.Context(), authorization, projectID, capability)
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		writeMemoryError(w, http.StatusServiceUnavailable, "memory_unavailable", "project memory is temporarily unavailable")
+		return memorykit.Scope{}, memoryIdentity{}, false
+	}
 	if err != nil || strings.TrimSpace(identity.TenantID) == "" || strings.TrimSpace(identity.Subject) == "" {
 		writeMemoryError(w, http.StatusForbidden, "forbidden", "project memory access denied")
 		return memorykit.Scope{}, memoryIdentity{}, false
