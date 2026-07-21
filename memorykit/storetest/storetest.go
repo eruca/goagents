@@ -99,14 +99,22 @@ func assertProjectIsolation(t *testing.T, store memorykit.LifecycleStore) {
 	if err != nil || len(projectOne) != 1 {
 		t.Fatalf("project-1 List = %#v, %v", projectOne, err)
 	}
-	other := request.Scope
-	other.SubjectID = "project-2"
-	if _, err := store.Get(context.Background(), other, request.ID); !errors.Is(err, memorykit.ErrNotFound) {
-		t.Fatalf("cross-project Get error = %v", err)
+	foreignScopes := []struct {
+		name  string
+		scope memorykit.Scope
+	}{
+		{"different project", memorykit.Scope{TenantID: request.Scope.TenantID, SubjectType: memorykit.SubjectProject, SubjectID: "project-2"}},
+		{"different tenant", memorykit.Scope{TenantID: "tenant-other", SubjectType: memorykit.SubjectProject, SubjectID: request.Scope.SubjectID}},
+		{"different subject type", memorykit.Scope{TenantID: request.Scope.TenantID, SubjectType: memorykit.SubjectUser, SubjectID: request.Scope.SubjectID}},
 	}
-	listed, err := store.List(context.Background(), memorykit.ListQuery{Scope: other, Status: memorykit.StatusActive, Limit: 10})
-	if err != nil || len(listed) != 0 {
-		t.Fatalf("cross-project List = %#v, %v", listed, err)
+	for _, foreign := range foreignScopes {
+		if _, err := store.Get(context.Background(), foreign.scope, request.ID); !errors.Is(err, memorykit.ErrNotFound) {
+			t.Fatalf("%s Get error = %v", foreign.name, err)
+		}
+		listed, err := store.List(context.Background(), memorykit.ListQuery{Scope: foreign.scope, Status: memorykit.StatusActive, Limit: 10})
+		if err != nil || len(listed) != 0 {
+			t.Fatalf("%s List = %#v, %v", foreign.name, listed, err)
+		}
 	}
 }
 
@@ -132,13 +140,62 @@ func assertActivationSupersedes(t *testing.T, store memorykit.LifecycleStore) {
 }
 
 func assertStaleVersionConflicts(t *testing.T, store memorykit.LifecycleStore) {
-	candidate, err := store.Create(context.Background(), baseCreate("51111111-1111-1111-1111-111111111111", "project-1", memorykit.StatusCandidate))
+	active, err := store.Create(context.Background(), baseCreate("51111111-1111-1111-1111-111111111111", "project-1", memorykit.StatusActive))
 	if err != nil {
 		t.Fatal(err)
 	}
+	candidateRequest := baseCreate("52222222-2222-2222-2222-222222222222", "project-1", memorykit.StatusCandidate)
+	candidateRequest.Content = "Use a stale activation command"
+	candidate, err := store.Create(context.Background(), candidateRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeBefore, err := store.Get(context.Background(), active.Scope, active.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateBefore, err := store.Get(context.Background(), candidate.Scope, candidate.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeRevisionsBefore, err := store.Revisions(context.Background(), memorykit.RevisionQuery{Scope: active.Scope, MemoryID: active.ID, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateRevisionsBefore, err := store.Revisions(context.Background(), memorykit.RevisionQuery{Scope: candidate.Scope, MemoryID: candidate.ID, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	command := memorykit.VersionedCommand{Scope: candidate.Scope, ID: candidate.ID, ExpectedVersion: candidate.Version + 1, Actor: "reviewer-1", Reason: "stale", Now: candidate.UpdatedAt.Add(time.Minute)}
 	if _, err := store.Activate(context.Background(), command); !errors.Is(err, memorykit.ErrConflict) {
 		t.Fatalf("error = %v", err)
+	}
+	activeAfter, err := store.Get(context.Background(), active.Scope, active.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateAfter, err := store.Get(context.Background(), candidate.Scope, candidate.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(activeAfter, activeBefore) || !reflect.DeepEqual(candidateAfter, candidateBefore) {
+		t.Fatalf("memories changed after conflict: active = %#v/%#v, candidate = %#v/%#v", activeBefore, activeAfter, candidateBefore, candidateAfter)
+	}
+	activeRevisionsAfter, err := store.Revisions(context.Background(), memorykit.RevisionQuery{Scope: active.Scope, MemoryID: active.ID, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateRevisionsAfter, err := store.Revisions(context.Background(), memorykit.RevisionQuery{Scope: candidate.Scope, MemoryID: candidate.ID, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(activeRevisionsAfter, activeRevisionsBefore) || !reflect.DeepEqual(candidateRevisionsAfter, candidateRevisionsBefore) {
+		t.Fatalf("revisions changed after conflict: active = %#v/%#v, candidate = %#v/%#v", activeRevisionsBefore, activeRevisionsAfter, candidateRevisionsBefore, candidateRevisionsAfter)
+	}
+	activeList, err := store.List(context.Background(), memorykit.ListQuery{Scope: active.Scope, Status: memorykit.StatusActive, Limit: 10})
+	if err != nil || len(activeList) != 1 || !reflect.DeepEqual(activeList[0], activeBefore) {
+		t.Fatalf("active list after conflict = %#v, %v", activeList, err)
 	}
 }
 
