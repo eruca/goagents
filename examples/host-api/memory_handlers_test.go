@@ -149,6 +149,43 @@ func TestMemoryHandlersRequireExactJSONShapeAndPresence(t *testing.T) {
 	}
 }
 
+func TestMemoryHandlersRejectNullScalarFields(t *testing.T) {
+	id := uuid.NewString()
+	create := `{"kind":"fact","key":"null-create","content":"content","valid_until":"2026-07-22T08:00:00Z","reason":"reason","idempotency_key":"request-1","importance":1,"confidence":1,"sources":[{"kind":"git","ref":"commit:1","evidence_hash":"hash:1"}]}`
+	correct := `{"expected_version":1,"content":"corrected","valid_from":"2026-07-21T08:00:00Z","valid_until":"2026-07-22T08:00:00Z","reason":"reason","importance":1,"confidence":1,"sources":[{"kind":"git","ref":"commit:2","evidence_hash":"hash:2"}]}`
+	versioned := `{"expected_version":1,"reason":"reason"}`
+	tests := []struct {
+		name, target, body string
+	}{
+		{name: "create reason", target: "/projects/project-a/memories", body: strings.Replace(create, `"reason":"reason"`, `"reason":null`, 1)},
+		{name: "create importance", target: "/projects/project-a/memories", body: strings.Replace(create, `"importance":1`, `"importance":null`, 1)},
+		{name: "create confidence", target: "/projects/project-a/memories", body: strings.Replace(create, `"confidence":1`, `"confidence":null`, 1)},
+		{name: "create optional valid until", target: "/projects/project-a/memories", body: strings.Replace(create, `"valid_until":"2026-07-22T08:00:00Z"`, `"valid_until":null`, 1)},
+		{name: "create optional idempotency", target: "/projects/project-a/memories", body: strings.Replace(create, `"idempotency_key":"request-1"`, `"idempotency_key":null`, 1)},
+		{name: "source optional evidence hash", target: "/projects/project-a/memories", body: strings.Replace(create, `"evidence_hash":"hash:1"`, `"evidence_hash":null`, 1)},
+		{name: "source required kind", target: "/projects/project-a/memories", body: strings.Replace(create, `"kind":"git"`, `"kind":null`, 1)},
+		{name: "source required ref", target: "/projects/project-a/memories", body: strings.Replace(create, `"ref":"commit:1"`, `"ref":null`, 1)},
+		{name: "correct reason", target: "/projects/project-a/memories/" + id + "/correct", body: strings.Replace(correct, `"reason":"reason"`, `"reason":null`, 1)},
+		{name: "correct importance", target: "/projects/project-a/memories/" + id + "/correct", body: strings.Replace(correct, `"importance":1`, `"importance":null`, 1)},
+		{name: "correct confidence", target: "/projects/project-a/memories/" + id + "/correct", body: strings.Replace(correct, `"confidence":1`, `"confidence":null`, 1)},
+		{name: "correct optional valid until", target: "/projects/project-a/memories/" + id + "/correct", body: strings.Replace(correct, `"valid_until":"2026-07-22T08:00:00Z"`, `"valid_until":null`, 1)},
+		{name: "versioned reason", target: "/projects/project-a/memories/" + id + "/forget", body: strings.Replace(versioned, `"reason":"reason"`, `"reason":null`, 1)},
+		{name: "versioned expected version", target: "/projects/project-a/memories/" + id + "/forget", body: strings.Replace(versioned, `"expected_version":1`, `"expected_version":null`, 1)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server, store := newMemoryHandlerServer(t, validMemoryAuthorizer())
+			response := memoryRequest(t, server.Handler(), http.MethodPost, test.target, test.body)
+			if response.Code != http.StatusBadRequest || response.Body.String() != "{\"error\":\"invalid_json\",\"message\":\"invalid memory request body\"}\n" {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+			if len(store.calls) != 0 {
+				t.Fatalf("store calls=%v, want none", store.calls)
+			}
+		})
+	}
+}
+
 func TestMemoryHandlersMapSafeErrors(t *testing.T) {
 	secret := "postgres password=private"
 	tests := []struct {
@@ -309,6 +346,7 @@ func TestMemoryHandlersRejectMalformedRevisionSequenceAndTombstoneHistory(t *tes
 		{name: "duplicate version", mutate: func(revisions []memorykit.Revision) { revisions[1] = revisions[0] }},
 		{name: "created at mismatch", mutate: func(revisions []memorykit.Revision) { revisions[0].CreatedAt = revisions[0].CreatedAt.Add(time.Second) }},
 		{name: "action status mismatch", mutate: func(revisions []memorykit.Revision) { revisions[0].Action = memorykit.RevisionDismiss }},
+		{name: "create above version one", mutate: func(revisions []memorykit.Revision) { revisions[0].Action = memorykit.RevisionCreate }},
 		{name: "tombstone has nonerased history", erase: true, mutate: func(revisions []memorykit.Revision) {
 			revisions[len(revisions)-1].ContentErased = false
 			revisions[len(revisions)-1].Snapshot.Content = "restored content"
@@ -345,6 +383,23 @@ func TestMemoryHandlersRejectMalformedRevisionSequenceAndTombstoneHistory(t *tes
 			}
 		})
 	}
+
+	config := validMemoryRuntimeConfig(t, validMemoryAuthorizer())
+	recorder := config.Store.(*recordingMemoryStore)
+	scope := memorykit.Scope{TenantID: "tenant-a", SubjectType: memorykit.SubjectProject, SubjectID: "project-a"}
+	id := seedMemory(t, recorder.Store, scope, memorykit.StatusCandidate, "missing-latest-revision", "content")
+	if _, err := recorder.Store.Activate(context.Background(), memorykit.VersionedCommand{
+		Scope: scope, ID: id, ExpectedVersion: 1, Actor: "reviewer", Reason: "approve",
+		Now: time.Date(2026, 7, 21, 7, 30, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	config.Store = &omitLatestRevisionMemoryStore{Store: recorder}
+	response := memoryRequest(t, (&Server{memory: config}).Handler(), http.MethodGet,
+		"/projects/project-a/memories/"+id+"/revisions", "")
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("missing latest status=%d body=%s, want 500", response.Code, response.Body.String())
+	}
 }
 
 func TestMemoryHandlersRejectClockRollbackBeforeMutation(t *testing.T) {
@@ -371,6 +426,9 @@ func TestMemoryHandlersRejectClockRollbackBeforeMutation(t *testing.T) {
 				"/projects/project-a/memories/"+id+"/"+test.operation, test.body)
 			if response.Code != http.StatusInternalServerError {
 				t.Fatalf("status=%d body=%s, want 500", response.Code, response.Body.String())
+			}
+			if !strings.Contains(response.Body.String(), `"error":"memory_integrity_error"`) {
+				t.Fatalf("noncanonical clock error: %s", response.Body.String())
 			}
 			for _, call := range recorder.calls {
 				if call == test.operation {
@@ -596,6 +654,56 @@ func TestMemoryHandlersRetryStableListAndValidateOrder(t *testing.T) {
 	}
 }
 
+func TestMemoryHandlersReturnConflictAfterConcurrentMutationPreRead(t *testing.T) {
+	tests := []struct {
+		operation string
+		body      string
+	}{
+		{operation: "correct", body: `{"expected_version":1,"content":"replacement","valid_from":"2026-07-21T08:00:00Z","reason":"correct","importance":1,"confidence":1}`},
+		{operation: "forget", body: `{"expected_version":1,"reason":"forget"}`},
+	}
+	for _, test := range tests {
+		t.Run(test.operation, func(t *testing.T) {
+			config := validMemoryRuntimeConfig(t, validMemoryAuthorizer())
+			recorder := config.Store.(*recordingMemoryStore)
+			scope := memorykit.Scope{TenantID: "tenant-a", SubjectType: memorykit.SubjectProject, SubjectID: "project-a"}
+			id := seedMemory(t, recorder.Store, scope, memorykit.StatusActive, "pre-race-"+test.operation, "v1 content")
+			v1, err := recorder.Store.Get(context.Background(), scope, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			v2 := v1
+			v2.Content, v2.Version, v2.UpdatedAt = "v2 content", 2, v1.UpdatedAt.Add(time.Minute)
+			config.Store = &scriptedSnapshotMemoryStore{Store: recorder, getResults: []memorykit.Memory{v1, v2, v2, v2}}
+			response := memoryRequest(t, (&Server{memory: config}).Handler(), http.MethodPost,
+				"/projects/project-a/memories/"+id+"/"+test.operation, test.body)
+			if response.Code != http.StatusConflict {
+				t.Fatalf("status=%d body=%s, want 409", response.Code, response.Body.String())
+			}
+			for _, call := range recorder.calls {
+				if call == test.operation {
+					t.Fatalf("mutation called after advanced pre-read: %v", recorder.calls)
+				}
+			}
+		})
+	}
+
+	config := validMemoryRuntimeConfig(t, validMemoryAuthorizer())
+	recorder := config.Store.(*recordingMemoryStore)
+	scope := memorykit.Scope{TenantID: "tenant-a", SubjectType: memorykit.SubjectProject, SubjectID: "project-a"}
+	id := seedMemory(t, recorder.Store, scope, memorykit.StatusActive, "continuous-pre-race", "v1")
+	v1, _ := recorder.Store.Get(context.Background(), scope, id)
+	v2, v3 := v1, v1
+	v2.Content, v2.Version, v2.UpdatedAt = "v2", 2, v1.UpdatedAt.Add(time.Minute)
+	v3.Content, v3.Version, v3.UpdatedAt = "v3", 3, v1.UpdatedAt.Add(2*time.Minute)
+	config.Store = &scriptedSnapshotMemoryStore{Store: recorder, getResults: []memorykit.Memory{v1, v2, v2, v3}}
+	response := memoryRequest(t, (&Server{memory: config}).Handler(), http.MethodPost,
+		"/projects/project-a/memories/"+id+"/forget", `{"expected_version":1,"reason":"forget"}`)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("continuous status=%d body=%s, want 409", response.Code, response.Body.String())
+	}
+}
+
 func TestMemoryHandlersVerifyMutationSourcesAndStableSnapshot(t *testing.T) {
 	tests := []struct {
 		name, operation string
@@ -628,6 +736,56 @@ func TestMemoryHandlersVerifyMutationSourcesAndStableSnapshot(t *testing.T) {
 	response := memoryRequest(t, (&Server{memory: config}).Handler(), http.MethodPost, "/projects/project-a/memories/"+id+"/activate", `{"expected_version":1,"reason":"approve"}`)
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("snapshot status=%d body=%s, want 500", response.Code, response.Body.String())
+	}
+}
+
+func TestMemoryHandlersReturnStableAdvancedSnapshotAfterMutation(t *testing.T) {
+	tests := []struct {
+		operation string
+		body      string
+	}{
+		{operation: "correct", body: `{"expected_version":1,"content":"requested correction","valid_from":"2026-07-21T08:00:00Z","reason":"correct","importance":1,"confidence":1,"sources":[{"kind":"git","ref":"commit:requested","evidence_hash":"hash:requested"}]}`},
+		{operation: "forget", body: `{"expected_version":1,"reason":"forget"}`},
+	}
+	for _, test := range tests {
+		t.Run(test.operation, func(t *testing.T) {
+			config := validMemoryRuntimeConfig(t, validMemoryAuthorizer())
+			recorder := config.Store.(*recordingMemoryStore)
+			scope := memorykit.Scope{TenantID: "tenant-a", SubjectType: memorykit.SubjectProject, SubjectID: "project-a"}
+			id := seedMemory(t, recorder.Store, scope, memorykit.StatusActive, "post-race-"+test.operation, "original")
+			config.Store = &postMutationAdvanceMemoryStore{Store: recorder, operation: test.operation}
+			response := memoryRequest(t, (&Server{memory: config}).Handler(), http.MethodPost,
+				"/projects/project-a/memories/"+id+"/"+test.operation, test.body)
+			if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"version":3`) ||
+				!strings.Contains(response.Body.String(), "concurrent correction") || !strings.Contains(response.Body.String(), "commit:advanced") {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+			if strings.Contains(response.Body.String(), "commit:requested") {
+				t.Fatalf("response used stale requested sources: %s", response.Body.String())
+			}
+		})
+	}
+}
+
+func TestMemoryHandlersDoNotReturnNoContentWhenErasePostconditionWasAdvanced(t *testing.T) {
+	config := validMemoryRuntimeConfig(t, validMemoryAuthorizer())
+	recorder := config.Store.(*recordingMemoryStore)
+	scope := memorykit.Scope{TenantID: "tenant-a", SubjectType: memorykit.SubjectProject, SubjectID: "project-a"}
+	id := seedMemory(t, recorder.Store, scope, memorykit.StatusActive, "erase-post-race", "private")
+	v1, err := recorder.Store.Get(context.Background(), scope, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v3 := v1
+	v3.Content, v3.Status, v3.Version, v3.UpdatedAt = "restored concurrently", memorykit.StatusActive, 3, v1.UpdatedAt.Add(2*time.Minute)
+	config.Store = &scriptedSnapshotMemoryStore{Store: recorder, getResults: []memorykit.Memory{v1, v1, v3, v3}}
+	response := memoryRequest(t, (&Server{memory: config}).Handler(), http.MethodPost,
+		"/projects/project-a/memories/"+id+"/erase", `{"expected_version":1,"reason":"erase"}`)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s, want 409", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "restored concurrently") {
+		t.Fatalf("conflict leaked content: %s", response.Body.String())
 	}
 }
 
@@ -792,6 +950,16 @@ type mutatingRevisionMemoryStore struct {
 	mutate func([]memorykit.Revision)
 }
 
+type omitLatestRevisionMemoryStore struct{ memorykit.Store }
+
+func (s *omitLatestRevisionMemoryStore) Revisions(ctx context.Context, query memorykit.RevisionQuery) ([]memorykit.Revision, error) {
+	revisions, err := s.Store.Revisions(ctx, query)
+	if err == nil && len(revisions) > 0 {
+		return revisions[1:], nil
+	}
+	return revisions, err
+}
+
 func (s *mutatingRevisionMemoryStore) Revisions(ctx context.Context, query memorykit.RevisionQuery) ([]memorykit.Revision, error) {
 	revisions, err := s.Store.Revisions(ctx, query)
 	if err == nil && len(revisions) > 1 {
@@ -860,6 +1028,51 @@ type postMutationTamperMemoryStore struct {
 	tamperSnapshot bool
 }
 
+type postMutationAdvanceMemoryStore struct {
+	memorykit.Store
+	operation       string
+	advanced        memorykit.Memory
+	advancedSources []memorykit.Source
+}
+
+func (s *postMutationAdvanceMemoryStore) advance(memory memorykit.Memory) {
+	memory.Content = "concurrent correction"
+	memory.Version++
+	memory.UpdatedAt = memory.UpdatedAt.Add(time.Minute)
+	s.advanced = memory
+	s.advancedSources = []memorykit.Source{{Kind: "git", Ref: "commit:advanced", EvidenceHash: "hash:advanced"}}
+}
+
+func (s *postMutationAdvanceMemoryStore) Correct(ctx context.Context, request memorykit.CorrectRequest) (memorykit.Memory, error) {
+	memory, err := s.Store.Correct(ctx, request)
+	if err == nil && s.operation == "correct" {
+		s.advance(memory)
+	}
+	return memory, err
+}
+
+func (s *postMutationAdvanceMemoryStore) Forget(ctx context.Context, command memorykit.VersionedCommand) (memorykit.Memory, error) {
+	memory, err := s.Store.Forget(ctx, command)
+	if err == nil && s.operation == "forget" {
+		s.advance(memory)
+	}
+	return memory, err
+}
+
+func (s *postMutationAdvanceMemoryStore) Get(ctx context.Context, scope memorykit.Scope, id string) (memorykit.Memory, error) {
+	if s.advanced.ID != "" {
+		return s.advanced, nil
+	}
+	return s.Store.Get(ctx, scope, id)
+}
+
+func (s *postMutationAdvanceMemoryStore) Sources(ctx context.Context, scope memorykit.Scope, id string) ([]memorykit.Source, error) {
+	if s.advanced.ID != "" {
+		return append([]memorykit.Source(nil), s.advancedSources...), nil
+	}
+	return s.Store.Sources(ctx, scope, id)
+}
+
 func (s *postMutationTamperMemoryStore) Activate(ctx context.Context, command memorykit.VersionedCommand) (memorykit.Memory, error) {
 	memory, err := s.Store.Activate(ctx, command)
 	if err == nil && s.operation == "activate" {
@@ -895,7 +1108,6 @@ func (s *postMutationTamperMemoryStore) Get(ctx context.Context, scope memorykit
 	memory, err := s.Store.Get(ctx, scope, id)
 	if err == nil && s.mutated && s.tamperSnapshot {
 		memory.Content = "concurrent content"
-		memory.Version++
 		memory.UpdatedAt = memory.UpdatedAt.Add(time.Minute)
 	}
 	return memory, err

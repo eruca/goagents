@@ -271,63 +271,78 @@ func (s *Server) readCanonicalMemorySources(r *http.Request, scope memorykit.Sco
 // readStableStoredMemory provides the bounded Memory -> Sources -> Memory
 // confirmation used before mutations.
 func (s *Server) readStableStoredMemory(r *http.Request, scope memorykit.Scope, id string) (memorykit.Memory, []memorykit.Source, error) {
-	first, err := s.memory.Store.Get(r.Context(), scope, id)
-	if err != nil {
-		return memorykit.Memory{}, nil, err
+	for attempt := 0; attempt < 2; attempt++ {
+		first, err := s.memory.Store.Get(r.Context(), scope, id)
+		if err != nil {
+			return memorykit.Memory{}, nil, err
+		}
+		if first.ID != id || first.Scope != scope || validateMemorySnapshot(first, s.memory.Limits) != nil {
+			return memorykit.Memory{}, nil, errMemoryInvalidStoreResult
+		}
+		sources, err := s.readCanonicalMemorySources(r, scope, id)
+		if errors.Is(err, memorykit.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return memorykit.Memory{}, nil, err
+		}
+		confirmed, err := s.memory.Store.Get(r.Context(), scope, id)
+		if errors.Is(err, memorykit.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return memorykit.Memory{}, nil, err
+		}
+		if confirmed.ID != id || confirmed.Scope != scope || validateMemorySnapshot(confirmed, s.memory.Limits) != nil {
+			return memorykit.Memory{}, nil, errMemoryInvalidStoreResult
+		}
+		if sameMemorySnapshot(first, confirmed) {
+			return confirmed, sources, nil
+		}
+		if !validAdvancedMemorySnapshot(first, confirmed) {
+			return memorykit.Memory{}, nil, errMemoryInvalidStoreResult
+		}
 	}
-	if first.ID != id || first.Scope != scope || validateMemorySnapshot(first, s.memory.Limits) != nil {
-		return memorykit.Memory{}, nil, errMemoryInvalidStoreResult
-	}
-	sources, err := s.readCanonicalMemorySources(r, scope, id)
-	if errors.Is(err, memorykit.ErrNotFound) {
-		return memorykit.Memory{}, nil, errMemorySnapshotChanged
-	}
-	if err != nil {
-		return memorykit.Memory{}, nil, err
-	}
-	confirmed, err := s.memory.Store.Get(r.Context(), scope, id)
-	if errors.Is(err, memorykit.ErrNotFound) {
-		return memorykit.Memory{}, nil, errMemorySnapshotChanged
-	}
-	if err != nil {
-		return memorykit.Memory{}, nil, err
-	}
-	if confirmed.ID != id || confirmed.Scope != scope || validateMemorySnapshot(confirmed, s.memory.Limits) != nil {
-		return memorykit.Memory{}, nil, errMemoryInvalidStoreResult
-	}
-	if !sameMemorySnapshot(first, confirmed) {
-		return memorykit.Memory{}, nil, errMemorySnapshotChanged
-	}
-	return confirmed, sources, nil
+	return memorykit.Memory{}, nil, memorykit.ErrConflict
 }
 
 // confirmStoredMemory treats the mutation result as the first Memory read, then
 // verifies the sources and a fresh persisted Memory before responding.
-func (s *Server) confirmStoredMemory(r *http.Request, expected memorykit.Memory) (memorykit.Memory, []memorykit.Source, error) {
+func (s *Server) confirmStoredMemory(r *http.Request, expected memorykit.Memory) (memorykit.Memory, []memorykit.Source, bool, error) {
 	if validateMemorySnapshot(expected, s.memory.Limits) != nil {
-		return memorykit.Memory{}, nil, errMemoryInvalidStoreResult
+		return memorykit.Memory{}, nil, false, errMemoryInvalidStoreResult
 	}
 	sources, err := s.readCanonicalMemorySources(r, expected.Scope, expected.ID)
 	if errors.Is(err, memorykit.ErrNotFound) {
-		return memorykit.Memory{}, nil, errMemorySnapshotChanged
+		return memorykit.Memory{}, nil, false, errMemorySnapshotChanged
 	}
 	if err != nil {
-		return memorykit.Memory{}, nil, err
+		return memorykit.Memory{}, nil, false, err
 	}
-	confirmed, err := s.memory.Store.Get(r.Context(), expected.Scope, expected.ID)
+	observed, err := s.memory.Store.Get(r.Context(), expected.Scope, expected.ID)
 	if errors.Is(err, memorykit.ErrNotFound) {
-		return memorykit.Memory{}, nil, errMemorySnapshotChanged
+		return memorykit.Memory{}, nil, false, errMemorySnapshotChanged
 	}
 	if err != nil {
-		return memorykit.Memory{}, nil, err
+		return memorykit.Memory{}, nil, false, err
 	}
-	if confirmed.ID != expected.ID || confirmed.Scope != expected.Scope || validateMemorySnapshot(confirmed, s.memory.Limits) != nil {
-		return memorykit.Memory{}, nil, errMemoryInvalidStoreResult
+	if observed.ID != expected.ID || observed.Scope != expected.Scope || validateMemorySnapshot(observed, s.memory.Limits) != nil {
+		return memorykit.Memory{}, nil, false, errMemoryInvalidStoreResult
 	}
-	if !sameMemorySnapshot(expected, confirmed) {
-		return memorykit.Memory{}, nil, errMemorySnapshotChanged
+	if sameMemorySnapshot(expected, observed) {
+		return observed, sources, false, nil
 	}
-	return confirmed, sources, nil
+	if !validAdvancedMemorySnapshot(expected, observed) {
+		return memorykit.Memory{}, nil, false, errMemoryInvalidStoreResult
+	}
+	confirmed, currentSources, err := s.readStableStoredMemory(r, expected.Scope, expected.ID)
+	if err != nil {
+		return memorykit.Memory{}, nil, false, err
+	}
+	if confirmed.Version < observed.Version || !validAdvancedMemorySnapshot(expected, confirmed) {
+		return memorykit.Memory{}, nil, false, errMemoryInvalidStoreResult
+	}
+	return confirmed, currentSources, true, nil
 }
 
 func validMemoryListOrder(memories []memorykit.Memory) bool {
@@ -396,6 +411,10 @@ func (s *Server) handleMemoryRevisions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(revisions) > limit {
+		writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
+		return
+	}
+	if query.BeforeVersion == 0 && (len(revisions) == 0 || revisions[0].Version != current.Version) {
 		writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
 		return
 	}
@@ -487,12 +506,12 @@ func (s *Server) handleCreateMemory(w http.ResponseWriter, r *http.Request) {
 		writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
 		return
 	}
-	confirmed, sources, err := s.confirmStoredMemory(r, created)
+	confirmed, sources, advanced, err := s.confirmStoredMemory(r, created)
 	if err != nil {
 		writeMemoryStoreError(w, err)
 		return
 	}
-	if created.Version == 1 && !sameMemorySourceSet(sources, request.Sources) {
+	if !advanced && created.Version == 1 && !sameMemorySourceSet(sources, request.Sources) {
 		writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
 		return
 	}
@@ -552,12 +571,12 @@ func (s *Server) handleActivateMemory(w http.ResponseWriter, r *http.Request) {
 	if !s.validTransitionResult(w, memory, updated, memorykit.StatusActive, command) {
 		return
 	}
-	confirmed, persistedSources, err := s.confirmStoredMemory(r, updated)
+	confirmed, persistedSources, advanced, err := s.confirmStoredMemory(r, updated)
 	if err != nil {
 		writeMemoryStoreError(w, err)
 		return
 	}
-	if !sameMemorySourceSet(sources, persistedSources) {
+	if !advanced && !sameMemorySourceSet(sources, persistedSources) {
 		writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
 		return
 	}
@@ -632,12 +651,12 @@ func (s *Server) handleCorrectMemory(w http.ResponseWriter, r *http.Request) {
 	if !s.validCorrectionResult(w, current, updated, request) {
 		return
 	}
-	confirmed, persistedSources, err := s.confirmStoredMemory(r, updated)
+	confirmed, persistedSources, advanced, err := s.confirmStoredMemory(r, updated)
 	if err != nil {
 		writeMemoryStoreError(w, err)
 		return
 	}
-	if !sameMemorySourceSet(persistedSources, request.Sources) {
+	if !advanced && !sameMemorySourceSet(persistedSources, request.Sources) {
 		writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
 		return
 	}
@@ -673,6 +692,14 @@ func (s *Server) handleEraseMemory(w http.ResponseWriter, r *http.Request) {
 	erased, sources, err := s.readStableStoredMemory(r, scope, command.ID)
 	if err != nil {
 		writeMemoryStoreError(w, err)
+		return
+	}
+	if erased.Version > command.ExpectedVersion+1 {
+		if !validAdvancedMemorySnapshot(current, erased) {
+			writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
+			return
+		}
+		writeMemoryError(w, http.StatusConflict, "memory_conflict", "memory version conflict")
 		return
 	}
 	if !validEraseResult(current, erased, sources, command) {
@@ -726,12 +753,12 @@ func (s *Server) handleVersionedMemoryMutation(w http.ResponseWriter, r *http.Re
 	if !s.validTransitionResult(w, current, updated, memorykit.StatusInactive, command) {
 		return
 	}
-	confirmed, persistedSources, err := s.confirmStoredMemory(r, updated)
+	confirmed, persistedSources, advanced, err := s.confirmStoredMemory(r, updated)
 	if err != nil {
 		writeMemoryStoreError(w, err)
 		return
 	}
-	if !sameMemorySourceSet(sources, persistedSources) {
+	if !advanced && !sameMemorySourceSet(sources, persistedSources) {
 		writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
 		return
 	}
@@ -883,6 +910,9 @@ func skipMemoryJSONValue(decoder *json.Decoder) error {
 	if err != nil {
 		return err
 	}
+	if token == nil {
+		return errors.New("null memory JSON value")
+	}
 	delimiter, nested := token.(json.Delim)
 	if !nested {
 		return nil
@@ -998,6 +1028,13 @@ func sameMemorySnapshot(left, right memorykit.Memory) bool {
 		left.SourceAgentID == right.SourceAgentID && left.CreatedBy == right.CreatedBy && left.IdempotencyKey == right.IdempotencyKey &&
 		left.Version == right.Version && equivalentMemoryStoreTime(left.CreatedAt, right.CreatedAt) &&
 		equivalentMemoryStoreTime(left.UpdatedAt, right.UpdatedAt)
+}
+
+func validAdvancedMemorySnapshot(before, after memorykit.Memory) bool {
+	return after.ID == before.ID && after.Scope == before.Scope && after.Kind == before.Kind && after.Key == before.Key &&
+		after.SourceAgentID == before.SourceAgentID && after.CreatedBy == before.CreatedBy && after.IdempotencyKey == before.IdempotencyKey &&
+		equivalentMemoryStoreTime(after.CreatedAt, before.CreatedAt) && after.Version > before.Version &&
+		!after.UpdatedAt.Before(before.UpdatedAt)
 }
 
 func validEraseResult(before, after memorykit.Memory, sources []memorykit.Source, command memorykit.VersionedCommand) bool {
@@ -1187,7 +1224,11 @@ func validateMemoryRevision(revision memorykit.Revision, query memorykit.Revisio
 		return errors.New("invalid memory revision cursor result")
 	}
 	switch revision.Action {
-	case memorykit.RevisionCreate, memorykit.RevisionCorrect:
+	case memorykit.RevisionCreate:
+		if revision.Version != 1 {
+			return errors.New("invalid create revision")
+		}
+	case memorykit.RevisionCorrect:
 	case memorykit.RevisionActivate:
 		if revision.Snapshot.Status != memorykit.StatusActive {
 			return errors.New("invalid activation revision")
@@ -1233,7 +1274,7 @@ func writeMemoryStoreError(w http.ResponseWriter, err error) {
 	case errors.Is(err, errMemorySnapshotChanged), errors.Is(err, errMemoryInvalidStoreResult):
 		writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
 	case errors.Is(err, errMemoryClockRollback):
-		writeMemoryError(w, http.StatusInternalServerError, "memory_clock_error", "memory clock precedes stored data")
+		writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory clock precedes stored data")
 	case errors.Is(err, memorykit.ErrNotFound):
 		writeMemoryError(w, http.StatusNotFound, "memory_not_found", "memory not found")
 	case errors.Is(err, memorykit.ErrConflict):
