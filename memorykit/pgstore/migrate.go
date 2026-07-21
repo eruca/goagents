@@ -135,17 +135,16 @@ func migrate(ctx context.Context, db *sql.DB) (returnErr error) {
 			return wrapBackend("migration apply", err)
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return wrapBackend("migration commit", err)
-	}
-
 	var version int
-	if err := conn.QueryRowContext(ctx,
+	if err := tx.QueryRowContext(ctx,
 		"SELECT COALESCE(MAX(version), 0) FROM memorykit_schema_versions").Scan(&version); err != nil {
 		return wrapBackend("migration version", err)
 	}
 	if version != supportedSchemaVersion {
 		return wrapBackend("migration version", fmt.Errorf("unsupported schema version %d", version))
+	}
+	if err := tx.Commit(); err != nil {
+		return wrapBackend("migration commit", err)
 	}
 
 	// A value round trip verifies that the installed extension and database/sql codec interoperate.

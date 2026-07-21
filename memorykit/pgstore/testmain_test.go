@@ -5,10 +5,11 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/eruca/goagents/memorykit"
@@ -56,40 +57,66 @@ func openTestStore(t *testing.T) *Store {
 	return store
 }
 
-var registerMissingVectorDriver sync.Once
+var migrationDriverSequence atomic.Uint64
 
-func openMissingVectorDB(t *testing.T) *sql.DB {
+func openMigrationDriverDB(t *testing.T, options migrationDriverOptions) (*sql.DB, *migrationDriverState) {
 	t.Helper()
-	registerMissingVectorDriver.Do(func() {
-		sql.Register("memorykit_missing_vector", missingVectorDriver{})
-	})
-	db, err := sql.Open("memorykit_missing_vector", "")
+	state := &migrationDriverState{options: options}
+	driverName := fmt.Sprintf("memorykit_migration_%d", migrationDriverSequence.Add(1))
+	sql.Register(driverName, migrationDriver{state: state})
+	db, err := sql.Open(driverName, "")
 	if err != nil {
 		t.Fatalf("sql.Open() error = %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return db
+	return db, state
 }
 
-type missingVectorDriver struct{}
-
-func (missingVectorDriver) Open(string) (driver.Conn, error) {
-	return &missingVectorConn{}, nil
+type migrationDriverOptions struct {
+	missingVector bool
+	schemaVersion int64
 }
 
-type missingVectorConn struct{}
+type migrationDriverState struct {
+	options            migrationDriverOptions
+	inTransaction      bool
+	committed          bool
+	rolledBack         bool
+	unlocked           bool
+	versionQueriedInTx bool
+	vectorChecked      bool
+	migrationExecs     int
+}
 
-func (*missingVectorConn) Prepare(string) (driver.Stmt, error) {
+type migrationDriver struct{ state *migrationDriverState }
+
+func (d migrationDriver) Open(string) (driver.Conn, error) {
+	return &migrationConn{state: d.state}, nil
+}
+
+type migrationConn struct{ state *migrationDriverState }
+
+func (*migrationConn) Prepare(string) (driver.Stmt, error) {
 	return nil, errors.New("prepare is unsupported")
 }
-func (*missingVectorConn) Close() error              { return nil }
-func (*missingVectorConn) Begin() (driver.Tx, error) { return missingVectorTx{}, nil }
-func (*missingVectorConn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) {
-	return missingVectorTx{}, nil
+func (*migrationConn) Close() error { return nil }
+func (c *migrationConn) Begin() (driver.Tx, error) {
+	return c.BeginTx(context.Background(), driver.TxOptions{})
 }
-func (*missingVectorConn) Ping(context.Context) error { return nil }
-func (*missingVectorConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
-	if strings.Contains(strings.ToLower(query), "create extension") {
+func (c *migrationConn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) {
+	c.state.inTransaction = true
+	return &migrationTx{state: c.state}, nil
+}
+func (*migrationConn) Ping(context.Context) error { return nil }
+func (c *migrationConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
+	lowerQuery := strings.ToLower(query)
+	if strings.Contains(lowerQuery, "pg_advisory_unlock") {
+		c.state.unlocked = true
+	}
+	if c.state.inTransaction {
+		c.state.migrationExecs++
+	}
+	if c.state.options.missingVector && strings.Contains(lowerQuery, "create extension") {
 		return nil, &pgconn.PgError{
 			Code:    "0A000",
 			Message: "extension vector is not available",
@@ -98,14 +125,31 @@ func (*missingVectorConn) ExecContext(_ context.Context, query string, _ []drive
 	}
 	return driver.RowsAffected(0), nil
 }
-func (*missingVectorConn) QueryContext(_ context.Context, _ string, _ []driver.NamedValue) (driver.Rows, error) {
+func (c *migrationConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	lowerQuery := strings.ToLower(query)
+	if strings.Contains(lowerQuery, "max(version)") {
+		c.state.versionQueriedInTx = c.state.inTransaction
+		return &singleValueRows{values: [][]driver.Value{{c.state.options.schemaVersion}}}, nil
+	}
+	if strings.Contains(lowerQuery, "::vector") {
+		c.state.vectorChecked = true
+		return &singleValueRows{values: [][]driver.Value{{"[0]"}}}, nil
+	}
 	return &singleValueRows{values: [][]driver.Value{{true}}}, nil
 }
 
-type missingVectorTx struct{}
+type migrationTx struct{ state *migrationDriverState }
 
-func (missingVectorTx) Commit() error   { return nil }
-func (missingVectorTx) Rollback() error { return nil }
+func (tx *migrationTx) Commit() error {
+	tx.state.committed = true
+	tx.state.inTransaction = false
+	return nil
+}
+func (tx *migrationTx) Rollback() error {
+	tx.state.rolledBack = true
+	tx.state.inTransaction = false
+	return nil
+}
 
 type singleValueRows struct {
 	values [][]driver.Value
@@ -124,10 +168,10 @@ func (r *singleValueRows) Next(dest []driver.Value) error {
 }
 
 var (
-	_ driver.Driver         = missingVectorDriver{}
-	_ driver.Conn           = (*missingVectorConn)(nil)
-	_ driver.ConnBeginTx    = (*missingVectorConn)(nil)
-	_ driver.Pinger         = (*missingVectorConn)(nil)
-	_ driver.ExecerContext  = (*missingVectorConn)(nil)
-	_ driver.QueryerContext = (*missingVectorConn)(nil)
+	_ driver.Driver         = migrationDriver{}
+	_ driver.Conn           = (*migrationConn)(nil)
+	_ driver.ConnBeginTx    = (*migrationConn)(nil)
+	_ driver.Pinger         = (*migrationConn)(nil)
+	_ driver.ExecerContext  = (*migrationConn)(nil)
+	_ driver.QueryerContext = (*migrationConn)(nil)
 )

@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"unicode/utf8"
 
@@ -115,9 +116,11 @@ func isTransientBackendError(err error) bool {
 	if errors.Is(err, driver.ErrBadConn) {
 		return true
 	}
-	var temporary interface{ Temporary() bool }
-	if errors.As(err, &temporary) && temporary.Temporary() {
-		return true
+	var networkErr net.Error
+	if errors.As(err, &networkErr) {
+		if temporary, ok := networkErr.(interface{ Temporary() bool }); ok && temporary.Temporary() {
+			return true
+		}
 	}
 	var sqlState interface{ SQLState() string }
 	if !errors.As(err, &sqlState) {

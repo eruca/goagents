@@ -53,7 +53,10 @@ func TestOpenRejectsInvalidConfigBeforeConnecting(t *testing.T) {
 }
 
 func TestOpenDBMissingVectorReturnsSafeInitializationError(t *testing.T) {
-	db := openMissingVectorDB(t)
+	db, state := openMigrationDriverDB(t, migrationDriverOptions{
+		missingVector: true,
+		schemaVersion: supportedSchemaVersion,
+	})
 	_, err := OpenDB(context.Background(), db, validConfig())
 	if err == nil {
 		t.Fatal("OpenDB() error = nil, want vector initialization error")
@@ -66,6 +69,13 @@ func TestOpenDBMissingVectorReturnsSafeInitializationError(t *testing.T) {
 	}
 	if pingErr := db.PingContext(context.Background()); pingErr != nil {
 		t.Fatalf("OpenDB() closed caller-owned DB after failure: %v", pingErr)
+	}
+	if state.committed || !state.rolledBack || !state.unlocked {
+		t.Fatalf("DDL failure transaction state = commit:%v rollback:%v unlock:%v, want false/true/true",
+			state.committed, state.rolledBack, state.unlocked)
+	}
+	if state.migrationExecs != 1 {
+		t.Fatalf("DDL failure executed %d migration statements, want failure on first statement", state.migrationExecs)
 	}
 }
 
@@ -189,6 +199,38 @@ func TestMigrationContainsNoANNDDL(t *testing.T) {
 	}
 }
 
+func TestMigrationFutureVersionRollsBackBeforeCommitAndUnlocks(t *testing.T) {
+	db, state := openMigrationDriverDB(t, migrationDriverOptions{
+		schemaVersion: supportedSchemaVersion + 1,
+	})
+	_, err := OpenDB(context.Background(), db, validConfig())
+	if err == nil {
+		t.Fatal("OpenDB() error = nil, want unsupported schema version error")
+	}
+	if memorykit.IsRecoverable(err) {
+		t.Fatalf("schema incompatibility is recoverable: %v", err)
+	}
+	if !state.versionQueriedInTx {
+		t.Fatal("schema version was not verified inside the migration transaction")
+	}
+	if state.migrationExecs != len(migrationV1) {
+		t.Fatalf("schema version checked after %d migration statements, want %d",
+			state.migrationExecs, len(migrationV1))
+	}
+	if state.committed {
+		t.Fatal("future schema version committed V1 migration")
+	}
+	if !state.rolledBack {
+		t.Fatal("future schema version did not roll back V1 migration")
+	}
+	if !state.unlocked {
+		t.Fatal("future schema version left advisory lock held")
+	}
+	if state.vectorChecked {
+		t.Fatal("future schema version ran post-commit vector compatibility check")
+	}
+}
+
 func TestMigrationRejectsUnsupportedSchemaVersionAndReleasesLock(t *testing.T) {
 	store := openTestStore(t)
 	if _, err := store.db.ExecContext(context.Background(), `
@@ -247,6 +289,7 @@ func TestWrapBackendClassification(t *testing.T) {
 		{name: "check violation", err: &pgconn.PgError{Code: "23514", Message: "secret check detail"}},
 		{name: "scan error", err: errors.New("secret scan detail")},
 		{name: "permanent network", err: permanentNetError{}},
+		{name: "temporary non-network", err: temporaryNonNetworkError{}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -294,6 +337,11 @@ type permanentNetError struct{}
 func (permanentNetError) Error() string   { return "permanent network failure" }
 func (permanentNetError) Timeout() bool   { return false }
 func (permanentNetError) Temporary() bool { return false }
+
+type temporaryNonNetworkError struct{}
+
+func (temporaryNonNetworkError) Error() string   { return "temporary non-network failure" }
+func (temporaryNonNetworkError) Temporary() bool { return true }
 
 var (
 	_ net.Error = temporaryNetError{}
