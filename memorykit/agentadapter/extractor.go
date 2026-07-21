@@ -1,6 +1,7 @@
 package agentadapter
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -56,13 +57,16 @@ func (e *JSONCandidateExtractor) Extract(ctx context.Context, request memorykit.
 		},
 		Tools: []ports.ToolSpec{},
 	})
-	if contextErr := ctx.Err(); contextErr != nil {
+	if contextErr := canonicalContextError(ctx, err); contextErr != nil {
 		return nil, contextErr
 	}
 	if err != nil {
 		return nil, fmt.Errorf("%w: candidate extraction client failed", memorykit.ErrInvalidMemory)
 	}
 	if response == nil || len(response.ToolCalls) != 0 {
+		return nil, invalidExtractionOutput()
+	}
+	if err := validateCandidateJSONShape([]byte(response.Content)); err != nil {
 		return nil, invalidExtractionOutput()
 	}
 
@@ -93,6 +97,97 @@ func (e *JSONCandidateExtractor) Extract(ctx context.Context, request memorykit.
 		result[index] = draft
 	}
 	return append([]memorykit.CandidateDraft(nil), result...), nil
+}
+
+func validateCandidateJSONShape(raw []byte) error {
+	if err := rejectDuplicateJSONKeys(raw); err != nil {
+		return err
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil || len(top) != 1 {
+		return invalidExtractionOutput()
+	}
+	candidatesRaw, exists := top["candidates"]
+	if !exists || bytes.Equal(bytes.TrimSpace(candidatesRaw), []byte("null")) {
+		return invalidExtractionOutput()
+	}
+	var candidates []json.RawMessage
+	if err := json.Unmarshal(candidatesRaw, &candidates); err != nil {
+		return invalidExtractionOutput()
+	}
+	allowed := map[string]struct{}{
+		"kind": {}, "key": {}, "content": {}, "valid_from": {},
+		"valid_until": {}, "importance": {}, "confidence": {},
+	}
+	for _, candidate := range candidates {
+		if len(bytes.TrimSpace(candidate)) == 0 || bytes.TrimSpace(candidate)[0] != '{' {
+			return invalidExtractionOutput()
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(candidate, &fields); err != nil || fields == nil {
+			return invalidExtractionOutput()
+		}
+		for key := range fields {
+			if _, exists := allowed[key]; !exists {
+				return invalidExtractionOutput()
+			}
+		}
+	}
+	return nil
+}
+
+func rejectDuplicateJSONKeys(raw []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := scanJSONValue(decoder); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return invalidExtractionOutput()
+	}
+	return nil
+}
+
+func scanJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, isDelimiter := token.(json.Delim)
+	if !isDelimiter {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return invalidExtractionOutput()
+			}
+			if _, duplicate := seen[key]; duplicate {
+				return invalidExtractionOutput()
+			}
+			seen[key] = struct{}{}
+			if err := scanJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+	case '[':
+		for decoder.More() {
+			if err := scanJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+	default:
+		return invalidExtractionOutput()
+	}
+	_, err = decoder.Token()
+	return err
 }
 
 func validateExtractionRequest(request memorykit.ExtractionRequest, limits memorykit.Limits) error {

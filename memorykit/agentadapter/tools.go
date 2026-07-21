@@ -10,13 +10,13 @@ import (
 	"io"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/eruca/goagents/goagent/agentcore"
 	"github.com/eruca/goagents/goagent/policy"
 	"github.com/eruca/goagents/goagent/tools"
 	"github.com/eruca/goagents/memorykit"
+	"github.com/google/uuid"
 )
 
 const (
@@ -33,34 +33,24 @@ type ToolProviderConfig struct {
 	ResolveScope       ScopeResolver
 	AllowExplicitWrite ExplicitWriteAllowed
 	ValidateContent    memorykit.ContentValidator
-	NewID              func() string
+	Limits             memorykit.Limits
 	Now                func() time.Time
-}
-
-type writeCacheKey struct {
-	runID  agentcore.RunID
-	digest [sha256.Size]byte
-}
-
-type writeIdentity struct {
-	id  string
-	now time.Time
 }
 
 type ToolProvider struct {
 	cfg ToolProviderConfig
-
-	writeMu    sync.Mutex
-	writeCache map[writeCacheKey]writeIdentity
 }
 
 func NewToolProvider(config ToolProviderConfig) (*ToolProvider, error) {
 	if config.Store == nil || isTypedNil(config.Store) || config.DeepRecall == nil ||
 		config.ResolveScope == nil || config.AllowExplicitWrite == nil || config.ValidateContent == nil ||
-		isTypedNil(config.ValidateContent) || config.NewID == nil || config.Now == nil {
+		isTypedNil(config.ValidateContent) || config.Now == nil {
 		return nil, fmt.Errorf("%w: incomplete memory tool provider configuration", memorykit.ErrInvalidMemory)
 	}
-	return &ToolProvider{cfg: config, writeCache: make(map[writeCacheKey]writeIdentity)}, nil
+	if err := config.Limits.Validate(); err != nil {
+		return nil, err
+	}
+	return &ToolProvider{cfg: config}, nil
 }
 
 func (p *ToolProvider) Tools(ctx context.Context, request agentcore.RunRequest) ([]tools.Tool, error) {
@@ -106,6 +96,9 @@ type requestScopedTool struct {
 func (t requestScopedTool) Spec() tools.Spec { return t.spec }
 
 func (t requestScopedTool) Execute(ctx context.Context, input json.RawMessage, _ tools.Env) (*tools.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := t.spec.Schema.ValidateInput(input); err != nil {
 		return nil, fmt.Errorf("%w: invalid %s input", memorykit.ErrInvalidMemory, t.spec.Name)
 	}
@@ -150,7 +143,7 @@ func (p *ToolProvider) newSearchTool(scope memorykit.Scope) tools.Tool {
 				}
 				return nil, err
 			}
-			records, err := recallToolRecords(result.Items)
+			records, err := recallToolRecords(result.Items, scope, now, p.cfg.Limits)
 			if err != nil {
 				return nil, err
 			}
@@ -183,30 +176,55 @@ func (p *ToolProvider) newReadTool(scope memorykit.Scope) tools.Tool {
 			if now.IsZero() {
 				return nil, fmt.Errorf("%w: memory tool clock returned zero time", memorykit.ErrInvalidMemory)
 			}
-			memory, err := p.cfg.Store.Get(ctx, scope, parsed.MemoryID)
-			if err != nil {
-				if errors.Is(err, memorykit.ErrNotFound) {
+			memory, getErr := p.cfg.Store.Get(ctx, scope, parsed.MemoryID)
+			if contextErr := canonicalContextError(ctx, getErr); contextErr != nil {
+				return nil, contextErr
+			}
+			if getErr != nil {
+				if errors.Is(getErr, memorykit.ErrNotFound) {
 					return memoryNotFound(), nil
 				}
-				if memorykit.IsRecoverable(err) {
+				if memorykit.IsRecoverable(getErr) {
 					return memoryReadFailure(), nil
 				}
-				return nil, err
+				return nil, getErr
 			}
-			if memory.ID != parsed.MemoryID || memory.Scope != scope || !memory.Kind.IsValid() || !memory.Status.IsValid() ||
-				strings.TrimSpace(memory.Key) == "" || strings.TrimSpace(memory.Content) == "" || memory.Version <= 0 ||
-				(!memory.ValidUntil.IsZero() && !memory.ValidUntil.After(memory.ValidFrom)) {
+			if memory.ID != parsed.MemoryID || memory.Scope != scope || !memory.Status.IsValid() {
 				return nil, memorykit.ErrInvalidRecallResult
 			}
-			if memory.Status != memorykit.StatusActive || now.Before(memory.ValidFrom) ||
-				(!memory.ValidUntil.IsZero() && !now.Before(memory.ValidUntil)) {
+			if !effectiveMemory(memory, now) {
 				return memoryNotFound(), nil
 			}
-			sources, err := p.cfg.Store.Sources(ctx, scope, parsed.MemoryID)
-			if err != nil {
-				if memorykit.IsRecoverable(err) {
+			sources, sourcesErr := p.cfg.Store.Sources(ctx, scope, parsed.MemoryID)
+			if contextErr := canonicalContextError(ctx, sourcesErr); contextErr != nil {
+				return nil, contextErr
+			}
+			if sourcesErr != nil {
+				if errors.Is(sourcesErr, memorykit.ErrNotFound) {
+					return memoryNotFound(), nil
+				}
+				if memorykit.IsRecoverable(sourcesErr) {
 					return memoryReadFailure(), nil
 				}
+				return nil, sourcesErr
+			}
+			confirmed, confirmErr := p.cfg.Store.Get(ctx, scope, parsed.MemoryID)
+			if contextErr := canonicalContextError(ctx, confirmErr); contextErr != nil {
+				return nil, contextErr
+			}
+			if confirmErr != nil {
+				if errors.Is(confirmErr, memorykit.ErrNotFound) {
+					return memoryNotFound(), nil
+				}
+				if memorykit.IsRecoverable(confirmErr) {
+					return memoryReadFailure(), nil
+				}
+				return nil, confirmErr
+			}
+			if confirmed != memory || !effectiveMemory(confirmed, now) {
+				return memoryNotFound(), nil
+			}
+			if err := validateStoredMemory(confirmed, sources, p.cfg.Limits); err != nil {
 				return nil, err
 			}
 			refs, err := sourceRefs(sources)
@@ -214,8 +232,8 @@ func (p *ToolProvider) newReadTool(scope memorykit.Scope) tools.Tool {
 				return nil, err
 			}
 			record := readToolRecord{
-				Found: true, ID: memory.ID, Kind: memory.Kind, Key: memory.Key,
-				Content: memory.Content, Version: memory.Version, SourceRefs: refs,
+				Found: true, ID: confirmed.ID, Kind: confirmed.Kind, Key: confirmed.Key,
+				Content: confirmed.Content, Version: confirmed.Version, SourceRefs: refs,
 			}
 			encoded, err := json.Marshal(record)
 			if err != nil {
@@ -266,67 +284,134 @@ func (p *ToolProvider) newWriteTool(scope memorykit.Scope, actor string, runID a
 				return nil, fmt.Errorf("%w: canonicalize memory write", memorykit.ErrInvalidMemory)
 			}
 			digest := sha256.Sum256(canonical)
+			id := uuid.NewSHA1(uuid.UUID(runID), digest[:]).String()
+			idempotencyKey := "agent-write:" + runID.String() + ":" + hex.EncodeToString(digest[:])
 
-			if err := p.cfg.ValidateContent.ValidateMemoryContent(ctx, parsed.Content); err != nil {
+			validationErr := p.cfg.ValidateContent.ValidateMemoryContent(ctx, parsed.Content)
+			if contextErr := canonicalContextError(ctx, validationErr); contextErr != nil {
+				return nil, contextErr
+			}
+			if validationErr != nil {
 				return memoryWriteFailure(), nil
 			}
-			identity, err := p.writeIdentity(runID, digest)
-			if err != nil {
-				return nil, err
+
+			expectation := writeExpectation{
+				id: id, scope: scope, kind: parsed.Kind, key: parsed.Key,
+				actor: actor, sourceAgentID: runID.String(), idempotencyKey: idempotencyKey,
 			}
-			if validUntil != nil && !validUntil.After(identity.now) {
+			current, getErr := p.cfg.Store.Get(ctx, scope, id)
+			if contextErr := canonicalContextError(ctx, getErr); contextErr != nil {
+				return nil, contextErr
+			}
+			if getErr == nil {
+				if err := validateReplayMemory(current, expectation, p.cfg.Limits); err != nil {
+					return nil, err
+				}
+				return memoryWriteSuccess(current)
+			}
+			if !errors.Is(getErr, memorykit.ErrNotFound) {
+				return memoryWriteFailure(), nil
+			}
+
+			now := p.cfg.Now()
+			if now.IsZero() {
+				return nil, fmt.Errorf("%w: memory tool clock returned zero time", memorykit.ErrInvalidMemory)
+			}
+			if validUntil != nil && !validUntil.After(now) {
 				return nil, fmt.Errorf("%w: valid_until must follow valid_from", memorykit.ErrInvalidMemory)
 			}
 			until := time.Time{}
 			if validUntil != nil {
 				until = *validUntil
 			}
-			created, err := p.cfg.Store.Create(ctx, memorykit.CreateRequest{
-				ID: identity.id, Scope: scope, Kind: parsed.Kind, Key: parsed.Key,
+			request := memorykit.CreateRequest{
+				ID: id, Scope: scope, Kind: parsed.Kind, Key: parsed.Key,
 				Status: memorykit.StatusActive, Content: parsed.Content,
-				ValidFrom: identity.now, ValidUntil: until,
+				ValidFrom: now, ValidUntil: until,
 				Importance: 0, Confidence: 0, SourceAgentID: runID.String(),
 				Actor: actor, Reason: parsed.Reason,
-				IdempotencyKey: "agent-write:" + runID.String() + ":" + hex.EncodeToString(digest[:]),
+				IdempotencyKey: idempotencyKey,
 				Sources:        []memorykit.Source{{Kind: "agent_run", Ref: "agent-run:" + runID.String()}},
-				Now:            identity.now,
-			})
-			if err != nil {
+				Now:            now,
+			}
+			created, createErr := p.cfg.Store.Create(ctx, request)
+			if contextErr := canonicalContextError(ctx, createErr); contextErr != nil {
+				return nil, contextErr
+			}
+			if errors.Is(createErr, memorykit.ErrConflict) {
+				current, getErr = p.cfg.Store.Get(ctx, scope, id)
+				if contextErr := canonicalContextError(ctx, getErr); contextErr != nil {
+					return nil, contextErr
+				}
+				if getErr != nil {
+					return memoryWriteFailure(), nil
+				}
+				if err := validateReplayMemory(current, expectation, p.cfg.Limits); err != nil {
+					return nil, err
+				}
+				return memoryWriteSuccess(current)
+			}
+			if createErr != nil {
 				return memoryWriteFailure(), nil
 			}
-			if created.ID != identity.id || created.Version <= 0 {
-				return nil, memorykit.ErrInvalidRecallResult
+			if err := validateInitialWriteMemory(created, request, p.cfg.Limits); err != nil {
+				return nil, err
 			}
-			encoded, err := json.Marshal(struct {
-				ID      string `json:"id"`
-				Version int64  `json:"version"`
-			}{ID: created.ID, Version: created.Version})
-			if err != nil {
-				return nil, fmt.Errorf("%w: encode memory write result", memorykit.ErrInvalidRecallResult)
-			}
-			return &tools.Result{ForLLM: string(encoded), ForUser: "项目记忆已保存"}, nil
+			return memoryWriteSuccess(created)
 		},
 	}
 }
 
-func (p *ToolProvider) writeIdentity(runID agentcore.RunID, digest [sha256.Size]byte) (writeIdentity, error) {
-	key := writeCacheKey{runID: runID, digest: digest}
-	p.writeMu.Lock()
-	defer p.writeMu.Unlock()
-	if identity, exists := p.writeCache[key]; exists {
-		return identity, nil
+type writeExpectation struct {
+	id, key, actor, sourceAgentID, idempotencyKey string
+	scope                                         memorykit.Scope
+	kind                                          memorykit.Kind
+}
+
+func validateReplayMemory(memory memorykit.Memory, expected writeExpectation, limits memorykit.Limits) error {
+	if memory.ID != expected.id || memory.Scope != expected.scope || memory.Kind != expected.kind || memory.Key != expected.key ||
+		memory.CreatedBy != expected.actor || memory.SourceAgentID != expected.sourceAgentID ||
+		memory.IdempotencyKey != expected.idempotencyKey || strings.TrimSpace(memory.Content) == "" ||
+		(memory.Status != memorykit.StatusActive && memory.Status != memorykit.StatusInactive) {
+		return memorykit.ErrInvalidRecallResult
 	}
-	id := p.cfg.NewID()
-	if err := memorykit.ValidateMemoryID(id); err != nil {
-		return writeIdentity{}, err
+	if err := validateStoredMemory(memory, nil, limits); err != nil {
+		return err
 	}
-	now := p.cfg.Now()
-	if now.IsZero() {
-		return writeIdentity{}, fmt.Errorf("%w: memory tool clock returned zero time", memorykit.ErrInvalidMemory)
+	return nil
+}
+
+func validateInitialWriteMemory(memory memorykit.Memory, request memorykit.CreateRequest, limits memorykit.Limits) error {
+	if memory.ID != request.ID || memory.Scope != request.Scope || memory.Kind != request.Kind || memory.Key != request.Key ||
+		memory.Status != request.Status || memory.Content != request.Content || !memory.ValidFrom.Equal(request.ValidFrom) ||
+		!memory.ValidUntil.Equal(request.ValidUntil) || memory.Importance != request.Importance ||
+		memory.Confidence != request.Confidence || memory.SourceAgentID != request.SourceAgentID ||
+		memory.CreatedBy != request.Actor || memory.IdempotencyKey != request.IdempotencyKey || memory.Version != 1 ||
+		memory.CreatedAt.IsZero() || memory.UpdatedAt.IsZero() ||
+		timeDifference(memory.CreatedAt, request.Now) > time.Microsecond ||
+		timeDifference(memory.UpdatedAt, request.Now) > time.Microsecond {
+		return memorykit.ErrInvalidRecallResult
 	}
-	identity := writeIdentity{id: id, now: now}
-	p.writeCache[key] = identity
-	return identity, nil
+	return validateStoredMemory(memory, request.Sources, limits)
+}
+
+func timeDifference(left, right time.Time) time.Duration {
+	difference := left.Sub(right)
+	if difference < 0 {
+		return -difference
+	}
+	return difference
+}
+
+func memoryWriteSuccess(memory memorykit.Memory) (*tools.Result, error) {
+	encoded, err := json.Marshal(struct {
+		ID      string `json:"id"`
+		Version int64  `json:"version"`
+	}{ID: memory.ID, Version: memory.Version})
+	if err != nil {
+		return nil, fmt.Errorf("%w: encode memory write result", memorykit.ErrInvalidRecallResult)
+	}
+	return &tools.Result{ForLLM: string(encoded), ForUser: "项目记忆已保存"}, nil
 }
 
 type toolRecord struct {
@@ -347,9 +432,18 @@ type readToolRecord struct {
 	SourceRefs []string       `json:"source_refs"`
 }
 
-func recallToolRecords(items []memorykit.RecallItem) ([]toolRecord, error) {
+func recallToolRecords(items []memorykit.RecallItem, scope memorykit.Scope, now time.Time, limits memorykit.Limits) ([]toolRecord, error) {
+	if len(items) > limits.MaxListItems {
+		return nil, memorykit.ErrInvalidRecallResult
+	}
 	records := make([]toolRecord, len(items))
 	for index, item := range items {
+		if item.Memory.Scope != scope || !effectiveMemory(item.Memory, now) {
+			return nil, memorykit.ErrInvalidRecallResult
+		}
+		if err := validateStoredMemory(item.Memory, item.Sources, limits); err != nil {
+			return nil, err
+		}
 		refs, err := sourceRefs(item.Sources)
 		if err != nil {
 			return nil, err
@@ -360,6 +454,41 @@ func recallToolRecords(items []memorykit.RecallItem) ([]toolRecord, error) {
 		}
 	}
 	return records, nil
+}
+
+func effectiveMemory(memory memorykit.Memory, now time.Time) bool {
+	return memory.Status == memorykit.StatusActive && !now.Before(memory.ValidFrom) &&
+		(memory.ValidUntil.IsZero() || now.Before(memory.ValidUntil))
+}
+
+func validateStoredMemory(memory memorykit.Memory, sources []memorykit.Source, limits memorykit.Limits) error {
+	if memory.Version <= 0 {
+		return memorykit.ErrInvalidRecallResult
+	}
+	if err := memorykit.ValidateCreateRequest(memorykit.CreateRequest{
+		ID: memory.ID, Scope: memory.Scope, Kind: memory.Kind, Key: memory.Key,
+		Status: memory.Status, Content: memory.Content,
+		ValidFrom: memory.ValidFrom, ValidUntil: memory.ValidUntil,
+		Importance: memory.Importance, Confidence: memory.Confidence,
+		SourceAgentID: memory.SourceAgentID, Actor: memory.CreatedBy,
+		IdempotencyKey: memory.IdempotencyKey, Sources: append([]memorykit.Source(nil), sources...),
+	}, limits); err != nil {
+		return memorykit.ErrInvalidRecallResult
+	}
+	return nil
+}
+
+func canonicalContextError(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	return nil
 }
 
 func sourceRefs(sources []memorykit.Source) ([]string, error) {

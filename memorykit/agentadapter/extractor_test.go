@@ -79,6 +79,10 @@ func TestJSONCandidateExtractorRejectsMalformedOrUnauthorizedOutput(t *testing.T
 		{name: "nan", body: `{"candidates":[{"kind":"lesson","key":"k","content":"valid","confidence":NaN}]}`},
 		{name: "missing candidates", body: `{}`},
 		{name: "null candidates", body: `{"candidates":null}`},
+		{name: "duplicate top key", body: `{"candidates":[],"candidates":[]}`},
+		{name: "duplicate candidate key", body: `{"candidates":[{"kind":"fact","kind":"lesson","key":"k","content":"valid"}]}`},
+		{name: "uppercase candidates", body: `{"Candidates":[]}`},
+		{name: "uppercase kind", body: `{"candidates":[{"Kind":"lesson","key":"k","content":"valid"}]}`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -94,6 +98,19 @@ func TestJSONCandidateExtractorRejectsMalformedOrUnauthorizedOutput(t *testing.T
 				t.Fatalf("Extract() error = %v", err)
 			}
 		})
+	}
+}
+
+func TestJSONCandidateExtractorPreservesClientCancellation(t *testing.T) {
+	for _, cancellation := range []error{context.Canceled, context.DeadlineExceeded} {
+		extractor, err := NewJSONCandidateExtractor(&extractorLLM{err: cancellation}, adapterTestLimits(), 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, extractErr := extractor.Extract(context.Background(), validExtractionRequest(adapterNow, "source-secret"))
+		if got != nil || !errors.Is(extractErr, cancellation) || strings.Contains(extractErr.Error(), "source-secret") {
+			t.Fatalf("cancellation=%v result=%#v err=%v", cancellation, got, extractErr)
+		}
 	}
 }
 

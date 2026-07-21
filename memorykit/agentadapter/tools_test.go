@@ -2,6 +2,7 @@ package agentadapter
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"github.com/eruca/goagents/goagent/tools"
 	"github.com/eruca/goagents/memorykit"
 	"github.com/eruca/goagents/memorykit/memorystore"
+	"github.com/google/uuid"
 )
 
 const (
@@ -83,7 +85,7 @@ func TestToolProviderRejectsNilAndMalformedTrustedDependencies(t *testing.T) {
 	valid := ToolProviderConfig{
 		Store: validStore, DeepRecall: validRecall, ResolveScope: resolveToolScope,
 		AllowExplicitWrite: allowToolWrite, ValidateContent: validValidator,
-		NewID: func() string { return toolMemoryID1 }, Now: func() time.Time { return adapterNow },
+		Limits: adapterTestLimits(), Now: func() time.Time { return adapterNow },
 	}
 	var typedStore *toolLifecycleStore
 	var typedValidator *acceptContentValidator
@@ -98,7 +100,7 @@ func TestToolProviderRejectsNilAndMalformedTrustedDependencies(t *testing.T) {
 		{name: "predicate", mutate: func(c *ToolProviderConfig) { c.AllowExplicitWrite = nil }},
 		{name: "validator", mutate: func(c *ToolProviderConfig) { c.ValidateContent = nil }},
 		{name: "typed nil validator", mutate: func(c *ToolProviderConfig) { c.ValidateContent = typedValidator }},
-		{name: "id", mutate: func(c *ToolProviderConfig) { c.NewID = nil }},
+		{name: "limits", mutate: func(c *ToolProviderConfig) { c.Limits = memorykit.Limits{} }},
 		{name: "clock", mutate: func(c *ToolProviderConfig) { c.Now = nil }},
 	}
 	for _, test := range tests {
@@ -221,6 +223,112 @@ func TestReadMemoryReturnsOnlySortedUniqueSourceRefsAndClassifiesErrors(t *testi
 	}
 }
 
+func TestReadMemoryRejectsMixedSnapshotsAndDisappearingRecordsAsNotFound(t *testing.T) {
+	first := validToolMemory(toolMemoryID1, "original")
+	mutations := []struct {
+		name   string
+		second memorykit.Memory
+	}{
+		{name: "correct", second: func() memorykit.Memory { value := first; value.Content = "corrected"; value.Version++; return value }()},
+		{name: "forget", second: func() memorykit.Memory {
+			value := first
+			value.Status = memorykit.StatusInactive
+			value.Version++
+			return value
+		}()},
+		{name: "erase", second: func() memorykit.Memory {
+			value := first
+			value.Status = memorykit.StatusInactive
+			value.Content = ""
+			value.Version++
+			return value
+		}()},
+	}
+	for _, test := range mutations {
+		t.Run(test.name, func(t *testing.T) {
+			store := &toolLifecycleStore{
+				getResults: []toolGetResult{{memory: first}, {memory: test.second}},
+				sources:    []memorykit.Source{{Kind: "run", Ref: "source:1"}},
+			}
+			result, err := executeReadTool(t, store, toolMemoryID1)
+			if err != nil || result == nil || result.IsError || result.ForLLM != `{"found":false}` {
+				t.Fatalf("result=%#v err=%v", result, err)
+			}
+		})
+	}
+
+	store := &toolLifecycleStore{getMemory: first, sourcesErr: memorykit.ErrNotFound}
+	result, err := executeReadTool(t, store, toolMemoryID1)
+	if err != nil || result == nil || result.ForLLM != `{"found":false}` {
+		t.Fatalf("Sources ErrNotFound result=%#v err=%v", result, err)
+	}
+}
+
+func TestReadMemoryClassifiesSecondGetFailures(t *testing.T) {
+	first := validToolMemory(toolMemoryID1, "content")
+	tests := []struct {
+		name      string
+		err       error
+		wantLLM   string
+		wantIsErr bool
+		wantGoErr bool
+	}{
+		{name: "not found", err: memorykit.ErrNotFound, wantLLM: `{"found":false}`},
+		{name: "recoverable", err: &memorykit.BackendError{Op: "get2", Recoverable: true, Err: errors.New("private")}, wantLLM: "项目记忆暂时无法读取", wantIsErr: true},
+		{name: "integrity", err: memorykit.ErrInvalidMemory, wantGoErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := &toolLifecycleStore{
+				getResults: []toolGetResult{{memory: first}, {err: test.err}},
+				sources:    []memorykit.Source{{Kind: "run", Ref: "source:1"}},
+			}
+			result, err := executeReadTool(t, store, toolMemoryID1)
+			if test.wantGoErr {
+				if err == nil || result != nil {
+					t.Fatalf("result=%#v err=%v", result, err)
+				}
+				return
+			}
+			if err != nil || result == nil || result.ForLLM != test.wantLLM || result.IsError != test.wantIsErr {
+				t.Fatalf("result=%#v err=%v", result, err)
+			}
+		})
+	}
+}
+
+func TestReadMemoryValidatesStoredMemoryAndSourcesAgainstLimits(t *testing.T) {
+	limits := adapterTestLimits()
+	tests := []struct {
+		name    string
+		memory  memorykit.Memory
+		sources []memorykit.Source
+	}{
+		{name: "content", memory: func() memorykit.Memory {
+			value := validToolMemory(toolMemoryID1, "content")
+			value.Content = strings.Repeat("x", limits.MaxContentRunes+1)
+			return value
+		}(), sources: []memorykit.Source{{Kind: "run", Ref: "source:1"}}},
+		{name: "source ref", memory: validToolMemory(toolMemoryID1, "content"), sources: []memorykit.Source{{Kind: "run", Ref: strings.Repeat("x", limits.MaxMetadataRunes+1)}}},
+		{name: "source count", memory: validToolMemory(toolMemoryID1, "content"), sources: func() []memorykit.Source {
+			values := make([]memorykit.Source, limits.MaxSourcesPerMemory+1)
+			for index := range values {
+				values[index] = memorykit.Source{Kind: "run", Ref: fmt.Sprintf("source:%d", index)}
+			}
+			return values
+		}()},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := &toolLifecycleStore{getMemory: test.memory, sources: test.sources}
+			result, err := executeReadTool(t, store, toolMemoryID1)
+			if err == nil || result != nil {
+				t.Fatalf("result=%#v err=%v", result, err)
+			}
+		})
+	}
+}
+
 func TestSearchMemoryUsesClosedScopeStrictKindsAndClassifiesErrors(t *testing.T) {
 	recallStore := &toolRecallStore{set: memorykit.CandidateSet{FullText: []memorykit.Candidate{{
 		Memory: memorykit.Memory{
@@ -278,24 +386,56 @@ func TestSearchMemoryUsesClosedScopeStrictKindsAndClassifiesErrors(t *testing.T)
 	}
 }
 
+func TestSearchMemoryValidatesRecallItemsAgainstToolLimits(t *testing.T) {
+	limits := adapterTestLimits()
+	manySources := make([]memorykit.Source, limits.MaxSourcesPerMemory+1)
+	for index := range manySources {
+		manySources[index] = memorykit.Source{Kind: "run", Ref: fmt.Sprintf("source:%d", index)}
+	}
+	tests := []struct {
+		name   string
+		limits memorykit.Limits
+		set    memorykit.CandidateSet
+	}{
+		{name: "content", limits: limits, set: memorykit.CandidateSet{FullText: []memorykit.Candidate{searchToolCandidate(toolMemoryID1, strings.Repeat("x", limits.MaxContentRunes+1), []memorykit.Source{{Kind: "run", Ref: "source:1"}}, 1)}}},
+		{name: "source ref", limits: limits, set: memorykit.CandidateSet{FullText: []memorykit.Candidate{searchToolCandidate(toolMemoryID1, "content", []memorykit.Source{{Kind: "run", Ref: strings.Repeat("x", limits.MaxMetadataRunes+1)}}, 1)}}},
+		{name: "source count", limits: limits, set: memorykit.CandidateSet{FullText: []memorykit.Candidate{searchToolCandidate(toolMemoryID1, "content", manySources, 1)}}},
+		{name: "item count", limits: func() memorykit.Limits { value := limits; value.MaxListItems = 1; return value }(), set: memorykit.CandidateSet{FullText: []memorykit.Candidate{
+			searchToolCandidate(toolMemoryID1, "first", []memorykit.Source{{Kind: "run", Ref: "source:1"}}, 1),
+			searchToolCandidate(toolMemoryID2, "second", []memorykit.Source{{Kind: "run", Ref: "source:2"}}, 2),
+		}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			provider, err := NewToolProvider(ToolProviderConfig{
+				Store: newToolMemoryStore(t), DeepRecall: newToolRecaller(t, &toolRecallStore{set: test.set}),
+				ResolveScope: resolveToolScope, AllowExplicitWrite: allowToolWrite,
+				ValidateContent: &acceptContentValidator{}, Limits: test.limits, Now: func() time.Time { return adapterNow },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			registered, err := provider.Tools(context.Background(), agentcore.RunRequest{Metadata: trustedMetadata("tenant-1", "project-1", false)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, executeErr := findTool(t, registered, "search_memory").Execute(context.Background(), json.RawMessage(`{"query":"test"}`), ports.ToolEnv{})
+			if executeErr == nil || result != nil {
+				t.Fatalf("result=%#v err=%v", result, executeErr)
+			}
+		})
+	}
+}
+
 func TestRememberMemoryCreatesActiveScopedRecordAndRetriesIdempotently(t *testing.T) {
 	base := newToolMemoryStore(t)
 	store := &toolLifecycleStore{delegate: base}
 	validator := &acceptContentValidator{}
-	ids := []string{toolMemoryID1, toolMemoryID2}
-	var idMu sync.Mutex
-	newIDCalls := 0
 	nowCalls := 0
 	provider, err := NewToolProvider(ToolProviderConfig{
 		Store: store, DeepRecall: newToolRecaller(t, &toolRecallStore{}), ResolveScope: resolveToolScope,
 		AllowExplicitWrite: allowToolWrite, ValidateContent: validator,
-		NewID: func() string {
-			idMu.Lock()
-			defer idMu.Unlock()
-			id := ids[newIDCalls]
-			newIDCalls++
-			return id
-		},
+		Limits: adapterTestLimits(),
 		Now: func() time.Time {
 			nowCalls++
 			return adapterNow.Add(time.Duration(nowCalls-1) * time.Minute)
@@ -313,36 +453,331 @@ func TestRememberMemoryCreatesActiveScopedRecordAndRetriesIdempotently(t *testin
 	}
 	write := findTool(t, registered, "remember_project_memory")
 	input := json.RawMessage(`{"kind":"lesson","key":"testing.pgvector","content":"run real gate","valid_until":"2026-07-22T12:00:00Z","reason":"user explicitly requested"}`)
+	expectedID, expectedDigest := expectedToolWriteIdentity(t, runID, input)
 	maliciousEnv := ports.ToolEnv{UserID: "attacker", Metadata: trustedMetadata("foreign", "foreign", false)}
 	first, err := write.Execute(context.Background(), input, maliciousEnv)
-	if err != nil || first.IsError || first.ForUser != "项目记忆已保存" || !strings.Contains(first.ForLLM, toolMemoryID1) || strings.Contains(first.ForLLM, "run real gate") {
+	if err != nil || first.IsError || first.ForUser != "项目记忆已保存" || !strings.Contains(first.ForLLM, expectedID) || strings.Contains(first.ForLLM, "run real gate") {
 		t.Fatalf("first=%#v err=%v", first, err)
 	}
 	second, err := write.Execute(context.Background(), input, maliciousEnv)
 	if err != nil || second.IsError || second.ForLLM != first.ForLLM {
 		t.Fatalf("second=%#v err=%v", second, err)
 	}
-	if newIDCalls != 1 {
-		t.Fatalf("NewID calls = %d, want 1", newIDCalls)
-	}
-	if len(store.createRequests) != 2 || !reflect.DeepEqual(store.createRequests[0], store.createRequests[1]) {
-		t.Fatalf("retry requests differ: %#v", store.createRequests)
+	if len(store.createRequests) != 1 {
+		t.Fatalf("Create calls = %d, want 1", len(store.createRequests))
 	}
 	request := store.createRequests[0]
-	if request.ID != toolMemoryID1 || request.Scope != toolScope("tenant-1", "project-1") || request.Status != memorykit.StatusActive ||
+	if request.ID != expectedID || request.Scope != toolScope("tenant-1", "project-1") || request.Status != memorykit.StatusActive ||
 		request.Actor != "user-1" || request.SourceAgentID != runID.String() || request.ValidFrom != adapterNow ||
 		request.Importance != 0 || request.Confidence != 0 || request.Now != adapterNow ||
 		len(request.Sources) != 1 || request.Sources[0].Kind != "agent_run" || request.Sources[0].Ref != "agent-run:"+runID.String() ||
-		!strings.HasPrefix(request.IdempotencyKey, "agent-write:"+runID.String()+":") || len(strings.TrimPrefix(request.IdempotencyKey, "agent-write:"+runID.String()+":")) != 64 {
+		request.IdempotencyKey != "agent-write:"+runID.String()+":"+expectedDigest {
 		t.Fatalf("create request = %#v", request)
 	}
 	if validator.calls != 2 {
 		t.Fatalf("validator calls = %d, want 2", validator.calls)
 	}
 
-	different, err := write.Execute(context.Background(), json.RawMessage(`{"kind":"lesson","key":"testing.other","content":"different","reason":"explicit"}`), maliciousEnv)
-	if err != nil || different.IsError || !strings.Contains(different.ForLLM, toolMemoryID2) || newIDCalls != 2 {
-		t.Fatalf("different=%#v err=%v NewID=%d", different, err, newIDCalls)
+	differentInput := json.RawMessage(`{"kind":"lesson","key":"testing.other","content":"different","reason":"explicit"}`)
+	differentID, _ := expectedToolWriteIdentity(t, runID, differentInput)
+	different, err := write.Execute(context.Background(), differentInput, maliciousEnv)
+	if err != nil || different.IsError || !strings.Contains(different.ForLLM, differentID) || differentID == expectedID || nowCalls != 2 {
+		t.Fatalf("different=%#v err=%v differentID=%s nowCalls=%d", different, err, differentID, nowCalls)
+	}
+}
+
+func TestRememberMemoryRebuildsStableIdentityAcrossToolsAndProviders(t *testing.T) {
+	store := &toolLifecycleStore{delegate: newToolMemoryStore(t)}
+	runID := agentcore.NewRunID()
+	request := agentcore.RunRequest{
+		RunID: runID, UserID: "user-1", Metadata: trustedMetadata("tenant-1", "project-1", true),
+	}
+	input := json.RawMessage(`{"kind":"decision","key":"architecture.memory","content":"use project memory","reason":"explicit"}`)
+	expectedID, _ := expectedToolWriteIdentity(t, runID, input)
+
+	firstProvider := newToolProviderForTest(t, store, newToolRecaller(t, &toolRecallStore{}), &acceptContentValidator{})
+	firstTools, err := firstProvider.Tools(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondTools, err := firstProvider.Tools(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clockCalled := false
+	secondProvider, err := NewToolProvider(ToolProviderConfig{
+		Store: store, DeepRecall: newToolRecaller(t, &toolRecallStore{}), ResolveScope: resolveToolScope,
+		AllowExplicitWrite: allowToolWrite, ValidateContent: &acceptContentValidator{}, Limits: adapterTestLimits(),
+		Now: func() time.Time { clockCalled = true; return adapterNow.Add(time.Hour) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	thirdTools, err := secondProvider.Tools(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var observations []string
+	for _, registered := range [][]tools.Tool{firstTools, secondTools, thirdTools} {
+		result, executeErr := findTool(t, registered, "remember_project_memory").Execute(context.Background(), input, ports.ToolEnv{})
+		if executeErr != nil || result == nil || result.IsError {
+			t.Fatalf("result=%#v err=%v", result, executeErr)
+		}
+		observations = append(observations, result.ForLLM)
+	}
+	if observations[0] != observations[1] || observations[1] != observations[2] || !strings.Contains(observations[0], expectedID) {
+		t.Fatalf("observations = %v", observations)
+	}
+	if len(store.createRequests) != 1 || clockCalled {
+		t.Fatalf("Create calls=%d second clock called=%v", len(store.createRequests), clockCalled)
+	}
+}
+
+func TestRememberMemoryConcurrentProvidersConvergeOnDeterministicIdentity(t *testing.T) {
+	const workers = 12
+	store := &toolLifecycleStore{delegate: newToolMemoryStore(t)}
+	runID := agentcore.NewRunID()
+	request := agentcore.RunRequest{RunID: runID, UserID: "user", Metadata: trustedMetadata("tenant-1", "project-1", true)}
+	input := json.RawMessage(`{"kind":"constraint","key":"release.gate","content":"run verification","reason":"explicit"}`)
+	expectedID, _ := expectedToolWriteIdentity(t, runID, input)
+	start := make(chan struct{})
+	results := make(chan string, workers)
+	errorsCh := make(chan error, workers)
+	var wait sync.WaitGroup
+	for index := 0; index < workers; index++ {
+		provider, err := NewToolProvider(ToolProviderConfig{
+			Store: store, DeepRecall: newToolRecaller(t, &toolRecallStore{}), ResolveScope: resolveToolScope,
+			AllowExplicitWrite: allowToolWrite, ValidateContent: &acceptContentValidator{}, Limits: adapterTestLimits(),
+			Now: func() time.Time { return adapterNow },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		registered, err := provider.Tools(context.Background(), request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		write := findTool(t, registered, "remember_project_memory")
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			result, executeErr := write.Execute(context.Background(), input, ports.ToolEnv{})
+			if executeErr != nil {
+				errorsCh <- executeErr
+				return
+			}
+			if result == nil || result.IsError {
+				errorsCh <- fmt.Errorf("unexpected result: %#v", result)
+				return
+			}
+			results <- result.ForLLM
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(results)
+	close(errorsCh)
+	for err := range errorsCh {
+		t.Error(err)
+	}
+	for observation := range results {
+		if !strings.Contains(observation, expectedID) {
+			t.Errorf("observation = %q, want ID %s", observation, expectedID)
+		}
+	}
+	for index := 1; index < len(store.createRequests); index++ {
+		if !reflect.DeepEqual(store.createRequests[0], store.createRequests[index]) {
+			t.Fatalf("concurrent requests differ: %#v", store.createRequests)
+		}
+	}
+}
+
+func TestRememberMemoryRecoversCreateConflictByReadingDeterministicRecord(t *testing.T) {
+	runID := agentcore.NewRunID()
+	input := json.RawMessage(`{"kind":"fact","key":"conflict","content":"content","reason":"explicit"}`)
+	id, digest := expectedToolWriteIdentity(t, runID, input)
+	current := memorykit.Memory{
+		ID: id, Scope: toolScope("tenant-1", "project-1"), Kind: memorykit.KindFact, Key: "conflict",
+		Content: "content", Status: memorykit.StatusActive, ValidFrom: adapterNow,
+		SourceAgentID: runID.String(), CreatedBy: "user", IdempotencyKey: "agent-write:" + runID.String() + ":" + digest,
+		Version: 1, CreatedAt: adapterNow, UpdatedAt: adapterNow,
+	}
+	store := &toolLifecycleStore{
+		getResults: []toolGetResult{{err: memorykit.ErrNotFound}, {memory: current}},
+		createErr:  memorykit.ErrConflict,
+	}
+	provider := newToolProviderForTest(t, store, newToolRecaller(t, &toolRecallStore{}), &acceptContentValidator{})
+	registered, err := provider.Tools(context.Background(), agentcore.RunRequest{RunID: runID, UserID: "user", Metadata: trustedMetadata("tenant-1", "project-1", true)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, executeErr := findTool(t, registered, "remember_project_memory").Execute(context.Background(), input, ports.ToolEnv{})
+	if executeErr != nil || result == nil || result.IsError || !strings.Contains(result.ForLLM, id) || len(store.createRequests) != 1 {
+		t.Fatalf("result=%#v err=%v Create calls=%d", result, executeErr, len(store.createRequests))
+	}
+}
+
+func TestRememberMemoryDoesNotReclassifyCommittedCreateWhenSourcesUnavailable(t *testing.T) {
+	store := &toolLifecycleStore{getErr: memorykit.ErrNotFound, sourcesErr: errors.New("sources unavailable")}
+	provider := newToolProviderForTest(t, store, newToolRecaller(t, &toolRecallStore{}), &acceptContentValidator{})
+	registered, err := provider.Tools(context.Background(), agentcore.RunRequest{RunID: agentcore.NewRunID(), UserID: "user", Metadata: trustedMetadata("tenant-1", "project-1", true)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, executeErr := findTool(t, registered, "remember_project_memory").Execute(context.Background(), json.RawMessage(`{"kind":"fact","key":"committed","content":"content","reason":"explicit"}`), ports.ToolEnv{})
+	if executeErr != nil || result == nil || result.IsError || result.ForUser != "项目记忆已保存" {
+		t.Fatalf("result=%#v err=%v", result, executeErr)
+	}
+}
+
+func TestRememberMemoryReplayRejectsCandidateStatus(t *testing.T) {
+	runID := agentcore.NewRunID()
+	input := json.RawMessage(`{"kind":"fact","key":"candidate","content":"content","reason":"explicit"}`)
+	id, digest := expectedToolWriteIdentity(t, runID, input)
+	current := memorykit.Memory{
+		ID: id, Scope: toolScope("tenant-1", "project-1"), Kind: memorykit.KindFact, Key: "candidate",
+		Content: "content", Status: memorykit.StatusCandidate, ValidFrom: adapterNow,
+		SourceAgentID: runID.String(), CreatedBy: "user", IdempotencyKey: "agent-write:" + runID.String() + ":" + digest,
+		Version: 1, CreatedAt: adapterNow, UpdatedAt: adapterNow,
+	}
+	store := &toolLifecycleStore{getMemory: current}
+	provider := newToolProviderForTest(t, store, newToolRecaller(t, &toolRecallStore{}), &acceptContentValidator{})
+	registered, err := provider.Tools(context.Background(), agentcore.RunRequest{RunID: runID, UserID: "user", Metadata: trustedMetadata("tenant-1", "project-1", true)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, executeErr := findTool(t, registered, "remember_project_memory").Execute(context.Background(), input, ports.ToolEnv{})
+	if executeErr == nil || result != nil || len(store.createRequests) != 0 {
+		t.Fatalf("result=%#v err=%v Create calls=%d", result, executeErr, len(store.createRequests))
+	}
+}
+
+func TestRememberMemoryReplayReturnsCurrentCorrectedForgottenOrSupersededRecord(t *testing.T) {
+	for _, action := range []string{"correct", "forget", "supersede"} {
+		t.Run(action, func(t *testing.T) {
+			base := newToolMemoryStore(t)
+			store := &toolLifecycleStore{delegate: base}
+			provider := newToolProviderForTest(t, store, newToolRecaller(t, &toolRecallStore{}), &acceptContentValidator{})
+			runID := agentcore.NewRunID()
+			registered, err := provider.Tools(context.Background(), agentcore.RunRequest{
+				RunID: runID, UserID: "user", Metadata: trustedMetadata("tenant-1", "project-1", true),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := json.RawMessage(`{"kind":"lesson","key":"retry.current","content":"original","reason":"explicit"}`)
+			write := findTool(t, registered, "remember_project_memory")
+			if result, executeErr := write.Execute(context.Background(), input, ports.ToolEnv{}); executeErr != nil || result == nil || result.IsError {
+				t.Fatalf("initial result=%#v err=%v", result, executeErr)
+			}
+			id, _ := expectedToolWriteIdentity(t, runID, input)
+			current, err := base.Get(context.Background(), toolScope("tenant-1", "project-1"), id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch action {
+			case "correct":
+				current, err = base.Correct(context.Background(), memorykit.CorrectRequest{
+					Command: memorykit.VersionedCommand{Scope: current.Scope, ID: id, ExpectedVersion: current.Version, Actor: "reviewer", Reason: "correct", Now: adapterNow.Add(time.Minute)},
+					Content: "corrected", ValidFrom: current.ValidFrom, ValidUntil: current.ValidUntil,
+					Importance: current.Importance, Confidence: current.Confidence,
+					Sources: []memorykit.Source{{Kind: "review", Ref: "review:1"}},
+				})
+			case "forget":
+				current, err = base.Forget(context.Background(), memorykit.VersionedCommand{
+					Scope: current.Scope, ID: id, ExpectedVersion: current.Version, Actor: "reviewer", Reason: "forget", Now: adapterNow.Add(time.Minute),
+				})
+			case "supersede":
+				_, err = base.Create(context.Background(), memorykit.CreateRequest{
+					ID: toolMemoryID3, Scope: current.Scope, Kind: current.Kind, Key: current.Key,
+					Status: memorykit.StatusActive, Content: "replacement", ValidFrom: adapterNow.Add(time.Minute),
+					SourceAgentID: "reviewer", Actor: "reviewer", Reason: "replace", Now: adapterNow.Add(time.Minute),
+				})
+				if err == nil {
+					current, err = base.Get(context.Background(), current.Scope, id)
+				}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, executeErr := write.Execute(context.Background(), input, ports.ToolEnv{})
+			if executeErr != nil || result == nil || result.IsError || !strings.Contains(result.ForLLM, fmt.Sprintf(`"version":%d`, current.Version)) {
+				t.Fatalf("replay result=%#v err=%v current=%#v", result, executeErr, current)
+			}
+			if len(store.createRequests) != 1 {
+				t.Fatalf("Create calls = %d, want 1", len(store.createRequests))
+			}
+		})
+	}
+}
+
+func TestRememberMemoryReplayRejectsErasedCurrentRecord(t *testing.T) {
+	base := newToolMemoryStore(t)
+	store := &toolLifecycleStore{delegate: base}
+	provider := newToolProviderForTest(t, store, newToolRecaller(t, &toolRecallStore{}), &acceptContentValidator{})
+	runID := agentcore.NewRunID()
+	registered, err := provider.Tools(context.Background(), agentcore.RunRequest{RunID: runID, UserID: "user", Metadata: trustedMetadata("tenant-1", "project-1", true)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := json.RawMessage(`{"kind":"fact","key":"privacy","content":"erase me","reason":"explicit"}`)
+	write := findTool(t, registered, "remember_project_memory")
+	if result, executeErr := write.Execute(context.Background(), input, ports.ToolEnv{}); executeErr != nil || result == nil || result.IsError {
+		t.Fatalf("initial result=%#v err=%v", result, executeErr)
+	}
+	id, _ := expectedToolWriteIdentity(t, runID, input)
+	current, err := base.Get(context.Background(), toolScope("tenant-1", "project-1"), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := base.Erase(context.Background(), memorykit.VersionedCommand{
+		Scope: current.Scope, ID: id, ExpectedVersion: current.Version, Actor: "privacy", Reason: "erase", Now: adapterNow.Add(time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, executeErr := write.Execute(context.Background(), input, ports.ToolEnv{})
+	if executeErr == nil || result != nil || len(store.createRequests) != 1 {
+		t.Fatalf("replay result=%#v err=%v Create calls=%d", result, executeErr, len(store.createRequests))
+	}
+}
+
+func TestRememberMemoryRejectsMalformedCreateResultWithoutClaimingSuccess(t *testing.T) {
+	mutations := []struct {
+		name   string
+		mutate func(memorykit.Memory) memorykit.Memory
+	}{
+		{name: "foreign", mutate: func(memory memorykit.Memory) memorykit.Memory { memory.Scope.SubjectID = "foreign"; return memory }},
+		{name: "nonactive", mutate: func(memory memorykit.Memory) memorykit.Memory {
+			memory.Status = memorykit.StatusInactive
+			return memory
+		}},
+		{name: "wrong content", mutate: func(memory memorykit.Memory) memorykit.Memory { memory.Content = "different"; return memory }},
+		{name: "oversized", mutate: func(memory memorykit.Memory) memorykit.Memory {
+			memory.Content = strings.Repeat("x", adapterTestLimits().MaxContentRunes+1)
+			return memory
+		}},
+		{name: "timestamp", mutate: func(memory memorykit.Memory) memorykit.Memory {
+			memory.UpdatedAt = memory.UpdatedAt.Add(time.Second)
+			return memory
+		}},
+	}
+	for _, test := range mutations {
+		t.Run(test.name, func(t *testing.T) {
+			store := &toolLifecycleStore{getErr: memorykit.ErrNotFound, createMutate: test.mutate}
+			provider := newToolProviderForTest(t, store, newToolRecaller(t, &toolRecallStore{}), &acceptContentValidator{})
+			registered, err := provider.Tools(context.Background(), agentcore.RunRequest{
+				RunID: agentcore.NewRunID(), UserID: "user", Metadata: trustedMetadata("tenant-1", "project-1", true),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, executeErr := findTool(t, registered, "remember_project_memory").Execute(context.Background(), json.RawMessage(`{"kind":"fact","key":"integrity","content":"expected","reason":"explicit"}`), ports.ToolEnv{})
+			if executeErr == nil || result != nil {
+				t.Fatalf("result=%#v err=%v", result, executeErr)
+			}
+		})
 	}
 }
 
@@ -375,23 +810,21 @@ func TestRememberMemoryFailsTruthfullyAndDoesNotLeakContent(t *testing.T) {
 	}
 }
 
-func TestRememberMemoryRejectsInvalidClockIDAndValidityAsIntegrityErrors(t *testing.T) {
+func TestRememberMemoryRejectsInvalidClockAndValidityAsIntegrityErrors(t *testing.T) {
 	tests := []struct {
 		name  string
-		newID func() string
 		now   func() time.Time
 		input json.RawMessage
 	}{
-		{name: "id", newID: func() string { return "not-a-uuid" }, now: func() time.Time { return adapterNow }, input: json.RawMessage(`{"kind":"fact","key":"k","content":"c","reason":"r"}`)},
-		{name: "clock", newID: func() string { return toolMemoryID1 }, now: func() time.Time { return time.Time{} }, input: json.RawMessage(`{"kind":"fact","key":"k","content":"c","reason":"r"}`)},
-		{name: "valid until", newID: func() string { return toolMemoryID1 }, now: func() time.Time { return adapterNow }, input: json.RawMessage(`{"kind":"fact","key":"k","content":"c","valid_until":"2026-07-21T12:00:00Z","reason":"r"}`)},
+		{name: "clock", now: func() time.Time { return time.Time{} }, input: json.RawMessage(`{"kind":"fact","key":"k","content":"c","reason":"r"}`)},
+		{name: "valid until", now: func() time.Time { return adapterNow }, input: json.RawMessage(`{"kind":"fact","key":"k","content":"c","valid_until":"2026-07-21T12:00:00Z","reason":"r"}`)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			store := &toolLifecycleStore{delegate: newToolMemoryStore(t)}
 			provider, err := NewToolProvider(ToolProviderConfig{
 				Store: store, DeepRecall: newToolRecaller(t, &toolRecallStore{}), ResolveScope: resolveToolScope,
-				AllowExplicitWrite: allowToolWrite, ValidateContent: &acceptContentValidator{}, NewID: test.newID, Now: test.now,
+				AllowExplicitWrite: allowToolWrite, ValidateContent: &acceptContentValidator{}, Limits: adapterTestLimits(), Now: test.now,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -429,12 +862,67 @@ func TestToolClosuresValidateInputsWhenCalledDirectly(t *testing.T) {
 	}
 }
 
+func TestMemoryToolsPreserveCanonicalCancellation(t *testing.T) {
+	t.Run("pre canceled", func(t *testing.T) {
+		provider := newToolProviderForTest(t, newToolMemoryStore(t), newToolRecaller(t, &toolRecallStore{}), &acceptContentValidator{})
+		registered, err := provider.Tools(context.Background(), agentcore.RunRequest{Metadata: trustedMetadata("tenant-1", "project-1", false)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		result, executeErr := findTool(t, registered, "read_memory").Execute(ctx, json.RawMessage(`{}`), ports.ToolEnv{})
+		if result != nil || !errors.Is(executeErr, context.Canceled) {
+			t.Fatalf("result=%#v err=%v", result, executeErr)
+		}
+	})
+
+	writeInput := json.RawMessage(`{"kind":"fact","key":"cancel","content":"content","reason":"explicit"}`)
+	for _, test := range []struct {
+		name      string
+		validator memorykit.ContentValidator
+		store     *toolLifecycleStore
+		want      error
+	}{
+		{name: "validator canceled", validator: &acceptContentValidator{err: context.Canceled}, store: &toolLifecycleStore{delegate: newToolMemoryStore(t)}, want: context.Canceled},
+		{name: "create deadline", validator: &acceptContentValidator{}, store: &toolLifecycleStore{delegate: newToolMemoryStore(t), createErr: context.DeadlineExceeded}, want: context.DeadlineExceeded},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			provider := newToolProviderForTest(t, test.store, newToolRecaller(t, &toolRecallStore{}), test.validator)
+			registered, err := provider.Tools(context.Background(), agentcore.RunRequest{RunID: agentcore.NewRunID(), UserID: "user", Metadata: trustedMetadata("tenant-1", "project-1", true)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, executeErr := findTool(t, registered, "remember_project_memory").Execute(context.Background(), writeInput, ports.ToolEnv{})
+			if result != nil || !errors.Is(executeErr, test.want) {
+				t.Fatalf("result=%#v err=%v", result, executeErr)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name  string
+		store *toolLifecycleStore
+		want  error
+	}{
+		{name: "get canceled", store: &toolLifecycleStore{getErr: context.Canceled}, want: context.Canceled},
+		{name: "sources deadline", store: &toolLifecycleStore{getMemory: validToolMemory(toolMemoryID1, "content"), sourcesErr: context.DeadlineExceeded}, want: context.DeadlineExceeded},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result, executeErr := executeReadTool(t, test.store, toolMemoryID1)
+			if result != nil || !errors.Is(executeErr, test.want) {
+				t.Fatalf("result=%#v err=%v", result, executeErr)
+			}
+		})
+	}
+}
+
 func newToolProviderForTest(t *testing.T, store memorykit.LifecycleStore, recall *memorykit.Recaller, validator memorykit.ContentValidator) *ToolProvider {
 	t.Helper()
 	provider, err := NewToolProvider(ToolProviderConfig{
 		Store: store, DeepRecall: recall, ResolveScope: resolveToolScope,
 		AllowExplicitWrite: allowToolWrite, ValidateContent: validator,
-		NewID: func() string { return toolMemoryID1 }, Now: func() time.Time { return adapterNow },
+		Limits: adapterTestLimits(), Now: func() time.Time { return adapterNow },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -462,6 +950,40 @@ func allowToolWrite(request agentcore.RunRequest) bool {
 
 func toolScope(tenant, project string) memorykit.Scope {
 	return memorykit.Scope{TenantID: tenant, SubjectType: memorykit.SubjectProject, SubjectID: project}
+}
+
+func expectedToolWriteIdentity(t *testing.T, runID agentcore.RunID, input json.RawMessage) (string, string) {
+	t.Helper()
+	var parsed struct {
+		Kind       memorykit.Kind `json:"kind"`
+		Key        string         `json:"key"`
+		Content    string         `json:"content"`
+		ValidUntil string         `json:"valid_until"`
+		Reason     string         `json:"reason"`
+	}
+	if err := json.Unmarshal(input, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	var validUntil *time.Time
+	if parsed.ValidUntil != "" {
+		value, err := time.Parse(time.RFC3339, parsed.ValidUntil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		validUntil = &value
+	}
+	canonical, err := json.Marshal(struct {
+		Kind       memorykit.Kind `json:"kind"`
+		Key        string         `json:"key"`
+		Content    string         `json:"content"`
+		ValidUntil *time.Time     `json:"valid_until,omitempty"`
+		Reason     string         `json:"reason"`
+	}{parsed.Kind, parsed.Key, parsed.Content, validUntil, parsed.Reason})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(canonical)
+	return uuid.NewSHA1(uuid.UUID(runID), digest[:]).String(), fmt.Sprintf("%x", digest)
 }
 
 func assertToolNames(t *testing.T, registered []tools.Tool, want ...string) {
@@ -507,6 +1029,31 @@ func createToolMemory(t *testing.T, store memorykit.LifecycleStore, id string, s
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+func validToolMemory(id, content string) memorykit.Memory {
+	return memorykit.Memory{
+		ID: id, Scope: toolScope("tenant-1", "project-1"), Kind: memorykit.KindLesson,
+		Key: "testing", Content: content, Status: memorykit.StatusActive,
+		ValidFrom: adapterNow.Add(-time.Hour), Importance: 10, Confidence: 0.8,
+		SourceAgentID: "agent-1", CreatedBy: "user-1", IdempotencyKey: "fixture", Version: 1,
+		CreatedAt: adapterNow.Add(-time.Hour), UpdatedAt: adapterNow.Add(-time.Hour),
+	}
+}
+
+func searchToolCandidate(id, content string, sources []memorykit.Source, rank int) memorykit.Candidate {
+	memory := validToolMemory(id, content)
+	return memorykit.Candidate{Memory: memory, Sources: sources, Channel: memorykit.ChannelFullText, Rank: rank}
+}
+
+func executeReadTool(t *testing.T, store memorykit.LifecycleStore, id string) (*tools.Result, error) {
+	t.Helper()
+	provider := newToolProviderForTest(t, store, newToolRecaller(t, &toolRecallStore{}), &acceptContentValidator{})
+	registered, err := provider.Tools(context.Background(), agentcore.RunRequest{Metadata: trustedMetadata("tenant-1", "project-1", false)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return findTool(t, registered, "read_memory").Execute(context.Background(), json.RawMessage(`{"memory_id":"`+id+`"}`), ports.ToolEnv{})
 }
 
 type acceptContentValidator struct {
@@ -560,19 +1107,30 @@ type toolLifecycleStore struct {
 	mu             sync.Mutex
 	delegate       memorykit.LifecycleStore
 	createErr      error
+	createMutate   func(memorykit.Memory) memorykit.Memory
 	createRequests []memorykit.CreateRequest
+	createdSources []memorykit.Source
 	getMemory      memorykit.Memory
 	getErr         error
+	getResults     []toolGetResult
+	getCalls       int
 	sources        []memorykit.Source
 	sourcesErr     error
 	sourcesCalls   int
 }
 
+type toolGetResult struct {
+	memory memorykit.Memory
+	err    error
+}
+
 func (s *toolLifecycleStore) Create(ctx context.Context, request memorykit.CreateRequest) (memorykit.Memory, error) {
 	s.mu.Lock()
 	s.createRequests = append(s.createRequests, cloneCreateRequestForToolTest(request))
+	s.createdSources = append([]memorykit.Source(nil), request.Sources...)
 	err := s.createErr
 	delegate := s.delegate
+	mutate := s.createMutate
 	s.mu.Unlock()
 	if err != nil {
 		return memorykit.Memory{}, err
@@ -580,28 +1138,60 @@ func (s *toolLifecycleStore) Create(ctx context.Context, request memorykit.Creat
 	if delegate != nil {
 		return delegate.Create(ctx, request)
 	}
-	return memorykit.Memory{ID: request.ID, Scope: request.Scope, Kind: request.Kind, Key: request.Key, Content: request.Content, Status: request.Status, ValidFrom: request.ValidFrom, ValidUntil: request.ValidUntil, Importance: request.Importance, Confidence: request.Confidence, Version: 1}, nil
+	memory := memorykit.Memory{
+		ID: request.ID, Scope: request.Scope, Kind: request.Kind, Key: request.Key, Content: request.Content,
+		Status: request.Status, ValidFrom: request.ValidFrom, ValidUntil: request.ValidUntil,
+		Importance: request.Importance, Confidence: request.Confidence, SourceAgentID: request.SourceAgentID,
+		CreatedBy: request.Actor, IdempotencyKey: request.IdempotencyKey, Version: 1,
+		CreatedAt: request.Now, UpdatedAt: request.Now,
+	}
+	if mutate != nil {
+		memory = mutate(memory)
+	}
+	return memory, nil
 }
 
 func (s *toolLifecycleStore) Get(ctx context.Context, scope memorykit.Scope, id string) (memorykit.Memory, error) {
-	if s.getErr != nil {
-		return memorykit.Memory{}, s.getErr
+	s.mu.Lock()
+	if s.getCalls < len(s.getResults) {
+		result := s.getResults[s.getCalls]
+		s.getCalls++
+		s.mu.Unlock()
+		return result.memory, result.err
 	}
-	if s.delegate != nil {
-		return s.delegate.Get(ctx, scope, id)
+	s.getCalls++
+	err := s.getErr
+	delegate := s.delegate
+	memory := s.getMemory
+	s.mu.Unlock()
+	if err != nil {
+		return memorykit.Memory{}, err
 	}
-	return s.getMemory, nil
+	if delegate != nil {
+		return delegate.Get(ctx, scope, id)
+	}
+	return memory, nil
 }
 
 func (s *toolLifecycleStore) Sources(ctx context.Context, scope memorykit.Scope, id string) ([]memorykit.Source, error) {
+	s.mu.Lock()
 	s.sourcesCalls++
-	if s.sourcesErr != nil {
-		return nil, s.sourcesErr
+	err := s.sourcesErr
+	delegate := s.delegate
+	sources := append([]memorykit.Source(nil), s.sources...)
+	createdSources := append([]memorykit.Source(nil), s.createdSources...)
+	sourcesWereNil := s.sources == nil
+	s.mu.Unlock()
+	if err != nil {
+		return nil, err
 	}
-	if s.delegate != nil {
-		return s.delegate.Sources(ctx, scope, id)
+	if delegate != nil {
+		return delegate.Sources(ctx, scope, id)
 	}
-	return append([]memorykit.Source(nil), s.sources...), nil
+	if sourcesWereNil {
+		return createdSources, nil
+	}
+	return sources, nil
 }
 
 func (s *toolLifecycleStore) List(ctx context.Context, query memorykit.ListQuery) ([]memorykit.Memory, error) {
