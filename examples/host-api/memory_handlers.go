@@ -695,7 +695,7 @@ func (s *Server) handleEraseMemory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if erased.Version > command.ExpectedVersion+1 {
-		if !validAdvancedMemorySnapshot(current, erased) {
+		if erased.Status != memorykit.StatusInactive || !validAdvancedMemorySnapshot(current, erased) {
 			writeMemoryError(w, http.StatusInternalServerError, "memory_integrity_error", "memory store returned invalid data")
 			return
 		}
@@ -1034,7 +1034,20 @@ func validAdvancedMemorySnapshot(before, after memorykit.Memory) bool {
 	return after.ID == before.ID && after.Scope == before.Scope && after.Kind == before.Kind && after.Key == before.Key &&
 		after.SourceAgentID == before.SourceAgentID && after.CreatedBy == before.CreatedBy && after.IdempotencyKey == before.IdempotencyKey &&
 		equivalentMemoryStoreTime(after.CreatedAt, before.CreatedAt) && after.Version > before.Version &&
-		!after.UpdatedAt.Before(before.UpdatedAt)
+		!after.UpdatedAt.Before(before.UpdatedAt) && validAdvancedMemoryStatus(before.Status, after.Status)
+}
+
+func validAdvancedMemoryStatus(before, after memorykit.Status) bool {
+	switch before {
+	case memorykit.StatusCandidate:
+		return after == memorykit.StatusCandidate || after == memorykit.StatusActive || after == memorykit.StatusInactive
+	case memorykit.StatusActive:
+		return after == memorykit.StatusActive || after == memorykit.StatusInactive
+	case memorykit.StatusInactive:
+		return after == memorykit.StatusInactive
+	default:
+		return false
+	}
 }
 
 func validEraseResult(before, after memorykit.Memory, sources []memorykit.Source, command memorykit.VersionedCommand) bool {

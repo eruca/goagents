@@ -767,25 +767,83 @@ func TestMemoryHandlersReturnStableAdvancedSnapshotAfterMutation(t *testing.T) {
 	}
 }
 
-func TestMemoryHandlersDoNotReturnNoContentWhenErasePostconditionWasAdvanced(t *testing.T) {
+func TestMemoryHandlersRejectUnreachableAdvancedStatusAfterMutation(t *testing.T) {
+	tests := []struct {
+		operation      string
+		initialStatus  memorykit.Status
+		advancedStatus memorykit.Status
+		body           string
+	}{
+		{operation: "create", advancedStatus: memorykit.StatusCandidate, body: validCreateMemoryBody("unreachable-create", "")},
+		{operation: "activate", initialStatus: memorykit.StatusCandidate, advancedStatus: memorykit.StatusCandidate, body: `{"expected_version":1,"reason":"activate"}`},
+		{operation: "forget", initialStatus: memorykit.StatusActive, advancedStatus: memorykit.StatusActive, body: `{"expected_version":1,"reason":"forget"}`},
+		{operation: "dismiss", initialStatus: memorykit.StatusCandidate, advancedStatus: memorykit.StatusCandidate, body: `{"expected_version":1,"reason":"dismiss"}`},
+		{operation: "correct", initialStatus: memorykit.StatusInactive, advancedStatus: memorykit.StatusActive, body: `{"expected_version":1,"content":"corrected","valid_from":"2026-07-21T08:00:00Z","reason":"correct","importance":1,"confidence":1}`},
+	}
+	for _, test := range tests {
+		t.Run(test.operation, func(t *testing.T) {
+			config := validMemoryRuntimeConfig(t, validMemoryAuthorizer())
+			recorder := config.Store.(*recordingMemoryStore)
+			target := "/projects/project-a/memories"
+			if test.operation != "create" {
+				scope := memorykit.Scope{TenantID: "tenant-a", SubjectType: memorykit.SubjectProject, SubjectID: "project-a"}
+				id := seedMemory(t, recorder.Store, scope, test.initialStatus, "unreachable-"+test.operation, "content")
+				target += "/" + id + "/" + test.operation
+			}
+			config.Store = &postMutationAdvanceMemoryStore{
+				Store: recorder, operation: test.operation, advancedStatus: test.advancedStatus,
+			}
+			response := memoryRequest(t, (&Server{memory: config}).Handler(), http.MethodPost, target, test.body)
+			if response.Code != http.StatusInternalServerError || !strings.Contains(response.Body.String(), `"error":"memory_integrity_error"`) {
+				t.Fatalf("status=%d body=%s, want integrity 500", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestMemoryHandlersRejectUnreachableAdvancedStatusDuringMutationPreRead(t *testing.T) {
 	config := validMemoryRuntimeConfig(t, validMemoryAuthorizer())
 	recorder := config.Store.(*recordingMemoryStore)
 	scope := memorykit.Scope{TenantID: "tenant-a", SubjectType: memorykit.SubjectProject, SubjectID: "project-a"}
-	id := seedMemory(t, recorder.Store, scope, memorykit.StatusActive, "erase-post-race", "private")
-	v1, err := recorder.Store.Get(context.Background(), scope, id)
+	id := seedMemory(t, recorder.Store, scope, memorykit.StatusActive, "unreachable-pre-read", "content")
+	active, err := recorder.Store.Get(context.Background(), scope, id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	v3 := v1
-	v3.Content, v3.Status, v3.Version, v3.UpdatedAt = "restored concurrently", memorykit.StatusActive, 3, v1.UpdatedAt.Add(2*time.Minute)
-	config.Store = &scriptedSnapshotMemoryStore{Store: recorder, getResults: []memorykit.Memory{v1, v1, v3, v3}}
+	candidate := active
+	candidate.Status, candidate.Version, candidate.UpdatedAt = memorykit.StatusCandidate, 2, active.UpdatedAt.Add(time.Minute)
+	config.Store = &scriptedSnapshotMemoryStore{Store: recorder, getResults: []memorykit.Memory{active, candidate, candidate, candidate}}
 	response := memoryRequest(t, (&Server{memory: config}).Handler(), http.MethodPost,
-		"/projects/project-a/memories/"+id+"/erase", `{"expected_version":1,"reason":"erase"}`)
-	if response.Code != http.StatusConflict {
-		t.Fatalf("status=%d body=%s, want 409", response.Code, response.Body.String())
+		"/projects/project-a/memories/"+id+"/correct",
+		`{"expected_version":1,"content":"corrected","valid_from":"2026-07-21T08:00:00Z","reason":"correct","importance":1,"confidence":1}`)
+	if response.Code != http.StatusInternalServerError || !strings.Contains(response.Body.String(), `"error":"memory_integrity_error"`) {
+		t.Fatalf("status=%d body=%s, want integrity 500", response.Code, response.Body.String())
 	}
-	if strings.Contains(response.Body.String(), "restored concurrently") {
-		t.Fatalf("conflict leaked content: %s", response.Body.String())
+}
+
+func TestMemoryHandlersRejectNonInactiveAdvancedErasePostcondition(t *testing.T) {
+	for _, advancedStatus := range []memorykit.Status{memorykit.StatusActive, memorykit.StatusCandidate} {
+		t.Run(string(advancedStatus), func(t *testing.T) {
+			config := validMemoryRuntimeConfig(t, validMemoryAuthorizer())
+			recorder := config.Store.(*recordingMemoryStore)
+			scope := memorykit.Scope{TenantID: "tenant-a", SubjectType: memorykit.SubjectProject, SubjectID: "project-a"}
+			id := seedMemory(t, recorder.Store, scope, memorykit.StatusCandidate, "erase-post-race-"+string(advancedStatus), "private")
+			v1, err := recorder.Store.Get(context.Background(), scope, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			v3 := v1
+			v3.Content, v3.Status, v3.Version, v3.UpdatedAt = "restored concurrently", advancedStatus, 3, v1.UpdatedAt.Add(2*time.Minute)
+			config.Store = &scriptedSnapshotMemoryStore{Store: recorder, getResults: []memorykit.Memory{v1, v1, v3, v3}}
+			response := memoryRequest(t, (&Server{memory: config}).Handler(), http.MethodPost,
+				"/projects/project-a/memories/"+id+"/erase", `{"expected_version":1,"reason":"erase"}`)
+			if response.Code != http.StatusInternalServerError || !strings.Contains(response.Body.String(), `"error":"memory_integrity_error"`) {
+				t.Fatalf("status=%d body=%s, want integrity 500", response.Code, response.Body.String())
+			}
+			if strings.Contains(response.Body.String(), "restored concurrently") {
+				t.Fatalf("integrity response leaked content: %s", response.Body.String())
+			}
+		})
 	}
 }
 
@@ -1031,6 +1089,7 @@ type postMutationTamperMemoryStore struct {
 type postMutationAdvanceMemoryStore struct {
 	memorykit.Store
 	operation       string
+	advancedStatus  memorykit.Status
 	advanced        memorykit.Memory
 	advancedSources []memorykit.Source
 }
@@ -1039,8 +1098,27 @@ func (s *postMutationAdvanceMemoryStore) advance(memory memorykit.Memory) {
 	memory.Content = "concurrent correction"
 	memory.Version++
 	memory.UpdatedAt = memory.UpdatedAt.Add(time.Minute)
+	if s.advancedStatus != "" {
+		memory.Status = s.advancedStatus
+	}
 	s.advanced = memory
 	s.advancedSources = []memorykit.Source{{Kind: "git", Ref: "commit:advanced", EvidenceHash: "hash:advanced"}}
+}
+
+func (s *postMutationAdvanceMemoryStore) Create(ctx context.Context, request memorykit.CreateRequest) (memorykit.Memory, error) {
+	memory, err := s.Store.Create(ctx, request)
+	if err == nil && s.operation == "create" {
+		s.advance(memory)
+	}
+	return memory, err
+}
+
+func (s *postMutationAdvanceMemoryStore) Activate(ctx context.Context, command memorykit.VersionedCommand) (memorykit.Memory, error) {
+	memory, err := s.Store.Activate(ctx, command)
+	if err == nil && s.operation == "activate" {
+		s.advance(memory)
+	}
+	return memory, err
 }
 
 func (s *postMutationAdvanceMemoryStore) Correct(ctx context.Context, request memorykit.CorrectRequest) (memorykit.Memory, error) {
@@ -1054,6 +1132,14 @@ func (s *postMutationAdvanceMemoryStore) Correct(ctx context.Context, request me
 func (s *postMutationAdvanceMemoryStore) Forget(ctx context.Context, command memorykit.VersionedCommand) (memorykit.Memory, error) {
 	memory, err := s.Store.Forget(ctx, command)
 	if err == nil && s.operation == "forget" {
+		s.advance(memory)
+	}
+	return memory, err
+}
+
+func (s *postMutationAdvanceMemoryStore) Dismiss(ctx context.Context, command memorykit.VersionedCommand) (memorykit.Memory, error) {
+	memory, err := s.Store.Dismiss(ctx, command)
+	if err == nil && s.operation == "dismiss" {
 		s.advance(memory)
 	}
 	return memory, err
