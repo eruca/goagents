@@ -24,6 +24,9 @@
 - memory read/write 授权失败时，测试观察到 input Artifact 已被写入；授权被前移到 execution 登记和任何持久化之前后转绿。
 - worker dependency 返回自身 `context.DeadlineExceeded` 时，ticker loop 错误退出；改为只在 caller-owned execution context 实际取消时退出后转绿。
 - E2E 原先对含函数 ToolSchema 的整份 ChatRequest 做 JSON marshal，形成空断言；改为只检查 Messages，并用不同 query marker 与正文重新证明 project/forget 隔离。
+- runtime 接受无法容纳 `extractor:` actor 或 36-rune Host RunID 的 metadata 上限；增加 raw/prefixed extractor 与 UUID 边界校验后转绿。
+- 同一确定性 extraction job 在两次 enqueue 时因 `Now()` 变化产生不同 payload；改为校验并读取 succeeded Agent Run 的持久 `UpdatedAt` 后转绿。
+- sync 与 resume 两个完成路径使用 workflow-scoped output ref，同 workflow requeue 会覆盖旧 pending job 的 source；改为 Agent RunID-scoped ref 后，旧 source 内容保持不变。
 
 ## 实现决策
 
@@ -31,11 +34,16 @@
 - 用户确认采用显式 `ExtractionJobs memorykit.ExtractionJobStore` 和必填 `ExtractorID`；预构建 ExtractionWorker 不改成 factory。调用方必须用同一 durable queue 构造 worker，这是无法通过私有 worker 反射验证的显式 invariant。
 - SourceReader 只接受 `Kind=artifact` 且 `artifact:` ref；正文超过 `Limits.MaxContentRunes` 直接拒绝，不截断。
 - extraction job 的 `SourceAgentID` 使用成功 Agent RunID；ID 对 Scope、RunID 与 output ref 做域隔离 UUIDv5。
+- enqueue 会重新读取 succeeded Agent Run，校验其 RunID、状态和 ContentRef 后使用持久 `UpdatedAt`；因此同一持久状态的重试完全幂等且不依赖 Host `Now()`。
+- Agent 输出 ref 固定为 `artifact:<AgentRunID>:agent-output`；runtime 同时验证 Source.Ref 与 SourceAgentID 的精确绑定。
 - Observer 只落 event type、policy version、item count、memory IDs 与 degraded channels；query、content、vector、provider/error payload 均不进入事件。
 - CLI/main 不提供 memory 环境配置；只有显式 `Config.Memory` 才启用 routes、Agent adapters 与 workers。
+- E2E Agent 统一通过 `routingAgentRunner.RunDetailed/newAgent` 的 production composition；Agent B 使用独立 session，恶意记忆、Scope 和权限不再由手工 Agent 组装证明。临时移除 production Projector 时 E2E 在 Memory View 门禁处按预期失败，恢复后通过。
 
 ## 验证证据
 
+- 独立审查修复后 `go test -race ./examples/host-api/... -count=1`：通过（19.292s）。
+- 独立审查修复后 standalone `GOWORK=off go test -race ./... -run 'TestMemoryRuntime|TestAgentMemory|TestHostMemoryEndToEnd' -count=1` 与 workspace/standalone `go vet`：通过。
 - `go test -race ./... -run 'TestWorkflowMemoryScope|TestAgentMemory|TestMemoryRuntime|TestHostMemoryEndToEnd|TestHostAPIService'`：通过。
 - 服务级 lifecycle 测试直接证明 graceful drain 等待当前 memory batch，force-stop 会取消当前 batch 且等待两个 worker 收敛。
 - `go test -race ./...`：通过。

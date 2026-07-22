@@ -1233,7 +1233,7 @@ func hasDeniedResolution(resolutions []agentcore.ToolApprovalResolution) bool {
 }
 
 func (s *Server) persistResumedAgentResult(ctx context.Context, run workflowkit.WorkflowRun, checkpointID string, result *agentcore.RunResult) (workflowkit.WorkflowRun, error) {
-	outputRef := "artifact:" + run.ID + ":agent-output"
+	outputRef := "artifact:" + result.RunID.String() + ":agent-output"
 	if err := putTextArtifact(ctx, s.artifacts, outputRef, result.Content); err != nil {
 		return workflowkit.WorkflowRun{}, err
 	}
@@ -1510,7 +1510,7 @@ func (s hostAgentStep) Run(ctx context.Context, run workflowkit.WorkflowRun) (wo
 		return failedAgentStepResult(nil, err), err
 	}
 
-	outputRef := "artifact:" + run.ID + ":agent-output"
+	outputRef := "artifact:" + result.RunID.String() + ":agent-output"
 	if err := putTextArtifact(ctx, s.artifacts, outputRef, result.Content); err != nil {
 		return failedAgentStepResult(result, err), err
 	}

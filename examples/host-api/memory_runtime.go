@@ -21,6 +21,7 @@ const (
 	memoryProjectMetadataKey     = "memory.project_id"
 	memoryUserMetadataKey        = "memory.user_id"
 	memoryWriteIntentMetadataKey = "memory.write_intent"
+	hostSourceAgentIDRunes       = 36
 )
 
 var trustedMemoryMetadataKeys = map[string]struct{}{
@@ -35,6 +36,7 @@ type memoryRuntime struct {
 	projector    *memoryagentadapter.Projector
 	toolProvider *memoryagentadapter.ToolProvider
 	observer     *hostMemoryObserver
+	runs         runkit.Store
 
 	workerStart sync.Once
 	workerMu    sync.Mutex
@@ -51,7 +53,9 @@ func newMemoryRuntime(config *memoryRuntimeConfig, runs runkit.Store) (*memoryRu
 		nilMemoryDependency(config.EmbeddingWorker) || nilMemoryDependency(config.ExtractionWorker) ||
 		nilMemoryDependency(config.ExtractionJobs) || nilMemoryDependency(runs) ||
 		config.EmbeddingInterval <= 0 || config.ExtractionInterval <= 0 ||
-		!validMemoryRuntimeIdentity(config.ExtractorID, config.Limits.MaxMetadataRunes) {
+		config.Limits.MaxMetadataRunes < hostSourceAgentIDRunes ||
+		!validMemoryRuntimeIdentity(config.ExtractorID, config.Limits.MaxMetadataRunes) ||
+		!validMemoryRuntimeIdentity("extractor:"+config.ExtractorID, config.Limits.MaxMetadataRunes) {
 		return nil, fmt.Errorf("invalid memory runtime configuration")
 	}
 	copy := *config
@@ -74,7 +78,7 @@ func newMemoryRuntime(config *memoryRuntimeConfig, runs runkit.Store) (*memoryRu
 	if err != nil {
 		return nil, fmt.Errorf("build memory tool provider: %w", err)
 	}
-	runtime := &memoryRuntime{memoryRuntimeConfig: copy, projector: projector, toolProvider: provider, observer: observer}
+	runtime := &memoryRuntime{memoryRuntimeConfig: copy, projector: projector, toolProvider: provider, observer: observer, runs: runs}
 	return runtime, nil
 }
 
@@ -195,16 +199,21 @@ func (s *Server) WaitMemoryWorkers(ctx context.Context) error {
 
 func (r *memoryRuntime) EnqueueExtraction(ctx context.Context, scope memorykit.Scope, outputRef, sourceAgentID string) error {
 	if r == nil || strings.TrimSpace(outputRef) == "" || !strings.HasPrefix(outputRef, "artifact:") ||
-		memorykit.ValidateMemoryID(sourceAgentID) != nil {
+		memorykit.ValidateMemoryID(sourceAgentID) != nil || outputRef != "artifact:"+sourceAgentID+":agent-output" {
 		return fmt.Errorf("%w: invalid Host extraction source", memorykit.ErrInvalidMemory)
 	}
 	if err := scope.Validate(); err != nil {
 		return err
 	}
-	now := r.Now().UTC()
-	if now.IsZero() {
-		return fmt.Errorf("%w: invalid Host extraction clock", memorykit.ErrInvalidMemory)
+	completed, err := r.runs.Get(ctx, sourceAgentID)
+	if err != nil {
+		return err
 	}
+	if completed.RunID != sourceAgentID || completed.Status != runkit.StatusSucceeded ||
+		completed.Summary.Status != runkit.StatusSucceeded || completed.Summary.ContentRef != outputRef || completed.UpdatedAt.IsZero() {
+		return fmt.Errorf("%w: extraction source is not a matching completed Agent run", memorykit.ErrInvalidMemory)
+	}
+	now := completed.UpdatedAt.UTC()
 	identity := strings.Join([]string{"goagents.host.memory-extraction.v1", scope.TenantID, string(scope.SubjectType), scope.SubjectID, sourceAgentID, outputRef}, "\x00")
 	job := memorykit.ExtractionJob{
 		ID: uuid.NewSHA1(uuid.NameSpaceURL, []byte(identity)).String(), Scope: scope,

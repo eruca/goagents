@@ -26,6 +26,13 @@ func TestMemoryRuntimeRejectsIncompleteConfig(t *testing.T) {
 		{name: "extraction worker", mutate: func(config *memoryRuntimeConfig) { config.ExtractionWorker = nil }},
 		{name: "extraction jobs", mutate: func(config *memoryRuntimeConfig) { config.ExtractionJobs = nil }},
 		{name: "extractor id", mutate: func(config *memoryRuntimeConfig) { config.ExtractorID = "" }},
+		{name: "extractor actor id", mutate: func(config *memoryRuntimeConfig) {
+			config.ExtractorID = strings.Repeat("e", config.Limits.MaxMetadataRunes-len("extractor:")+1)
+		}},
+		{name: "host run id metadata limit", mutate: func(config *memoryRuntimeConfig) {
+			config.ExtractorID = "v1"
+			config.Limits.MaxMetadataRunes = len("00000000-0000-4000-8000-000000000000") - 1
+		}},
 		{name: "embedding interval", mutate: func(config *memoryRuntimeConfig) { config.EmbeddingInterval = 0 }},
 		{name: "extraction interval", mutate: func(config *memoryRuntimeConfig) { config.ExtractionInterval = 0 }},
 	}
@@ -38,6 +45,17 @@ func TestMemoryRuntimeRejectsIncompleteConfig(t *testing.T) {
 				t.Fatalf("newMemoryRuntime() = %#v, %v, want nil error result", runtime, err)
 			}
 		})
+	}
+}
+
+func TestMemoryRuntimeAcceptsHostRunIDMetadataLimitBoundary(t *testing.T) {
+	config := validCompleteMemoryRuntimeConfig(t)
+	config.ExtractorID = "v1"
+	config.Limits.MaxMetadataRunes = len("00000000-0000-4000-8000-000000000000")
+
+	runtime, err := newMemoryRuntime(config, runkit.NewMemoryStore())
+	if err != nil || runtime == nil {
+		t.Fatalf("newMemoryRuntime() = %#v, %v, want valid exact Host run ID boundary", runtime, err)
 	}
 }
 
@@ -77,14 +95,31 @@ func TestMemoryRuntimeArtifactSourceReaderRejectsUnsupportedAndOversizedSource(t
 func TestMemoryRuntimeEnqueueUsesStableTrustedJobIdentity(t *testing.T) {
 	config := validCompleteMemoryRuntimeConfig(t)
 	queue := config.ExtractionJobs.(*memoryExtractionJobStoreStub)
-	runtime, err := newMemoryRuntime(config, runkit.NewMemoryStore())
+	runID := "00000000-0000-4000-8000-000000000888"
+	outputRef := "artifact:" + runID + ":agent-output"
+	runs := runkit.NewMemoryStore()
+	if err := runs.Create(t.Context(), runkit.RunRecord{RunID: runID, WorkflowID: "workflow-a", Status: runkit.StatusRunning}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runs.Complete(t.Context(), runID, runkit.TerminalSummary{Status: runkit.StatusSucceeded, ContentRef: outputRef}); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := runs.Get(t.Context(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clockCalls := 0
+	config.Now = func() time.Time {
+		clockCalls++
+		return time.Date(2026, 7, 21, 8, clockCalls, 0, 0, time.UTC)
+	}
+	runtime, err := newMemoryRuntime(config, runs)
 	if err != nil {
 		t.Fatal(err)
 	}
 	scope := memorykit.Scope{TenantID: "tenant-a", SubjectType: memorykit.SubjectProject, SubjectID: "project-a"}
-	runID := "00000000-0000-4000-8000-000000000888"
 	for range 2 {
-		if err := runtime.EnqueueExtraction(t.Context(), scope, "artifact:workflow-a:agent-output", runID); err != nil {
+		if err := runtime.EnqueueExtraction(t.Context(), scope, outputRef, runID); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -95,10 +130,35 @@ func TestMemoryRuntimeEnqueueUsesStableTrustedJobIdentity(t *testing.T) {
 	if first != second {
 		t.Fatalf("stable enqueue changed job: first=%#v second=%#v", first, second)
 	}
-	if first.ID == runID || first.Scope != scope || first.Source != (memorykit.Source{Kind: "artifact", Ref: "artifact:workflow-a:agent-output"}) ||
+	if first.ID == runID || first.Scope != scope || first.Source != (memorykit.Source{Kind: "artifact", Ref: outputRef}) ||
 		first.SourceAgentID != runID || first.ExtractorID != config.ExtractorID || first.Status != memorykit.ExtractionPending ||
-		first.Attempts != 0 || first.CreatedAt.IsZero() || first.UpdatedAt != first.CreatedAt {
+		first.Attempts != 0 || !first.CreatedAt.Equal(completed.UpdatedAt) || first.UpdatedAt != first.CreatedAt {
 		t.Fatalf("enqueued job=%#v", first)
+	}
+}
+
+func TestMemoryRuntimeEnqueueRejectsSourceNotBoundToAgentRun(t *testing.T) {
+	config := validCompleteMemoryRuntimeConfig(t)
+	runs := runkit.NewMemoryStore()
+	runID := "00000000-0000-4000-8000-000000000889"
+	legacyRef := "artifact:workflow-a:agent-output"
+	if err := runs.Create(t.Context(), runkit.RunRecord{RunID: runID, WorkflowID: "workflow-a", Status: runkit.StatusRunning}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runs.Complete(t.Context(), runID, runkit.TerminalSummary{Status: runkit.StatusSucceeded, ContentRef: legacyRef}); err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := newMemoryRuntime(config, runs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := memorykit.Scope{TenantID: "tenant-a", SubjectType: memorykit.SubjectProject, SubjectID: "project-a"}
+
+	if err := runtime.EnqueueExtraction(t.Context(), scope, legacyRef, runID); err == nil {
+		t.Fatal("EnqueueExtraction accepted source ref not bound to Agent run ID")
+	}
+	if queue := config.ExtractionJobs.(*memoryExtractionJobStoreStub); len(queue.enqueued) != 0 {
+		t.Fatalf("invalid source enqueued jobs=%#v", queue.enqueued)
 	}
 }
 
