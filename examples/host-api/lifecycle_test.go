@@ -19,10 +19,117 @@ import (
 	"github.com/eruca/goagents/goagent/agentcore"
 	"github.com/eruca/goagents/goagent/ports"
 	"github.com/eruca/goagents/hostkit"
+	"github.com/eruca/goagents/memorykit"
 	"github.com/eruca/goagents/runkit"
 	"github.com/eruca/goagents/runkit/goagentapproval"
 	"github.com/eruca/goagents/workflowkit"
 )
+
+func TestHostAPIServiceMemoryWorkersDrainCurrentBatchWithoutNewClaims(t *testing.T) {
+	store := &drainableEmbeddingStore{entered: make(chan struct{}), release: make(chan struct{})}
+	config := validCompleteMemoryRuntimeConfig(t)
+	worker, err := memorykit.NewEmbeddingWorker(memorykit.EmbeddingWorkerConfig{
+		Store: store, Embedder: memoryRuntimeEmbedder{}, ProfileID: "test-3d", Dimensions: 3, BatchSize: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.EmbeddingWorker = worker
+	config.EmbeddingInterval = time.Millisecond
+	server, err := NewServer(Config{RuntimeHome: t.TempDir(), Memory: config})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := startLifecycleService(t, server)
+	select {
+	case <-store.entered:
+	case <-time.After(time.Second):
+		t.Fatal("memory worker was not started by service")
+	}
+
+	drained := make(chan error, 1)
+	go func() { drained <- service.Drain(t.Context()) }()
+	select {
+	case err := <-drained:
+		t.Fatalf("Drain returned before current memory batch completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(store.release)
+	select {
+	case err := <-drained:
+		if err != nil {
+			t.Fatalf("Drain() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Drain did not wait for memory worker")
+	}
+	claimsAfterDrain := store.claims.Load()
+	time.Sleep(10 * time.Millisecond)
+	if got := store.claims.Load(); got != claimsAfterDrain || got != 1 {
+		t.Fatalf("claims after drain=%d then %d, want exactly one", claimsAfterDrain, got)
+	}
+	if err := service.Close(t.Context()); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
+func TestHostAPIServiceMemoryWorkersForceStopCancelsCurrentBatch(t *testing.T) {
+	store := &blockingEmbeddingStore{entered: make(chan struct{}), returned: make(chan struct{})}
+	config := validCompleteMemoryRuntimeConfig(t)
+	worker, err := memorykit.NewEmbeddingWorker(memorykit.EmbeddingWorkerConfig{
+		Store: store, Embedder: memoryRuntimeEmbedder{}, ProfileID: "test-3d", Dimensions: 3, BatchSize: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.EmbeddingWorker = worker
+	config.EmbeddingInterval = time.Millisecond
+	server, err := NewServer(Config{RuntimeHome: t.TempDir(), Memory: config})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := startLifecycleService(t, server)
+	select {
+	case <-store.entered:
+	case <-time.After(time.Second):
+		t.Fatal("memory worker was not started by service")
+	}
+	forceCtx, cancelForce := context.WithTimeout(t.Context(), time.Second)
+	defer cancelForce()
+	if err := service.ForceStop(forceCtx); err != nil {
+		t.Fatalf("ForceStop() error = %v", err)
+	}
+	select {
+	case <-store.returned:
+	default:
+		t.Fatal("ForceStop returned before current memory batch observed execution cancellation")
+	}
+	if err := service.Close(t.Context()); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
+type drainableEmbeddingStore struct {
+	entered chan struct{}
+	release chan struct{}
+	claims  atomic.Int64
+}
+
+func (s *drainableEmbeddingStore) PendingEmbeddings(ctx context.Context, _ memorykit.PendingEmbeddingQuery) ([]memorykit.EmbeddingInput, error) {
+	if s.claims.Add(1) == 1 {
+		close(s.entered)
+	}
+	select {
+	case <-s.release:
+		return nil, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (*drainableEmbeddingStore) PutEmbedding(context.Context, memorykit.PutEmbeddingRequest) error {
+	return errors.New("unexpected PutEmbedding")
+}
 
 func TestHostAPIServiceStartBindsBeforeStartingBackgroundComponents(t *testing.T) {
 	occupied, err := net.Listen("tcp4", "127.0.0.1:0")

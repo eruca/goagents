@@ -20,8 +20,10 @@ import (
 	"github.com/eruca/goagents/goagent/agentcore"
 	"github.com/eruca/goagents/goagent/policy"
 	"github.com/eruca/goagents/goagent/ports"
+	"github.com/eruca/goagents/goagent/prompt"
 	goagentadapter "github.com/eruca/goagents/llmkit/adapters/goagent"
 	"github.com/eruca/goagents/llmkit/llmkit"
+	memoryagentadapter "github.com/eruca/goagents/memorykit/agentadapter"
 	"github.com/eruca/goagents/runkit"
 	"github.com/eruca/goagents/runkit/goagentapproval"
 	runsqlite "github.com/eruca/goagents/runkit/sqlitestore"
@@ -73,7 +75,7 @@ type Server struct {
 	agentApprovals          *hostAgentApprovalService
 	skillCatalog            *skillkit.Catalog
 	skillGateContext        skillkit.GateContext
-	memory                  *memoryRuntimeConfig
+	memory                  *memoryRuntime
 	worker                  queuedWorkerStatus
 	workerCfg               queuedWorkerConfig
 	workerWake              chan struct{}
@@ -93,6 +95,8 @@ type createWorkflowRequest struct {
 	ID                string              `json:"id"`
 	Input             string              `json:"input"`
 	RunMode           string              `json:"run_mode,omitempty"`
+	ProjectID         string              `json:"project_id,omitempty"`
+	MemoryWriteIntent bool                `json:"memory_write_intent,omitempty"`
 	TaskProfilePreset string              `json:"task_profile_preset,omitempty"`
 	TaskProfile       *taskProfileRequest `json:"task_profile,omitempty"`
 	SkillRefs         []workflowSkillRef  `json:"skill_refs,omitempty"`
@@ -458,11 +462,6 @@ func NewServer(config Config) (*Server, error) {
 	if err := validateMemoryManagementConfig(config.Memory); err != nil {
 		return nil, err
 	}
-	var memoryConfig *memoryRuntimeConfig
-	if config.Memory != nil {
-		copy := *config.Memory
-		memoryConfig = &copy
-	}
 	approvalKeychain, err := resolveAgentApprovalKeychainConfig(
 		config.AgentApprovalKeychainService,
 		config.AgentApprovalKeyID,
@@ -499,6 +498,15 @@ func NewServer(config Config) (*Server, error) {
 		_ = runs.Close()
 		return nil, err
 	}
+	var memoryConfig *memoryRuntime
+	if config.Memory != nil {
+		memoryConfig, err = newMemoryRuntime(config.Memory, runs)
+		if err != nil {
+			_ = workflows.Close()
+			_ = runs.Close()
+			return nil, err
+		}
+	}
 	health := llmkit.NewMemoryHealthStore(llmkit.HealthPolicy{})
 	runner := routingAgentRunner{
 		llmkitHome: resolved.LLMKitHome,
@@ -512,6 +520,7 @@ func NewServer(config Config) (*Server, error) {
 		providers:        providers,
 		skillCatalog:     config.SkillCatalog,
 		skillGateContext: config.SkillGateContext,
+		memory:           memoryConfig,
 	}
 	agentApprovals, err := newHostAgentApprovalService(runs, config.AgentApprovalCipher, runner, approvalKeychain)
 	if err != nil {
@@ -724,7 +733,13 @@ func safeSkillReason(reason skillkit.Reason) skillReasonResponse {
 
 func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	var req createWorkflowRequest
-	if !decodeJSON(w, r, &req) {
+	var decoded bool
+	if s.memory != nil {
+		decoded = decodeJSONStrict(w, r, &req)
+	} else {
+		decoded = decodeJSON(w, r, &req)
+	}
+	if !decoded {
 		return
 	}
 	if strings.TrimSpace(req.ID) == "" {
@@ -745,6 +760,24 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_skill_refs", err.Error())
 		return
+	}
+	var trustedMemoryIdentity memoryIdentity
+	if s.memory != nil {
+		_, identity, ok := s.authorizeWorkflowMemory(w, r, req.ProjectID, memoryRead)
+		if !ok {
+			return
+		}
+		if req.MemoryWriteIntent {
+			_, writeIdentity, writeOK := s.authorizeWorkflowMemory(w, r, req.ProjectID, memoryWriteExplicit)
+			if !writeOK {
+				return
+			}
+			if writeIdentity != identity {
+				writeMemoryError(w, http.StatusForbidden, "forbidden", "project memory access denied")
+				return
+			}
+		}
+		trustedMemoryIdentity = identity
 	}
 	operationCtx := r.Context()
 	var pendingShutdown *pendingShutdownTracker
@@ -772,6 +805,12 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(skillRefs) > 0 {
 		metadata["skill_refs"] = skillRefs
+	}
+	if s.memory != nil {
+		metadata[memoryTenantMetadataKey] = trustedMemoryIdentity.TenantID
+		metadata[memoryProjectMetadataKey] = req.ProjectID
+		metadata[memoryUserMetadataKey] = trustedMemoryIdentity.Subject
+		metadata[memoryWriteIntentMetadataKey] = req.MemoryWriteIntent
 	}
 	run := workflowkit.WorkflowRun{
 		ID:       req.ID,
@@ -1209,6 +1248,18 @@ func (s *Server) persistResumedAgentResult(ctx context.Context, run workflowkit.
 	}); err != nil {
 		return workflowkit.WorkflowRun{}, err
 	}
+	if s.memory != nil {
+		scope, scopeErr := resolveTrustedMemoryScope(run.Metadata)
+		enqueueErr := scopeErr
+		if enqueueErr == nil {
+			enqueueErr = s.memory.EnqueueExtraction(ctx, scope, outputRef, result.RunID.String())
+		}
+		if enqueueErr != nil {
+			s.memory.observer.RecordMemoryEvent(withMemoryObserverRunID(ctx, result.RunID.String()), "memory.degraded", map[string]any{
+				"memory.degraded_channels": []string{"extraction_enqueue"},
+			})
+		}
+	}
 	return s.workflows.Update(ctx, run.ID, func(current workflowkit.WorkflowRun) (workflowkit.WorkflowRun, error) {
 		pending := agentApprovalFromMetadata(current.Metadata)
 		if current.Status != workflowkit.StatusWaitingApproval || pending == nil || pending.CheckpointID != checkpointID {
@@ -1405,6 +1456,7 @@ func (s *Server) agentStep() workflowkit.Step {
 		providers:        s.providers,
 		skillCatalog:     s.skillCatalog,
 		skillGateContext: s.skillGateContext,
+		memory:           s.memory,
 	}
 	return hostAgentStep{
 		runner:    runner,
@@ -1426,21 +1478,9 @@ func (s hostAgentStep) Name() string {
 }
 
 func (s hostAgentStep) Run(ctx context.Context, run workflowkit.WorkflowRun) (workflowkit.StepResult, error) {
-	profile := taskProfileFromMetadata(run.Metadata["task_profile"])
-	request := agentcore.RunRequest{
-		Input: "Review input artifact " + run.InputRef,
-		Metadata: map[string]any{
-			"workflow_id":  run.ID,
-			"task_profile": profile,
-		},
-	}
-	// Preserve the resolved name@digest refs in the checkpoint request. Resume
-	// must reactivate this exact immutable selection, never rediscover by name.
-	if skillRefs, exists := run.Metadata["skill_refs"]; exists {
-		request.Metadata["skill_refs"] = skillRefs
-	}
-	if profile.NeedsTools {
-		request.AllowedPermissions = []policy.Permission{policy.PermissionWrite}
+	request, err := buildAgentRequestForWorkflow(run, s.runner.memory != nil)
+	if err != nil {
+		return workflowkit.StepResult{Status: workflowkit.StatusFailed, Error: err.Error()}, err
 	}
 	result, err := s.runner.RunDetailed(ctx, request)
 	if err != nil {
@@ -1485,6 +1525,7 @@ func (s hostAgentStep) Run(ctx context.Context, run workflowkit.WorkflowRun) (wo
 	}); err != nil {
 		return failedAgentStepResult(result, err), err
 	}
+	s.enqueueAgentExtraction(ctx, run, outputRef, result.RunID.String())
 
 	return workflowkit.StepResult{
 		Status:        workflowkit.StatusWaitingApproval,
@@ -1496,6 +1537,62 @@ func (s hostAgentStep) Run(ctx context.Context, run workflowkit.WorkflowRun) (wo
 			"agent_output_ref": outputRef,
 		},
 	}, nil
+}
+
+func buildAgentRequestForWorkflow(run workflowkit.WorkflowRun, memoryEnabled bool) (agentcore.RunRequest, error) {
+	profile := taskProfileFromMetadata(run.Metadata["task_profile"])
+	request := agentcore.RunRequest{
+		Input:    "Review input artifact " + run.InputRef,
+		Metadata: map[string]any{"workflow_id": run.ID, "task_profile": profile},
+	}
+	if skillRefs, exists := run.Metadata["skill_refs"]; exists {
+		request.Metadata["skill_refs"] = skillRefs
+	}
+	writeAllowed := profile.NeedsTools
+	if memoryEnabled {
+		scope, err := resolveTrustedMemoryScope(run.Metadata)
+		if err != nil {
+			return agentcore.RunRequest{}, err
+		}
+		userID := run.Metadata[memoryUserMetadataKey].(string)
+		writeIntent := run.Metadata[memoryWriteIntentMetadataKey].(bool)
+		request.UserID = userID
+		request.SessionID = run.ID
+		request.PolicyContext.TenantID = scope.TenantID
+		request.PolicyContext.Labels = map[string]string{"project_id": scope.SubjectID}
+		for key := range trustedMemoryMetadataKeys {
+			request.Metadata[key] = run.Metadata[key]
+		}
+		encodedProfile, err := json.Marshal(profile)
+		if err != nil {
+			return agentcore.RunRequest{}, fmt.Errorf("encode trusted task profile: %w", err)
+		}
+		var safeProfile map[string]any
+		if err := json.Unmarshal(encodedProfile, &safeProfile); err != nil {
+			return agentcore.RunRequest{}, fmt.Errorf("decode trusted task profile: %w", err)
+		}
+		request.Metadata["task_profile"] = safeProfile
+		writeAllowed = writeAllowed || writeIntent
+	}
+	if writeAllowed {
+		request.AllowedPermissions = []policy.Permission{policy.PermissionWrite}
+	}
+	return request, nil
+}
+
+func (s hostAgentStep) enqueueAgentExtraction(ctx context.Context, run workflowkit.WorkflowRun, outputRef, agentRunID string) {
+	if s.runner.memory == nil {
+		return
+	}
+	scope, err := resolveTrustedMemoryScope(run.Metadata)
+	if err == nil {
+		err = s.runner.memory.EnqueueExtraction(ctx, scope, outputRef, agentRunID)
+	}
+	if err != nil {
+		s.runner.memory.observer.RecordMemoryEvent(withMemoryObserverRunID(ctx, agentRunID), "memory.degraded", map[string]any{
+			"memory.degraded_channels": []string{"extraction_enqueue"},
+		})
+	}
 }
 
 func failedAgentStepResult(result *agentcore.RunResult, err error) workflowkit.StepResult {
@@ -1541,6 +1638,7 @@ type routingAgentRunner struct {
 	providers        map[string]goagentadapter.ProviderClient
 	skillCatalog     *skillkit.Catalog
 	skillGateContext skillkit.GateContext
+	memory           *memoryRuntime
 }
 
 func (r routingAgentRunner) RunDetailed(ctx context.Context, req agentcore.RunRequest) (*agentcore.RunResult, error) {
@@ -1560,6 +1658,9 @@ func (r routingAgentRunner) RunDetailed(ctx context.Context, req agentcore.RunRe
 	if err != nil {
 		return nil, err
 	}
+	if r.memory != nil {
+		ctx = withMemoryObserverRunID(ctx, req.RunID.String())
+	}
 	return agent.RunDetailed(ctx, req)
 }
 
@@ -1578,6 +1679,9 @@ func (r routingAgentRunner) ResumeDetailed(ctx context.Context, checkpoint agent
 	agent, err := r.newAgent(workflowID, checkpoint.RunID, checkpoint.LLMCalls, profile, activation)
 	if err != nil {
 		return nil, err
+	}
+	if r.memory != nil {
+		ctx = withMemoryObserverRunID(ctx, checkpoint.RunID)
 	}
 	return agent.ResumeDetailed(ctx, checkpoint, resolutions)
 }
@@ -1630,6 +1734,13 @@ func (r routingAgentRunner) newAgent(workflowID, agentRunID string, completedLLM
 		}))
 	}
 	options = append(options, r.toolOptions(profile)...)
+	if r.memory != nil {
+		options = append(options,
+			agentcore.WithPromptBlocks([]prompt.Block{memoryagentadapter.GuardPromptBlock()}),
+			agentcore.WithContextProjector(r.memory.Projector()),
+			agentcore.WithToolProvider(r.memory.ToolProvider()),
+		)
+	}
 	return agentcore.NewAgent(options...)
 }
 

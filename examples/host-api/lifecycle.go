@@ -60,6 +60,7 @@ func (s *hostAPIService) Start(ctx context.Context) error {
 
 	s.server.StartQueuedWorkerWithContexts(s.intakeCtx, s.executionCtx)
 	s.server.StartAgentApprovalJanitor(s.intakeCtx)
+	s.server.StartMemoryWorkers(s.intakeCtx, s.executionCtx)
 	go s.serve()
 
 	_, _ = fmt.Fprintf(s.stdout, "host_api_addr=%s\n", listener.Addr().String())
@@ -91,6 +92,7 @@ func (s *hostAPIService) Drain(ctx context.Context) error {
 		func() error { return s.requests.Wait(ctx) },
 		func() error { return s.server.WaitQueuedWorker(ctx) },
 		func() error { return s.server.WaitAgentApprovalJanitor(ctx) },
+		func() error { return s.server.WaitMemoryWorkers(ctx) },
 		func() error { return s.server.executions.Wait(ctx) },
 	}
 	results := make(chan error, len(operations))
@@ -128,6 +130,9 @@ func (s *hostAPIService) ForceStop(ctx context.Context) error {
 		joined = errors.Join(joined, err)
 	}
 	if err := s.server.WaitAgentApprovalJanitor(ctx); err != nil {
+		joined = errors.Join(joined, err)
+	}
+	if err := s.server.WaitMemoryWorkers(ctx); err != nil {
 		joined = errors.Join(joined, err)
 	}
 	return joined

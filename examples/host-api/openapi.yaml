@@ -956,6 +956,13 @@ components:
           type: string
         run_mode:
           $ref: '#/components/schemas/RunMode'
+        project_id:
+          type: string
+          description: Required when the optional governed project-memory runtime is enabled.
+        memory_write_intent:
+          type: boolean
+          default: false
+          description: Requests the separately authorized explicit project-memory write tool.
         task_profile_preset:
           $ref: '#/components/schemas/TaskProfilePreset'
         task_profile:

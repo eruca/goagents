@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/eruca/goagents/memorykit"
 	"github.com/eruca/goagents/memorykit/memorystore"
@@ -189,7 +188,7 @@ func TestMemoryAuthorizationNewServerRejectsIncompleteSecurityConfig(t *testing.
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			copy := *valid
+			copy := valid.memoryRuntimeConfig
 			test.mutate(&copy)
 			server, err := NewServer(Config{RuntimeHome: t.TempDir(), Memory: &copy})
 			if err == nil {
@@ -202,7 +201,7 @@ func TestMemoryAuthorizationNewServerRejectsIncompleteSecurityConfig(t *testing.
 
 func TestMemoryAuthorizationNewServerRegistersOnlyConfiguredRoutes(t *testing.T) {
 	configured := validMemoryRuntimeConfig(t, validMemoryAuthorizer())
-	server, err := NewServer(Config{RuntimeHome: t.TempDir(), Memory: configured})
+	server, err := NewServer(Config{RuntimeHome: t.TempDir(), Memory: &configured.memoryRuntimeConfig})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,19 +229,17 @@ func newMemoryHandlerServer(t *testing.T, authorizer MemoryAuthorizer) (*Server,
 	return &Server{memory: config}, config.Store.(*recordingMemoryStore)
 }
 
-func validMemoryRuntimeConfig(t *testing.T, authorizer MemoryAuthorizer) *memoryRuntimeConfig {
+func validMemoryRuntimeConfig(t *testing.T, authorizer MemoryAuthorizer) *memoryRuntime {
 	t.Helper()
-	base, err := memorystore.New(memoryLimitsForTest())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return &memoryRuntimeConfig{
-		Store: &recordingMemoryStore{Store: base}, Authorizer: authorizer,
-		ContentValidator: &acceptingMemoryContentValidator{}, Limits: memoryLimitsForTest(),
-		NewID:            func() string { return uuid.NewString() },
-		Now:              func() time.Time { return time.Date(2026, 7, 21, 8, 0, 0, 0, time.UTC) },
-		MaxHTTPBodyBytes: 4096,
-	}
+	config := validCompleteMemoryRuntimeConfig(t)
+	base := config.Store.(*memorystore.Store)
+	recording := &recordingMemoryStore{Store: base}
+	config.Store = recording
+	config.Authorizer = authorizer
+	config.AutoRecall = newMemoryRuntimeRecaller(t, recording)
+	config.DeepRecall = newMemoryRuntimeRecaller(t, recording)
+	config.NewID = func() string { return uuid.NewString() }
+	return &memoryRuntime{memoryRuntimeConfig: *config}
 }
 
 func validMemoryAuthorizer() *recordingMemoryAuthorizer {

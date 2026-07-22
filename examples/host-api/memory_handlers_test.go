@@ -535,7 +535,7 @@ func TestMemoryHandlersCorrectUnorderedSourcesWithRealPostgres(t *testing.T) {
 		Now:              func() time.Time { return time.Date(2026, 7, 21, 8, 0, 0, 0, time.UTC) },
 		MaxHTTPBodyBytes: 4096,
 	}
-	server := &Server{memory: config}
+	server := &Server{memory: &memoryRuntime{memoryRuntimeConfig: *config}}
 	created := memoryRequest(t, server.Handler(), http.MethodPost, "/projects/project-a/memories",
 		`{"kind":"fact","key":"pg-source-set","content":"content","reason":"create","importance":1,"confidence":1,"sources":[{"kind":"todo","ref":"todo:2","evidence_hash":"hash:2"},{"kind":"git","ref":"commit:1","evidence_hash":"hash:1"}]}`)
 	if created.Code != http.StatusCreated {
@@ -854,13 +854,13 @@ func TestMemoryHandlersCreateIdempotencyUsesScopeBoundDeterministicID(t *testing
 		t.Fatal(err)
 	}
 	shared := &recordingMemoryStore{Store: base}
-	newConfig := func(identity memoryIdentity, now time.Time) *memoryRuntimeConfig {
-		return &memoryRuntimeConfig{
+	newConfig := func(identity memoryIdentity, now time.Time) *memoryRuntime {
+		return &memoryRuntime{memoryRuntimeConfig: memoryRuntimeConfig{
 			Store:            shared,
 			Authorizer:       &recordingMemoryAuthorizer{identity: identity},
 			ContentValidator: &acceptingMemoryContentValidator{}, Limits: limits,
 			NewID: func() string { return uuid.NewString() }, Now: func() time.Time { return now }, MaxHTTPBodyBytes: 4096,
-		}
+		}}
 	}
 	firstServer := &Server{memory: newConfig(memoryIdentity{TenantID: "tenant-a", Subject: "user-a"}, time.Date(2026, 7, 21, 8, 0, 0, 0, time.UTC))}
 	secondServer := &Server{memory: newConfig(memoryIdentity{TenantID: "tenant-a", Subject: "user-a"}, time.Date(2026, 7, 21, 9, 0, 0, 0, time.UTC))}

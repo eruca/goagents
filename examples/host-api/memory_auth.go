@@ -39,6 +39,8 @@ type memoryRuntimeConfig struct {
 	DeepRecall         *memorykit.Recaller
 	EmbeddingWorker    *memorykit.EmbeddingWorker
 	ExtractionWorker   *memorykit.ExtractionWorker
+	ExtractionJobs     memorykit.ExtractionJobStore
+	ExtractorID        string
 	NewID              func() string
 	Now                func() time.Time
 	MaxHTTPBodyBytes   int64
@@ -78,6 +80,10 @@ func nilMemoryDependency(value any) bool {
 // Tenant and actor come from the verified authorizer result; project comes only
 // from the trusted route selected by net/http.
 func (s *Server) authorizeProjectMemory(w http.ResponseWriter, r *http.Request, capability memoryCapability) (memorykit.Scope, memoryIdentity, bool) {
+	return s.authorizeWorkflowMemory(w, r, r.PathValue("projectID"), capability)
+}
+
+func (s *Server) authorizeWorkflowMemory(w http.ResponseWriter, r *http.Request, projectID string, capability memoryCapability) (memorykit.Scope, memoryIdentity, bool) {
 	if s.memory == nil || nilMemoryDependency(s.memory.Authorizer) {
 		writeMemoryError(w, http.StatusServiceUnavailable, "memory_unavailable", "project memory is unavailable")
 		return memorykit.Scope{}, memoryIdentity{}, false
@@ -88,7 +94,6 @@ func (s *Server) authorizeProjectMemory(w http.ResponseWriter, r *http.Request, 
 		writeMemoryError(w, http.StatusUnauthorized, "unauthorized", "memory authentication required")
 		return memorykit.Scope{}, memoryIdentity{}, false
 	}
-	projectID := r.PathValue("projectID")
 	if strings.TrimSpace(projectID) == "" {
 		writeMemoryError(w, http.StatusForbidden, "forbidden", "project memory access denied")
 		return memorykit.Scope{}, memoryIdentity{}, false
