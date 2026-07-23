@@ -72,9 +72,12 @@ only when trusted Host metadata grants explicit write intent.
 
 A typed recoverable embedding/vector failure degrades to the remaining
 exact/full-text channels and records only content-free channel/ID metadata.
-Invalid Scope, policy, candidate shape, or Store integrity fails closed. Raw
-query text, content, vectors, bearer headers, provider payloads, and Artifact
-bodies are not valid log/event/error fields.
+If the entire Recall Store returns a typed recoverable failure, the Agent
+Projector injects no memory, records a content-free degradation marker, and
+continues through the next projector/main task path. Invalid Scope or
+authorization, policy, candidate shape, and Store integrity still fail closed.
+Raw query text, content, vectors, bearer headers, provider payloads, and
+Artifact bodies are not valid log/event/error fields.
 
 ## Write paths
 
@@ -87,9 +90,12 @@ bodies are not valid log/event/error fields.
   Deterministic job/candidate identities make retries idempotent.
 
 Explicit write failure is truthful: the tool returns `项目记忆未保存`, marks the
-result as an error, and never returns success wording or the rejected content.
-An extraction enqueue failure does not roll back an already successful Agent
-run; it records a content-free degradation event for operator follow-up.
+result as an error, and sets a request-scoped content-free failure flag. Hosts
+compose the ToolProvider's output validator so any later model success claim is
+rejected with the same fixed error before an output is persisted. A later
+successful write in that run does not clear the failure flag. An extraction
+enqueue failure does not roll back an already successful Agent run; it records
+a content-free degradation event for operator follow-up.
 
 ## Lifecycle and operations
 

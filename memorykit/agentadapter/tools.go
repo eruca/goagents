@@ -23,7 +23,11 @@ const (
 	searchMemorySchema = `{"type":"object","additionalProperties":false,"required":["query"],"properties":{"query":{"type":"string","minLength":1},"key":{"type":"string"},"kinds":{"type":"array","items":{"enum":["fact","decision","constraint","lesson"]},"uniqueItems":true}}}`
 	readMemorySchema   = `{"type":"object","additionalProperties":false,"required":["memory_id"],"properties":{"memory_id":{"type":"string","format":"uuid"}}}`
 	writeMemorySchema  = `{"type":"object","additionalProperties":false,"required":["kind","key","content","reason"],"properties":{"kind":{"enum":["fact","decision","constraint","lesson"]},"key":{"type":"string","minLength":1},"content":{"type":"string","minLength":1},"valid_until":{"type":"string","format":"date-time"},"reason":{"type":"string","minLength":1}}}`
+
+	memoryWriteFailedMetadataKey = "memorykit.agentadapter.write_failed"
 )
+
+var errMemoryWriteOutputFailed = errors.New("项目记忆未保存")
 
 type ExplicitWriteAllowed func(agentcore.RunRequest) bool
 
@@ -88,21 +92,40 @@ func (p *ToolProvider) Tools(ctx context.Context, request agentcore.RunRequest) 
 	return registered, nil
 }
 
+// OutputValidator converts any request-scoped write failure into one stable
+// final-output error without inspecting or echoing model content.
+func (p *ToolProvider) OutputValidator() agentcore.OutputValidator {
+	return agentcore.OutputValidatorFunc(func(ctx context.Context, request agentcore.OutputValidationRequest) (*agentcore.OutputValidationResult, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		value, exists := request.Metadata[memoryWriteFailedMetadataKey]
+		if !exists {
+			return nil, nil
+		}
+		failed, ok := value.(bool)
+		if !ok || failed {
+			return nil, errMemoryWriteOutputFailed
+		}
+		return nil, nil
+	})
+}
+
 type requestScopedTool struct {
 	spec tools.Spec
-	run  func(context.Context, json.RawMessage) (*tools.Result, error)
+	run  func(context.Context, json.RawMessage, tools.Env) (*tools.Result, error)
 }
 
 func (t requestScopedTool) Spec() tools.Spec { return t.spec }
 
-func (t requestScopedTool) Execute(ctx context.Context, input json.RawMessage, _ tools.Env) (*tools.Result, error) {
+func (t requestScopedTool) Execute(ctx context.Context, input json.RawMessage, env tools.Env) (*tools.Result, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if err := t.spec.Schema.ValidateInput(input); err != nil {
 		return nil, fmt.Errorf("%w: invalid %s input", memorykit.ErrInvalidMemory, t.spec.Name)
 	}
-	return t.run(ctx, append(json.RawMessage(nil), input...))
+	return t.run(ctx, append(json.RawMessage(nil), input...), env)
 }
 
 func (p *ToolProvider) newSearchTool(scope memorykit.Scope) tools.Tool {
@@ -111,7 +134,7 @@ func (p *ToolProvider) newSearchTool(scope memorykit.Scope) tools.Tool {
 			Name: "search_memory", Description: "Search effective project memory by query and optional filters.",
 			Permission: policy.PermissionRead, Schema: tools.Schema{JSONSchema: json.RawMessage(searchMemorySchema)},
 		},
-		run: func(ctx context.Context, input json.RawMessage) (*tools.Result, error) {
+		run: func(ctx context.Context, input json.RawMessage, _ tools.Env) (*tools.Result, error) {
 			var parsed struct {
 				Query string           `json:"query"`
 				Key   string           `json:"key"`
@@ -162,7 +185,7 @@ func (p *ToolProvider) newReadTool(scope memorykit.Scope) tools.Tool {
 			Name: "read_memory", Description: "Read one effective project memory record by ID.",
 			Permission: policy.PermissionRead, Schema: tools.Schema{JSONSchema: json.RawMessage(readMemorySchema)},
 		},
-		run: func(ctx context.Context, input json.RawMessage) (*tools.Result, error) {
+		run: func(ctx context.Context, input json.RawMessage, _ tools.Env) (*tools.Result, error) {
 			var parsed struct {
 				MemoryID string `json:"memory_id"`
 			}
@@ -253,7 +276,7 @@ func (p *ToolProvider) newWriteTool(scope memorykit.Scope, actor string, runID a
 			Name: "remember_project_memory", Description: "Save an explicit project memory request.",
 			Permission: policy.PermissionWrite, Schema: tools.Schema{JSONSchema: json.RawMessage(writeMemorySchema)},
 		},
-		run: func(ctx context.Context, input json.RawMessage) (*tools.Result, error) {
+		run: func(ctx context.Context, input json.RawMessage, env tools.Env) (*tools.Result, error) {
 			var parsed struct {
 				Kind       memorykit.Kind `json:"kind"`
 				Key        string         `json:"key"`
@@ -295,7 +318,7 @@ func (p *ToolProvider) newWriteTool(scope memorykit.Scope, actor string, runID a
 				return nil, contextErr
 			}
 			if validationErr != nil {
-				return memoryWriteFailure(), nil
+				return memoryWriteFailure(env), nil
 			}
 
 			expectation := writeExpectation{
@@ -313,7 +336,7 @@ func (p *ToolProvider) newWriteTool(scope memorykit.Scope, actor string, runID a
 				return memoryWriteSuccess(current)
 			}
 			if !errors.Is(getErr, memorykit.ErrNotFound) {
-				return memoryWriteFailure(), nil
+				return memoryWriteFailure(env), nil
 			}
 
 			now := p.cfg.Now()
@@ -347,7 +370,7 @@ func (p *ToolProvider) newWriteTool(scope memorykit.Scope, actor string, runID a
 					return nil, contextErr
 				}
 				if getErr != nil {
-					return memoryWriteFailure(), nil
+					return memoryWriteFailure(env), nil
 				}
 				if err := validateReplayMemory(current, expectation, p.cfg.Limits); err != nil {
 					return nil, err
@@ -355,7 +378,7 @@ func (p *ToolProvider) newWriteTool(scope memorykit.Scope, actor string, runID a
 				return memoryWriteSuccess(current)
 			}
 			if createErr != nil {
-				return memoryWriteFailure(), nil
+				return memoryWriteFailure(env), nil
 			}
 			if err := validateInitialWriteMemory(created, request, p.cfg.Limits); err != nil {
 				return nil, err
@@ -544,6 +567,9 @@ func memoryReadFailure() *tools.Result {
 	return &tools.Result{ForLLM: "项目记忆暂时无法读取", ForUser: "项目记忆暂时无法读取", IsError: true}
 }
 
-func memoryWriteFailure() *tools.Result {
+func memoryWriteFailure(env tools.Env) *tools.Result {
+	if env.Metadata != nil {
+		env.Metadata[memoryWriteFailedMetadataKey] = true
+	}
 	return &tools.Result{ForLLM: "项目记忆未保存", ForUser: "项目记忆未保存", IsError: true}
 }

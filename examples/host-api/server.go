@@ -1742,6 +1742,7 @@ func (r routingAgentRunner) newAgent(workflowID, agentRunID string, completedLLM
 			agentcore.WithPromptBlocks([]prompt.Block{memoryagentadapter.GuardPromptBlock()}),
 			agentcore.WithContextProjector(r.memory.Projector()),
 			agentcore.WithToolProvider(r.memory.ToolProvider()),
+			agentcore.WithOutputValidator(r.memory.ToolProvider().OutputValidator()),
 		)
 	}
 	return agentcore.NewAgent(options...)

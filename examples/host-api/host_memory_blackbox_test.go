@@ -21,6 +21,7 @@ import (
 	"github.com/eruca/goagents/goagent/ports"
 	"github.com/eruca/goagents/memorykit"
 	"github.com/eruca/goagents/memorykit/pgstore"
+	"github.com/eruca/goagents/workflowkit"
 	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -36,6 +37,7 @@ const (
 	blackboxForeignContent   = "FOREIGN PROJECT SECRET SENTINEL"
 	blackboxOtherTenant      = "OTHER TENANT SECRET SENTINEL"
 	blackboxBearerSentinel   = "Bearer BLACKBOX-BEARER-SENTINEL"
+	blackboxFabricatedWrite  = "FABRICATED WRITE SUCCESS SENTINEL"
 )
 
 func TestHostMemoryPostgresBlackBox(t *testing.T) {
@@ -216,11 +218,29 @@ func runHostMemoryPostgresBlackBox(t *testing.T) {
 		t.Fatalf("erase revision = %#v, %v", revisions, err)
 	}
 
-	rejected := runBlackboxWorkflow(t, server2, tokenAWriter, "blackbox-write-rejected", blackboxRejectedInput, projectA, true)
-	assertBlackboxArtifact(t, server2, rejected.OutputRef, "write rejected")
+	rejectedResponse := blackboxJSONRequest(t, server2.Handler(), tokenAWriter, http.MethodPost, "/workflows", map[string]any{
+		"id": "blackbox-write-rejected", "input": blackboxRejectedInput, "run_mode": "sync",
+		"project_id": projectA, "memory_write_intent": true,
+	})
+	if rejectedResponse.Code != http.StatusInternalServerError ||
+		!strings.Contains(rejectedResponse.Body.String(), "项目记忆未保存") ||
+		strings.Contains(rejectedResponse.Body.String(), "项目记忆已保存") ||
+		strings.Contains(rejectedResponse.Body.String(), blackboxFabricatedWrite) {
+		t.Fatalf("rejected workflow status=%d body=%s", rejectedResponse.Code, rejectedResponse.Body.String())
+	}
+	rejected, err := server2.workflows.Get(t.Context(), "blackbox-write-rejected")
+	if err != nil || rejected.Status != workflowkit.StatusFailed || rejected.AgentRunID == "" ||
+		!strings.Contains(rejected.Error, "项目记忆未保存") ||
+		strings.Contains(rejected.Error, "项目记忆已保存") ||
+		strings.Contains(rejected.Error, blackboxFabricatedWrite) {
+		t.Fatalf("rejected workflow = %#v, %v", rejected, err)
+	}
+	if _, err := server2.artifacts.Get(t.Context(), "artifact:"+rejected.AgentRunID+":agent-output"); err == nil {
+		t.Fatal("rejected workflow persisted a model output Artifact")
+	}
 	rejectedMessages := blackboxMessagesText(llmB.Requests("blackbox-write-rejected"))
-	if !strings.Contains(rejectedMessages, "项目记忆未保存") || strings.Contains(rejectedMessages, "项目记忆已保存") {
-		t.Fatalf("write failure messages were not truthful: %s", rejectedMessages)
+	if !strings.Contains(rejectedMessages, "项目记忆未保存") || !llmB.ReturnedFabricatedWrite() {
+		t.Fatalf("blackbox did not exercise a lying final response: %s", rejectedMessages)
 	}
 	if containsBlackboxMemory(t, store2, scopeA, blackboxRejectedContent) {
 		t.Fatal("rejected explicit write reached PostgreSQL")
@@ -452,9 +472,10 @@ func (blackboxExtractor) Extract(context.Context, memorykit.ExtractionRequest) (
 }
 
 type blackboxLLM struct {
-	mu        sync.Mutex
-	requests  map[string][]ports.ChatRequest
-	foreignID string
+	mu                      sync.Mutex
+	requests                map[string][]ports.ChatRequest
+	foreignID               string
+	returnedFabricatedWrite bool
 }
 
 func newBlackboxLLM() *blackboxLLM {
@@ -484,7 +505,10 @@ func (l *blackboxLLM) Chat(_ context.Context, request ports.ChatRequest) (*ports
 		if !hasToolObservation(request.Messages) {
 			return blackboxWriteCall("blackbox.rejected", blackboxRejectedContent), nil
 		}
-		return &ports.ChatResponse{Content: "write rejected"}, nil
+		l.mu.Lock()
+		l.returnedFabricatedWrite = true
+		l.mu.Unlock()
+		return &ports.ChatResponse{Content: "项目记忆已保存 " + blackboxFabricatedWrite}, nil
 	case "blackbox-malicious-probe":
 		switch blackboxToolObservationCount(request.Messages) {
 		case 0:
@@ -515,6 +539,12 @@ func (l *blackboxLLM) Requests(scenario string) []ports.ChatRequest {
 		result[index] = copyBlackboxChatRequest(requests[index])
 	}
 	return result
+}
+
+func (l *blackboxLLM) ReturnedFabricatedWrite() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.returnedFabricatedWrite
 }
 
 func blackboxWriteCall(key, content string) *ports.ChatResponse {

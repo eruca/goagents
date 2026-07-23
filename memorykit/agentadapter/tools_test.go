@@ -872,27 +872,148 @@ func TestRememberMemoryFailsTruthfullyAndDoesNotLeakContent(t *testing.T) {
 	for _, test := range []struct {
 		name      string
 		validator *acceptContentValidator
-		storeErr  error
+		store     *toolLifecycleStore
 		wantCalls int
 	}{
-		{name: "validator", validator: &acceptContentValidator{err: errors.New("secret rejected")}, wantCalls: 0},
-		{name: "store", validator: &acceptContentValidator{}, storeErr: errors.New("secret storage failure"), wantCalls: 1},
+		{
+			name: "validator", validator: &acceptContentValidator{err: errors.New("secret rejected")},
+			store: &toolLifecycleStore{delegate: newToolMemoryStore(t)}, wantCalls: 0,
+		},
+		{
+			name: "initial get", validator: &acceptContentValidator{},
+			store: &toolLifecycleStore{getErr: errors.New("secret initial read failure")}, wantCalls: 0,
+		},
+		{
+			name: "conflict reread", validator: &acceptContentValidator{},
+			store: &toolLifecycleStore{
+				getResults: []toolGetResult{
+					{err: memorykit.ErrNotFound}, {err: errors.New("secret conflict read failure")},
+				},
+				createErr: memorykit.ErrConflict,
+			},
+			wantCalls: 1,
+		},
+		{
+			name: "create", validator: &acceptContentValidator{},
+			store: &toolLifecycleStore{
+				delegate: newToolMemoryStore(t), createErr: errors.New("secret storage failure"),
+			},
+			wantCalls: 1,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			store := &toolLifecycleStore{delegate: newToolMemoryStore(t), createErr: test.storeErr}
-			provider := newToolProviderForTest(t, store, newToolRecaller(t, &toolRecallStore{}), test.validator)
+			provider := newToolProviderForTest(t, test.store, newToolRecaller(t, &toolRecallStore{}), test.validator)
 			registered, err := provider.Tools(context.Background(), agentcore.RunRequest{
 				RunID: agentcore.NewRunID(), UserID: "user-1", Metadata: trustedMetadata("tenant-1", "project-1", true),
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
-			result, executeErr := findTool(t, registered, "remember_project_memory").Execute(context.Background(), json.RawMessage(`{"kind":"fact","key":"secret","content":"`+secret+`","reason":"explicit"}`), ports.ToolEnv{})
+			metadata := map[string]any{"unrelated": "preserved"}
+			result, executeErr := findTool(t, registered, "remember_project_memory").Execute(context.Background(), json.RawMessage(`{"kind":"fact","key":"secret","content":"`+secret+`","reason":"explicit"}`), ports.ToolEnv{Metadata: metadata})
 			if executeErr != nil || result == nil || !result.IsError || result.ForUser != "项目记忆未保存" ||
-				strings.Contains(result.ForUser+result.ForLLM, "已保存") || strings.Contains(result.ForUser+result.ForLLM, secret) || len(store.createRequests) != test.wantCalls {
-				t.Fatalf("result=%#v err=%v createCalls=%d", result, executeErr, len(store.createRequests))
+				strings.Contains(result.ForUser+result.ForLLM, "已保存") || strings.Contains(result.ForUser+result.ForLLM, secret) ||
+				len(test.store.createRequests) != test.wantCalls || metadata[memoryWriteFailedMetadataKey] != true ||
+				metadata["unrelated"] != "preserved" {
+				t.Fatalf("result=%#v err=%v metadata=%#v createCalls=%d", result, executeErr, metadata, len(test.store.createRequests))
+			}
+			_, validateErr := provider.OutputValidator().ValidateOutput(context.Background(), agentcore.OutputValidationRequest{
+				Content: "arbitrary model success " + secret, Metadata: metadata,
+			})
+			if validateErr == nil || validateErr.Error() != "项目记忆未保存" ||
+				strings.Contains(validateErr.Error(), secret) {
+				t.Fatalf("ValidateOutput() error = %v", validateErr)
 			}
 		})
+	}
+}
+
+func TestMemoryWriteOutputValidatorAllowsCleanRunsAndFailsClosedOnInvalidMetadata(t *testing.T) {
+	provider := newToolProviderForTest(t, newToolMemoryStore(t), newToolRecaller(t, &toolRecallStore{}), &acceptContentValidator{})
+	validator := provider.OutputValidator()
+	for name, metadata := range map[string]map[string]any{
+		"absent": {},
+		"false":  {memoryWriteFailedMetadataKey: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			result, err := validator.ValidateOutput(context.Background(), agentcore.OutputValidationRequest{
+				Content: "unchanged final content", Metadata: metadata,
+			})
+			if err != nil || result != nil {
+				t.Fatalf("ValidateOutput() = %#v, %v", result, err)
+			}
+		})
+	}
+
+	const secret = "private-model-output"
+	for name, metadata := range map[string]map[string]any{
+		"failed":  {memoryWriteFailedMetadataKey: true},
+		"invalid": {memoryWriteFailedMetadataKey: secret},
+	} {
+		t.Run(name, func(t *testing.T) {
+			result, err := validator.ValidateOutput(context.Background(), agentcore.OutputValidationRequest{
+				Content: secret, Metadata: metadata,
+			})
+			if result != nil || err == nil || err.Error() != "项目记忆未保存" ||
+				strings.Contains(err.Error(), secret) {
+				t.Fatalf("ValidateOutput() = %#v, %v", result, err)
+			}
+		})
+	}
+}
+
+func TestMemoryWriteFailureMarkerIsMonotonicAfterLaterSuccess(t *testing.T) {
+	store := &toolLifecycleStore{delegate: newToolMemoryStore(t)}
+	contentValidator := &acceptContentValidator{err: errors.New("first write rejected")}
+	provider := newToolProviderForTest(t, store, newToolRecaller(t, &toolRecallStore{}), contentValidator)
+	registered, err := provider.Tools(context.Background(), agentcore.RunRequest{
+		RunID: agentcore.NewRunID(), UserID: "user-1",
+		Metadata: trustedMetadata("tenant-1", "project-1", true),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := findTool(t, registered, "remember_project_memory")
+	metadata := make(map[string]any)
+	failed, err := write.Execute(context.Background(), json.RawMessage(
+		`{"kind":"fact","key":"first","content":"rejected","reason":"explicit"}`,
+	), ports.ToolEnv{Metadata: metadata})
+	if err != nil || failed == nil || !failed.IsError || metadata[memoryWriteFailedMetadataKey] != true {
+		t.Fatalf("failed write = %#v, %v, metadata=%#v", failed, err, metadata)
+	}
+
+	contentValidator.mu.Lock()
+	contentValidator.err = nil
+	contentValidator.mu.Unlock()
+	succeeded, err := write.Execute(context.Background(), json.RawMessage(
+		`{"kind":"fact","key":"second","content":"accepted","reason":"explicit"}`,
+	), ports.ToolEnv{Metadata: metadata})
+	if err != nil || succeeded == nil || succeeded.IsError || metadata[memoryWriteFailedMetadataKey] != true {
+		t.Fatalf("successful write = %#v, %v, metadata=%#v", succeeded, err, metadata)
+	}
+}
+
+func TestRememberMemoryFailureKeepsToolResultWithNilExecutionMetadata(t *testing.T) {
+	provider := newToolProviderForTest(
+		t,
+		&toolLifecycleStore{delegate: newToolMemoryStore(t)},
+		newToolRecaller(t, &toolRecallStore{}),
+		&acceptContentValidator{err: errors.New("rejected")},
+	)
+	registered, err := provider.Tools(context.Background(), agentcore.RunRequest{
+		RunID: agentcore.NewRunID(), UserID: "user-1",
+		Metadata: trustedMetadata("tenant-1", "project-1", true),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := findTool(t, registered, "remember_project_memory").Execute(
+		context.Background(),
+		json.RawMessage(`{"kind":"fact","key":"nil-env","content":"rejected","reason":"explicit"}`),
+		ports.ToolEnv{},
+	)
+	if err != nil || result == nil || !result.IsError || result.ForUser != "项目记忆未保存" {
+		t.Fatalf("result=%#v err=%v", result, err)
 	}
 }
 

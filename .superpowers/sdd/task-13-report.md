@@ -81,10 +81,37 @@ embedding。根因是 Host 真实 PG handler 测试创建唯一租户后没有�
 后续重复运行结束时没有 active、非空正文或 source 残留；保留的 inactive
 空内容审计墓碑符合 Erase 语义。
 
+### 独立 review 修复
+
+最终独立 review 指出原四策略 ablation 在测试侧自行生成候选、计算 cosine
+并用布尔并集合并 channel，绕开了生产 `Recaller` 的候选校验、RRF 和预算
+裁剪。先新增 external-package 验收测试并调用尚不存在的
+`runProductionEvalAblations`，得到编译 RED。修复后固定 corpus 通过稳定
+UUID 映射写入真实 `memorystore.Store`；四个显式 `RecallPolicy` 使用相同
+channel limit、`MaxItems`、`MaxTokens`、deadline、RRFK 和 embedding profile，
+全部调用生产 `Recaller.Recall`。确定性 fake Embedder 只生成 3D query
+embedding，候选生成、Scope/status/effective 过滤、相似度、RRF、去重和预算
+均由生产代码执行。旧 `runEvalPolicy`、自定义 cosine 和 channel union 已删除，
+固定 corpus 内容/version 无 diff。
+
+review 同时指出写失败 truthfulness 仍依赖模型配合。adapter 测试先要求
+`ToolProvider.OutputValidator()` 和私有失败 key，得到未定义编译 RED；随后
+真实 Host 黑盒让 fake LLM 在失败 observation 后故意返回“项目记忆已保存”，
+得到 HTTP 202、waiting approval 且已写 agent-output Artifact 的业务 RED。
+
+修复后，`remember_project_memory` 的四个 recoverable 写失败分支都会在非 nil
+`tools.Env.Metadata` 中单调写入一个内容无关 bool。ToolProvider 的最窄 output
+validator 对 true 或非法类型返回固定 `项目记忆未保存`，不读取或回显模型
+content；缺失/false 不影响 clean run，generic nil metadata 仍返回原
+`IsError:true` tool result。Host memory composition 显式安装该 validator。
+同一 run 后续写成功不会清除失败标记，approval resume/direct runner 全套测试
+继续通过，`agentcore` 无修改。
+
 ## 固定语料与四策略结果
 
 语料版本为 `project-memory-v1`，包含 6 条 memory 和 4 个 case。所有策略
-使用同一份语料、相同预算和相同 forbidden 集合：
+使用同一份真实 `memorystore` corpus、生产 `Recaller`、相同预算和相同
+forbidden 集合：
 
 | 策略 | Cases | ExpectedFound / Total | ForbiddenInjected / Total | Recall@budget | False injection |
 |---|---:|---:|---:|---:|---:|
@@ -94,8 +121,11 @@ embedding。根因是 Host 真实 PG handler 测试创建唯一租户后没有�
 | fused | 4 | 2 / 2 | 0 / 4 | 1 | 0 |
 
 `fused` 恢复了 semantic-only case，且没有注入其他项目、candidate 或 inactive
-negative。该 harness 用于固定回归，不宣称等价于 PostgreSQL 的生产排序；
-真实 PostgreSQL 黑盒另行覆盖 vector 和 FTS 降级路径。
+negative。keyword case 由通用 query/key token overlap 生成 exact key 后进入
+生产 exact channel；semantic-only case 只经生产 vector channel 恢复；
+`fused` 走生产 RRF。每个 case 另有 `len(result) <= MaxItems` 断言。该
+memorystore harness 固定生产 Recaller 语义；真实 PostgreSQL 黑盒另行覆盖
+pgstore vector 和 FTS 降级路径。
 
 ## 真实 PostgreSQL 黑盒覆盖
 
@@ -110,7 +140,8 @@ LLM，覆盖：
 - embedding 行删除后仍可经 FTS 查询召回；
 - candidate 隐藏、activate、correct、forget、erase；
 - erase 后正文、source 被清除，revision 标记 `content_erased`；
-- 内容校验拒绝时只返回“未保存”，数据库没有该记录；
+- 内容校验拒绝后，即使模型伪造“已保存”，workflow 仍以固定“未保存”失败，
+  不创建 agent-output Artifact，数据库没有该记录；
 - 恶意记忆不能增加写工具权限，也不能跨 Scope read；
 - Host 对请求注入 `subject_type=user` 返回 HTTP 400。
 
@@ -133,6 +164,9 @@ LLM，覆盖：
 - 自动召回和按需召回边界；
 - active 直接写与 candidate 审核路径；
 - exact/FTS/vector 的错误与降级语义；
+- 整个 Recall Store typed recoverable 失败时 Projector 跳过记忆、记录无内容
+  degradation 并继续主任务，Scope/auth/integrity 仍 fail closed；
+- 显式写失败的 request-scoped bool 与 final output validator；
 - migrate、embedding rebuild、forget、erase、audit 的差异；
 - 可直接运行的 required PostgreSQL 命令；
 - 不提供 nil/default authorizer 的生产配置；
@@ -172,6 +206,9 @@ GOWORK=off go mod tidy -diff
 
 ```text
 cd memorykit
+GOWORK=off go test -count=1 -race -v ./... -run TestEvaluate
+PASS
+
 GOWORK=off MEMORYKIT_REQUIRE_POSTGRES=1 ... go test -count=1 -race ./...
 ok github.com/eruca/goagents/memorykit
 ok github.com/eruca/goagents/memorykit/agentadapter
@@ -209,11 +246,12 @@ memory PostgreSQL 门禁。
 
 ## 敏感输出与设计一致性审计
 
-- verbose 黑盒输出经过 durable/foreign/tenant/malicious/bearer 合成哨兵和
-  vector 文本匹配，匹配数为 0；
+- verbose 黑盒输出经过 durable/foreign/tenant/malicious/bearer、模型伪造
+  success 合成哨兵和 vector 文本匹配，匹配数为 0；
 - 合成哨兵只存在于测试文件，不存在于生产文件；
 - 新增生产路径没有日志输出正文、query、vector、Authorization 或 Artifact
   body；
+- 私有写失败状态只是一位 bool；不进入 tool result、final content、事件或日志；
 - 无效 workflow query 错误是稳定的无正文错误；
 - candidate、inactive、expired 的排除由 recall/pgstore 回归测试覆盖；
 - other-project、other-tenant 和恶意跨 Scope 由真实黑盒覆盖；
