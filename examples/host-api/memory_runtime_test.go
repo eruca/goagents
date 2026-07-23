@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/eruca/goagents/artifactkit"
+	"github.com/eruca/goagents/goagent/agentcore"
 	"github.com/eruca/goagents/memorykit"
 	"github.com/eruca/goagents/memorykit/memorystore"
 	"github.com/eruca/goagents/runkit"
@@ -40,7 +42,7 @@ func TestMemoryRuntimeRejectsIncompleteConfig(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			config := *valid
 			test.mutate(&config)
-			runtime, err := newMemoryRuntime(&config, runkit.NewMemoryStore())
+			runtime, err := newMemoryRuntime(&config, runkit.NewMemoryStore(), artifactkit.NewMemoryStore())
 			if err == nil || runtime != nil {
 				t.Fatalf("newMemoryRuntime() = %#v, %v, want nil error result", runtime, err)
 			}
@@ -53,7 +55,7 @@ func TestMemoryRuntimeAcceptsHostRunIDMetadataLimitBoundary(t *testing.T) {
 	config.ExtractorID = "v1"
 	config.Limits.MaxMetadataRunes = len("00000000-0000-4000-8000-000000000000")
 
-	runtime, err := newMemoryRuntime(config, runkit.NewMemoryStore())
+	runtime, err := newMemoryRuntime(config, runkit.NewMemoryStore(), artifactkit.NewMemoryStore())
 	if err != nil || runtime == nil {
 		t.Fatalf("newMemoryRuntime() = %#v, %v, want valid exact Host run ID boundary", runtime, err)
 	}
@@ -92,6 +94,214 @@ func TestMemoryRuntimeArtifactSourceReaderRejectsUnsupportedAndOversizedSource(t
 	}
 }
 
+func TestHostMemoryQueryBuilderUsesTrustedWorkflowArtifactTransiently(t *testing.T) {
+	artifacts := artifactkit.NewMemoryStore()
+	ref := "artifact:workflow-query:input"
+	if err := artifacts.Put(t.Context(), artifactkit.Artifact{
+		Ref: ref, Content: []byte("current user question"), ContentType: "text/plain",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	builder, err := newHostMemoryQueryBuilder(artifacts, len([]rune("current user question")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := agentcore.ContextProjectionRequest{
+		Messages: []agentcore.Message{{Role: "user", Content: "Review input artifact " + ref}},
+		Metadata: map[string]any{"workflow_id": "workflow-query", "workflow_input_ref": ref},
+	}
+	text, keys, kinds, err := builder(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text != "current user question" || len(keys) != 0 || len(kinds) != 0 {
+		t.Fatalf("query = %q, %#v, %#v", text, keys, kinds)
+	}
+	if request.Messages[0].Content != "Review input artifact "+ref ||
+		!reflect.DeepEqual(request.Metadata, map[string]any{"workflow_id": "workflow-query", "workflow_input_ref": ref}) {
+		t.Fatalf("builder mutated projection request: %#v", request)
+	}
+}
+
+func TestHostMemoryQueryBuilderDelegatesNonWorkflowRequests(t *testing.T) {
+	builder, err := newHostMemoryQueryBuilder(artifactkit.NewMemoryStore(), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := agentcore.ContextProjectionRequest{
+		Messages: []agentcore.Message{{Role: "user", Content: "direct question"}},
+		Metadata: map[string]any{
+			"workflow_id":        "direct-runner-audit",
+			"memory.query_tags":  []string{"zeta", "alpha"},
+			"memory.query_keys":  []any{"key.2", "key.1"},
+			"memory.query_kinds": []string{"fact", "constraint"},
+		},
+	}
+	text, keys, kinds, err := builder(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text != "direct question\nalpha\nzeta" ||
+		!reflect.DeepEqual(keys, []string{"key.2", "key.1"}) ||
+		!reflect.DeepEqual(kinds, []memorykit.Kind{memorykit.KindFact, memorykit.KindConstraint}) {
+		t.Fatalf("delegated query = %q, %#v, %#v", text, keys, kinds)
+	}
+}
+
+func TestHostMemoryQueryBuilderFailsClosedOnUntrustedWorkflowEnvelope(t *testing.T) {
+	const privateBody = "PRIVATE QUERY BODY"
+	validRef := "artifact:workflow-query:input"
+	tests := []struct {
+		name     string
+		store    artifactkit.Store
+		maxRunes int
+		messages []agentcore.Message
+		metadata map[string]any
+	}{
+		{
+			name: "workflow ID type", store: runtimeQueryArtifactStore{artifact: artifactkit.Artifact{
+				Ref: validRef, Content: []byte(privateBody), ContentType: "text/plain",
+			}}, maxRunes: 100,
+			messages: []agentcore.Message{{Role: "user", Content: "Review input artifact " + validRef}},
+			metadata: map[string]any{"workflow_id": 7, "workflow_input_ref": validRef},
+		},
+		{
+			name: "workflow ID blank", store: runtimeQueryArtifactStore{artifact: artifactkit.Artifact{
+				Ref: validRef, Content: []byte(privateBody), ContentType: "text/plain",
+			}}, maxRunes: 100,
+			messages: []agentcore.Message{{Role: "user", Content: "Review input artifact " + validRef}},
+			metadata: map[string]any{"workflow_id": " ", "workflow_input_ref": validRef},
+		},
+		{
+			name: "input ref type", store: runtimeQueryArtifactStore{artifact: artifactkit.Artifact{
+				Ref: validRef, Content: []byte(privateBody), ContentType: "text/plain",
+			}}, maxRunes: 100,
+			messages: []agentcore.Message{{Role: "user", Content: "Review input artifact " + validRef}},
+			metadata: map[string]any{"workflow_id": "workflow-query", "workflow_input_ref": 7},
+		},
+		{
+			name: "input ref metadata mismatch", store: runtimeQueryArtifactStore{artifact: artifactkit.Artifact{
+				Ref: validRef, Content: []byte(privateBody), ContentType: "text/plain",
+			}}, maxRunes: 100,
+			messages: []agentcore.Message{{Role: "user", Content: "Review input artifact " + validRef}},
+			metadata: map[string]any{"workflow_id": "workflow-query", "workflow_input_ref": "artifact:other:input"},
+		},
+		{
+			name: "user ref mismatch", store: runtimeQueryArtifactStore{artifact: artifactkit.Artifact{
+				Ref: validRef, Content: []byte(privateBody), ContentType: "text/plain",
+			}}, maxRunes: 100,
+			messages: []agentcore.Message{{Role: "user", Content: "Review input artifact artifact:other:input"}},
+			metadata: map[string]any{"workflow_id": "workflow-query", "workflow_input_ref": validRef},
+		},
+		{
+			name: "record ref mismatch", store: runtimeQueryArtifactStore{artifact: artifactkit.Artifact{
+				Ref: "artifact:other:input", Content: []byte(privateBody), ContentType: "text/plain",
+			}}, maxRunes: 100,
+			messages: []agentcore.Message{{Role: "user", Content: "Review input artifact " + validRef}},
+			metadata: map[string]any{"workflow_id": "workflow-query", "workflow_input_ref": validRef},
+		},
+		{
+			name: "record content type", store: runtimeQueryArtifactStore{artifact: artifactkit.Artifact{
+				Ref: validRef, Content: []byte(privateBody), ContentType: "application/octet-stream",
+			}}, maxRunes: 100,
+			messages: []agentcore.Message{{Role: "user", Content: "Review input artifact " + validRef}},
+			metadata: map[string]any{"workflow_id": "workflow-query", "workflow_input_ref": validRef},
+		},
+		{
+			name: "invalid UTF-8", store: runtimeQueryArtifactStore{artifact: artifactkit.Artifact{
+				Ref: validRef, Content: []byte{0xff}, ContentType: "text/plain",
+			}}, maxRunes: 100,
+			messages: []agentcore.Message{{Role: "user", Content: "Review input artifact " + validRef}},
+			metadata: map[string]any{"workflow_id": "workflow-query", "workflow_input_ref": validRef},
+		},
+		{
+			name: "blank", store: runtimeQueryArtifactStore{artifact: artifactkit.Artifact{
+				Ref: validRef, Content: []byte(" \n"), ContentType: "text/plain",
+			}}, maxRunes: 100,
+			messages: []agentcore.Message{{Role: "user", Content: "Review input artifact " + validRef}},
+			metadata: map[string]any{"workflow_id": "workflow-query", "workflow_input_ref": validRef},
+		},
+		{
+			name: "NUL", store: runtimeQueryArtifactStore{artifact: artifactkit.Artifact{
+				Ref: validRef, Content: []byte(privateBody + "\x00"), ContentType: "text/plain",
+			}}, maxRunes: 100,
+			messages: []agentcore.Message{{Role: "user", Content: "Review input artifact " + validRef}},
+			metadata: map[string]any{"workflow_id": "workflow-query", "workflow_input_ref": validRef},
+		},
+		{
+			name: "oversized", store: runtimeQueryArtifactStore{artifact: artifactkit.Artifact{
+				Ref: validRef, Content: []byte(strings.Repeat("界", 4)), ContentType: "text/plain",
+			}}, maxRunes: 3,
+			messages: []agentcore.Message{{Role: "user", Content: "Review input artifact " + validRef}},
+			metadata: map[string]any{"workflow_id": "workflow-query", "workflow_input_ref": validRef},
+		},
+		{
+			name: "artifact unavailable", store: runtimeQueryArtifactStore{err: errors.New(privateBody)},
+			maxRunes: 100,
+			messages: []agentcore.Message{{Role: "user", Content: "Review input artifact " + validRef}},
+			metadata: map[string]any{"workflow_id": "workflow-query", "workflow_input_ref": validRef},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			builder, err := newHostMemoryQueryBuilder(test.store, test.maxRunes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			text, keys, kinds, err := builder(t.Context(), agentcore.ContextProjectionRequest{
+				Messages: test.messages, Metadata: test.metadata,
+			})
+			if err == nil || text != "" || keys != nil || kinds != nil {
+				t.Fatalf("query = %q, %#v, %#v, %v, want zero fail closed", text, keys, kinds, err)
+			}
+			if strings.Contains(err.Error(), privateBody) {
+				t.Fatalf("query error leaked private body: %v", err)
+			}
+		})
+	}
+}
+
+func TestHostMemoryQueryBuilderRejectsIncompleteConfiguration(t *testing.T) {
+	var typedNil *artifactkit.MemoryStore
+	for _, store := range []artifactkit.Store{nil, typedNil} {
+		if builder, err := newHostMemoryQueryBuilder(store, 100); err == nil || builder != nil {
+			t.Fatalf("newHostMemoryQueryBuilder(%#v) = %#v, %v", store, builder, err)
+		}
+	}
+	if builder, err := newHostMemoryQueryBuilder(artifactkit.NewMemoryStore(), 0); err == nil || builder != nil {
+		t.Fatalf("newHostMemoryQueryBuilder(max=0) = %#v, %v", builder, err)
+	}
+}
+
+func TestHostMemoryQueryBuilderPreservesArtifactContextErrors(t *testing.T) {
+	for _, want := range []error{context.Canceled, context.DeadlineExceeded} {
+		builder, err := newHostMemoryQueryBuilder(runtimeQueryArtifactStore{err: fmt.Errorf("private wrapper: %w", want)}, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, _, err = builder(t.Context(), agentcore.ContextProjectionRequest{
+			Messages: []agentcore.Message{{Role: "user", Content: "Review input artifact artifact:workflow-query:input"}},
+			Metadata: map[string]any{
+				"workflow_id": "workflow-query", "workflow_input_ref": "artifact:workflow-query:input",
+			},
+		})
+		if !errors.Is(err, want) || strings.Contains(err.Error(), "private wrapper") {
+			t.Fatalf("query error = %v, want sanitized %v", err, want)
+		}
+	}
+}
+
+type runtimeQueryArtifactStore struct {
+	artifact artifactkit.Artifact
+	err      error
+}
+
+func (s runtimeQueryArtifactStore) Put(context.Context, artifactkit.Artifact) error { return nil }
+
+func (s runtimeQueryArtifactStore) Get(context.Context, string) (artifactkit.Artifact, error) {
+	return s.artifact, s.err
+}
+
 func TestMemoryRuntimeEnqueueUsesStableTrustedJobIdentity(t *testing.T) {
 	config := validCompleteMemoryRuntimeConfig(t)
 	queue := config.ExtractionJobs.(*memoryExtractionJobStoreStub)
@@ -113,7 +323,7 @@ func TestMemoryRuntimeEnqueueUsesStableTrustedJobIdentity(t *testing.T) {
 		clockCalls++
 		return time.Date(2026, 7, 21, 8, clockCalls, 0, 0, time.UTC)
 	}
-	runtime, err := newMemoryRuntime(config, runs)
+	runtime, err := newMemoryRuntime(config, runs, artifactkit.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +358,7 @@ func TestMemoryRuntimeEnqueueRejectsSourceNotBoundToAgentRun(t *testing.T) {
 	if err := runs.Complete(t.Context(), runID, runkit.TerminalSummary{Status: runkit.StatusSucceeded, ContentRef: legacyRef}); err != nil {
 		t.Fatal(err)
 	}
-	runtime, err := newMemoryRuntime(config, runs)
+	runtime, err := newMemoryRuntime(config, runs, artifactkit.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +374,7 @@ func TestMemoryRuntimeEnqueueRejectsSourceNotBoundToAgentRun(t *testing.T) {
 
 func TestMemoryRuntimeCopiesConfigAndBuildsAdapters(t *testing.T) {
 	config := validCompleteMemoryRuntimeConfig(t)
-	runtime, err := newMemoryRuntime(config, runkit.NewMemoryStore())
+	runtime, err := newMemoryRuntime(config, runkit.NewMemoryStore(), artifactkit.NewMemoryStore())
 	if err != nil {
 		t.Fatalf("newMemoryRuntime() error = %v", err)
 	}
@@ -221,7 +431,7 @@ func TestMemoryRuntimeWorkerLoopsStopClaimsOnIntakeAndCancelCurrentOnExecution(t
 	}
 	config.EmbeddingWorker = worker
 	config.EmbeddingInterval = time.Millisecond
-	runtime, err := newMemoryRuntime(config, runkit.NewMemoryStore())
+	runtime, err := newMemoryRuntime(config, runkit.NewMemoryStore(), artifactkit.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +474,7 @@ func TestMemoryRuntimeWorkerLoopRetriesDependencyDeadlineWhileExecutionIsActive(
 	}
 	config.EmbeddingWorker = worker
 	config.EmbeddingInterval = time.Millisecond
-	runtime, err := newMemoryRuntime(config, runkit.NewMemoryStore())
+	runtime, err := newMemoryRuntime(config, runkit.NewMemoryStore(), artifactkit.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}

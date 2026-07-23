@@ -30,3 +30,34 @@ jobs:
 
       - name: Verify workspace
         run: bash ./scripts/verify-all.sh
+
+  memory-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.2-pg16-bookworm
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: memorykit_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d memorykit_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      MEMORYKIT_REQUIRE_POSTGRES: "1"
+      MEMORYKIT_POSTGRES_TEST_DSN: postgres://postgres:postgres@localhost:5432/memorykit_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.work
+          cache-dependency-path: |
+            **/go.sum
+            go.work.sum
+      - run: cd memorykit && go test -race ./...
+      - run: cd examples/host-api && go test -race -run '^TestHostMemoryPostgresBlackBox$' ./...

@@ -500,7 +500,7 @@ func NewServer(config Config) (*Server, error) {
 	}
 	var memoryConfig *memoryRuntime
 	if config.Memory != nil {
-		memoryConfig, err = newMemoryRuntime(config.Memory, runs)
+		memoryConfig, err = newMemoryRuntime(config.Memory, runs, artifacts)
 		if err != nil {
 			_ = workflows.Close()
 			_ = runs.Close()
@@ -1481,6 +1481,9 @@ func (s hostAgentStep) Run(ctx context.Context, run workflowkit.WorkflowRun) (wo
 	request, err := buildAgentRequestForWorkflow(run, s.runner.memory != nil)
 	if err != nil {
 		return workflowkit.StepResult{Status: workflowkit.StatusFailed, Error: err.Error()}, err
+	}
+	if s.runner.memory != nil {
+		request.Metadata[hostWorkflowInputRefKey] = run.InputRef
 	}
 	result, err := s.runner.RunDetailed(ctx, request)
 	if err != nil {

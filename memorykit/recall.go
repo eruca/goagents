@@ -108,6 +108,9 @@ func NewRecaller(config RecallConfig) (*Recaller, error) {
 	}, nil
 }
 
+// MaxQueryRunes exposes only the immutable query bound captured at construction.
+func (r *Recaller) MaxQueryRunes() int { return r.policy.MaxQueryRunes }
+
 func (r *Recaller) Recall(ctx context.Context, request RecallRequest) (RecallResult, error) {
 	result := RecallResult{
 		Items:            make([]RecallItem, 0, r.policy.MaxItems),

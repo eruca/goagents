@@ -9,6 +9,54 @@ core module; it shows how a host application can compose:
 - `artifactkit` for durable payload refs.
 - `runkit` for durable agent run audit records and events.
 
+## Optional governed project memory
+
+Project memory is an optional injection-based composition. When `Config.Memory`
+is nil, the existing Host behavior and route set are unchanged. When enabled,
+the caller must inject one complete, fail-closed runtime: a caller-owned
+`memorykit.Store`, a real project authorizer, content validator, explicit
+limits/policies/clocks, recall adapters, durable extraction queue, and
+embedding/extraction workers. The Host does not create a default authorizer or
+an allow-all fallback, and `Server.Close` does not take ownership of the memory
+Store.
+
+An enabled workflow requires `project_id`. `memory_write_intent: true` requests
+the separate `memory.write_explicit` capability; it does not grant that
+capability. The verified tenant/user identity and project are persisted as
+trusted Host metadata so restart, requeue, and approval resume retain the same
+Scope. V1 constructs only project Scope and rejects caller-supplied tenant,
+subject, or `subject_type=user`.
+
+Automatic recall projects a bounded active/effective project view before the
+model call. For a production workflow, the Host verifies the trusted workflow
+ID, expected input Artifact ref, and current ref-only user message, then reads
+the UTF-8 Artifact body transiently as the recall query. The body is not copied
+into Agent metadata/checkpoints and the ref-only user message is unchanged.
+Blank, NUL-containing, malformed, or over-policy query bodies fail closed and
+are never truncated. The always-available `search_memory` and `read_memory`
+tools provide on-demand recall; `remember_project_memory` appears only for
+authorized explicit write intent. Model-derived extraction writes candidates,
+never active memory. Recoverable vector failure keeps exact/full-text recall,
+while invalid Scope or integrity fails closed.
+
+When memory is enabled, these governed routes are registered:
+
+- `GET /projects/{projectID}/memories`
+- `GET /projects/{projectID}/memories/{memoryID}`
+- `GET /projects/{projectID}/memories/{memoryID}/revisions`
+- `POST /projects/{projectID}/memories`
+- `POST /projects/{projectID}/memories/{memoryID}/activate`
+- `POST /projects/{projectID}/memories/{memoryID}/dismiss`
+- `POST /projects/{projectID}/memories/{memoryID}/correct`
+- `POST /projects/{projectID}/memories/{memoryID}/forget`
+- `POST /projects/{projectID}/memories/{memoryID}/erase`
+
+Read, explicit write, candidate review, and privacy erase are separate
+capabilities. Bodies use strict JSON and optimistic `expected_version`
+confirmation; they never accept Scope fields. See
+[`memorykit/README.md`](../../memorykit/README.md) for pgvector setup, recall and
+degradation semantics, lifecycle differences, and the required PostgreSQL gate.
+
 ## Local MVP acceptance
 
 The shortest path that needs no real credentials for external or cloud

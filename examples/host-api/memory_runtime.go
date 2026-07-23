@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ const (
 	memoryProjectMetadataKey     = "memory.project_id"
 	memoryUserMetadataKey        = "memory.user_id"
 	memoryWriteIntentMetadataKey = "memory.write_intent"
+	hostWorkflowInputRefKey      = "workflow_input_ref"
 	hostSourceAgentIDRunes       = 36
 )
 
@@ -45,13 +47,13 @@ type memoryRuntime struct {
 	extractDone chan struct{}
 }
 
-func newMemoryRuntime(config *memoryRuntimeConfig, runs runkit.Store) (*memoryRuntime, error) {
+func newMemoryRuntime(config *memoryRuntimeConfig, runs runkit.Store, artifacts artifactkit.Store) (*memoryRuntime, error) {
 	if err := validateMemoryManagementConfig(config); err != nil {
 		return nil, err
 	}
 	if config == nil || nilMemoryDependency(config.AutoRecall) || nilMemoryDependency(config.DeepRecall) ||
 		nilMemoryDependency(config.EmbeddingWorker) || nilMemoryDependency(config.ExtractionWorker) ||
-		nilMemoryDependency(config.ExtractionJobs) || nilMemoryDependency(runs) ||
+		nilMemoryDependency(config.ExtractionJobs) || nilMemoryDependency(runs) || nilMemoryDependency(artifacts) ||
 		config.EmbeddingInterval <= 0 || config.ExtractionInterval <= 0 ||
 		config.Limits.MaxMetadataRunes < hostSourceAgentIDRunes ||
 		!validMemoryRuntimeIdentity(config.ExtractorID, config.Limits.MaxMetadataRunes) ||
@@ -60,9 +62,13 @@ func newMemoryRuntime(config *memoryRuntimeConfig, runs runkit.Store) (*memoryRu
 	}
 	copy := *config
 	observer := &hostMemoryObserver{runs: runs}
+	buildQuery, err := newHostMemoryQueryBuilder(artifacts, copy.AutoRecall.MaxQueryRunes())
+	if err != nil {
+		return nil, fmt.Errorf("build memory query: %w", err)
+	}
 	projector, err := memoryagentadapter.NewProjector(memoryagentadapter.ProjectorConfig{
 		Recall: copy.AutoRecall, ResolveScope: resolveTrustedMemoryScope,
-		BuildQuery: memoryagentadapter.DefaultQueryBuilder, Observe: observer, Next: nil,
+		BuildQuery: buildQuery, Observe: observer, Next: nil,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build memory projector: %w", err)
@@ -80,6 +86,67 @@ func newMemoryRuntime(config *memoryRuntimeConfig, runs runkit.Store) (*memoryRu
 	}
 	runtime := &memoryRuntime{memoryRuntimeConfig: copy, projector: projector, toolProvider: provider, observer: observer, runs: runs}
 	return runtime, nil
+}
+
+func newHostMemoryQueryBuilder(artifacts artifactkit.Store, maxQueryRunes int) (memoryagentadapter.QueryBuilder, error) {
+	if nilMemoryDependency(artifacts) || maxQueryRunes <= 0 {
+		return nil, fmt.Errorf("%w: invalid Host memory query configuration", memorykit.ErrInvalidMemory)
+	}
+	return func(ctx context.Context, request agentcore.ContextProjectionRequest) (string, []string, []memorykit.Kind, error) {
+		defaultText, keys, kinds, err := memoryagentadapter.DefaultQueryBuilder(ctx, request)
+		if err != nil {
+			return "", nil, nil, err
+		}
+		inputRefValue, workflow := request.Metadata[hostWorkflowInputRefKey]
+		if !workflow {
+			return defaultText, keys, kinds, nil
+		}
+		workflowValue, workflowIDPresent := request.Metadata["workflow_id"]
+		workflowID, ok := workflowValue.(string)
+		inputRef, inputRefOK := inputRefValue.(string)
+		if !workflowIDPresent || !ok || strings.TrimSpace(workflowID) == "" || !inputRefOK {
+			return "", nil, nil, invalidHostMemoryQuery()
+		}
+		expectedRef := "artifact:" + workflowID + ":input"
+		if inputRef != expectedRef {
+			return "", nil, nil, invalidHostMemoryQuery()
+		}
+		expectedMessage := "Review input artifact " + expectedRef
+		currentUser := ""
+		for index := len(request.Messages) - 1; index >= 0; index-- {
+			if request.Messages[index].Role == "user" {
+				currentUser = request.Messages[index].Content
+				break
+			}
+		}
+		if currentUser != expectedMessage {
+			return "", nil, nil, invalidHostMemoryQuery()
+		}
+		artifact, err := artifacts.Get(ctx, expectedRef)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", nil, nil, ctxErr
+		}
+		if errors.Is(err, context.Canceled) {
+			return "", nil, nil, context.Canceled
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return "", nil, nil, context.DeadlineExceeded
+		}
+		if err != nil || artifact.Ref != expectedRef || artifact.ContentType != "text/plain" ||
+			!utf8.Valid(artifact.Content) {
+			return "", nil, nil, invalidHostMemoryQuery()
+		}
+		text := string(artifact.Content)
+		if strings.TrimSpace(text) == "" || strings.ContainsRune(text, 0) ||
+			utf8.RuneCountInString(text) > maxQueryRunes {
+			return "", nil, nil, invalidHostMemoryQuery()
+		}
+		return text, keys, kinds, nil
+	}, nil
+}
+
+func invalidHostMemoryQuery() error {
+	return fmt.Errorf("%w: invalid trusted workflow memory query", memorykit.ErrInvalidMemory)
 }
 
 func (r *memoryRuntime) Projector() *memoryagentadapter.Projector { return r.projector }

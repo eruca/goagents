@@ -247,6 +247,7 @@ func TestAgentMemoryCheckpointPreservesTrustedScopeForResume(t *testing.T) {
 	request := checkpoint.Request
 	if request.UserID != "user-a" || request.SessionID != created.ID || request.PolicyContext.TenantID != "tenant-a" ||
 		request.PolicyContext.Labels["project_id"] != "project-a" || request.Metadata[memoryWriteIntentMetadataKey] != true ||
+		request.Metadata[hostWorkflowInputRefKey] != "artifact:wf-memory-resume:input" ||
 		!slices.Contains(request.AllowedPermissions, policy.PermissionWrite) {
 		t.Fatalf("checkpoint request lost trusted memory identity: %#v", request)
 	}
@@ -293,7 +294,7 @@ func TestAgentMemoryInsertsOnlyEffectiveSameProjectViewAndTrustedTools(t *testin
 	config.Store = store
 	config.AutoRecall = newMemoryRuntimeRecaller(t, store)
 	config.DeepRecall = newMemoryRuntimeRecaller(t, store)
-	runtime, err := newMemoryRuntime(config, runkit.NewMemoryStore())
+	runtime, err := newMemoryRuntime(config, runkit.NewMemoryStore(), artifactkit.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,7 +326,7 @@ func TestAgentMemoryRecoverableVectorFailureRecordsContentFreeEventAndContinues(
 	if err := runs.Create(t.Context(), runkit.RunRecord{RunID: runID.String(), Status: runkit.StatusRunning}); err != nil {
 		t.Fatal(err)
 	}
-	runtime, err := newMemoryRuntime(config, runs)
+	runtime, err := newMemoryRuntime(config, runs, artifactkit.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,7 +372,7 @@ func TestAgentMemoryRecoverableVectorFailureRecordsContentFreeEventAndContinues(
 
 func TestAgentMemoryMalformedScopeStopsBeforeLLM(t *testing.T) {
 	config := validCompleteMemoryRuntimeConfig(t)
-	runtime, err := newMemoryRuntime(config, runkit.NewMemoryStore())
+	runtime, err := newMemoryRuntime(config, runkit.NewMemoryStore(), artifactkit.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -403,11 +404,11 @@ func TestAgentMemoryEnqueueFailureKeepsSuccessfulRunAndRecordsSafeDegradation(t 
 	queue := config.ExtractionJobs.(*memoryExtractionJobStoreStub)
 	queue.err = errors.New("PRIVATE SOURCE BODY authorization=secret")
 	runs := runkit.NewMemoryStore()
-	runtime, err := newMemoryRuntime(config, runs)
+	artifacts := artifactkit.NewMemoryStore()
+	runtime, err := newMemoryRuntime(config, runs, artifacts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	artifacts := artifactkit.NewMemoryStore()
 	llm := &recordingMemoryLLM{}
 	step := hostAgentStep{
 		runner: routingAgentRunner{
@@ -424,6 +425,11 @@ func TestAgentMemoryEnqueueFailureKeepsSuccessfulRunAndRecordsSafeDegradation(t 
 			"task_profile": defaultHostTaskProfile(), memoryTenantMetadataKey: "tenant-a",
 			memoryProjectMetadataKey: "project-a", memoryUserMetadataKey: "user-a", memoryWriteIntentMetadataKey: false,
 		},
+	}
+	if err := artifacts.Put(t.Context(), artifactkit.Artifact{
+		Ref: run.InputRef, Content: []byte("review enqueue failure"), ContentType: "text/plain",
+	}); err != nil {
+		t.Fatal(err)
 	}
 	result, err := step.Run(t.Context(), run)
 	if err != nil || result.Status != workflowkit.StatusWaitingApproval || result.OutputRef == "" || result.AgentRunID == "" {
@@ -460,11 +466,11 @@ func TestAgentMemoryRequeueKeepsExtractionSourcesRunImmutable(t *testing.T) {
 	config := validCompleteMemoryRuntimeConfig(t)
 	queue := config.ExtractionJobs.(*memoryExtractionJobStoreStub)
 	runs := runkit.NewMemoryStore()
-	runtime, err := newMemoryRuntime(config, runs)
+	artifacts := artifactkit.NewMemoryStore()
+	runtime, err := newMemoryRuntime(config, runs, artifacts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	artifacts := artifactkit.NewMemoryStore()
 	llm := &sequencedMemoryLLM{contents: []string{"first run output", "second run output"}}
 	step := hostAgentStep{
 		runner: routingAgentRunner{
@@ -481,6 +487,11 @@ func TestAgentMemoryRequeueKeepsExtractionSourcesRunImmutable(t *testing.T) {
 			"task_profile": defaultHostTaskProfile(), memoryTenantMetadataKey: "tenant-a",
 			memoryProjectMetadataKey: "project-a", memoryUserMetadataKey: "user-a", memoryWriteIntentMetadataKey: false,
 		},
+	}
+	if err := artifacts.Put(t.Context(), artifactkit.Artifact{
+		Ref: run.InputRef, Content: []byte("review requeued output"), ContentType: "text/plain",
+	}); err != nil {
+		t.Fatal(err)
 	}
 
 	first, err := step.Run(t.Context(), run)
@@ -539,7 +550,7 @@ func TestHostMemoryEndToEnd(t *testing.T) {
 	config.ExtractionWorker = extractionWorker
 	config.Now = func() time.Time { return now }
 	runs := runkit.NewMemoryStore()
-	runtime, err := newMemoryRuntime(config, runs)
+	runtime, err := newMemoryRuntime(config, runs, artifacts)
 	if err != nil {
 		t.Fatal(err)
 	}

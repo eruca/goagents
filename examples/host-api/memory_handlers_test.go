@@ -525,10 +525,14 @@ func TestMemoryHandlersCorrectUnorderedSourcesWithRealPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
+	tenantID := "host-handler-" + uuid.NewString()
+	scope := memorykit.Scope{
+		TenantID: tenantID, SubjectType: memorykit.SubjectProject, SubjectID: "project-a",
+	}
 	config := &memoryRuntimeConfig{
 		Store: store,
 		Authorizer: &recordingMemoryAuthorizer{identity: memoryIdentity{
-			TenantID: "host-handler-" + uuid.NewString(), Subject: "user-a",
+			TenantID: tenantID, Subject: "user-a",
 		}},
 		ContentValidator: &acceptingMemoryContentValidator{}, Limits: limits,
 		NewID:            func() string { return uuid.NewString() },
@@ -542,6 +546,22 @@ func TestMemoryHandlersCorrectUnorderedSourcesWithRealPostgres(t *testing.T) {
 		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
 	}
 	id := responseMemoryID(t, created)
+	t.Cleanup(func() {
+		current, err := store.Get(context.Background(), scope, id)
+		if errors.Is(err, memorykit.ErrNotFound) {
+			return
+		}
+		if err != nil {
+			t.Errorf("get PostgreSQL test memory for cleanup: %v", err)
+			return
+		}
+		if err := store.Erase(context.Background(), memorykit.VersionedCommand{
+			Scope: scope, ID: id, ExpectedVersion: current.Version,
+			Actor: "host-handler-test", Reason: "test cleanup", Now: time.Now(),
+		}); err != nil {
+			t.Errorf("erase PostgreSQL test memory during cleanup: %v", err)
+		}
+	})
 	corrected := memoryRequest(t, server.Handler(), http.MethodPost, "/projects/project-a/memories/"+id+"/correct",
 		`{"expected_version":1,"content":"corrected","valid_from":"2026-07-21T08:00:00Z","reason":"correct","importance":1,"confidence":1,"sources":[{"kind":"todo","ref":"todo:4","evidence_hash":"hash:4"},{"kind":"git","ref":"commit:3","evidence_hash":"hash:3"}]}`)
 	if corrected.Code != http.StatusOK || !equalStrings(responseSourceKinds(t, corrected), []string{"git", "todo"}) {

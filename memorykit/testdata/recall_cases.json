@@ -1,0 +1,17 @@
+{
+  "version": "project-memory-v1",
+  "memories": [
+    {"id":"m-command","project_id":"project-1","status":"active","kind":"decision","key":"build.test_command","content":"Run go test ./...","vector":[1,0,0]},
+    {"id":"m-pg-gate","project_id":"project-1","status":"active","kind":"lesson","key":"testing.pgvector","content":"Verify semantic storage against real PostgreSQL vector support","vector":[0,1,0]},
+    {"id":"m-lexical-distractor","project_id":"project-1","status":"active","kind":"fact","key":"docs.vector","content":"The documentation mentions vector graphics","vector":[0,0,1]},
+    {"id":"m-superseded","project_id":"project-1","status":"inactive","kind":"decision","key":"deploy.old","content":"Use the retired deployment path","vector":[1,1,0]},
+    {"id":"m-candidate","project_id":"project-1","status":"candidate","kind":"lesson","key":"lesson.unreviewed","content":"Unreviewed lesson","vector":[0,1,1]},
+    {"id":"m-other-project","project_id":"project-2","status":"active","kind":"fact","key":"build.test_command","content":"Run another project command","vector":[1,0,0]}
+  ],
+  "cases": [
+    {"id":"keyword-command","query":"which command runs tests","expected_ids":["m-command"],"forbidden_ids":["m-other-project"]},
+    {"id":"semantic-synonym","query":"how do we verify vector storage","expected_ids":["m-pg-gate"],"forbidden_ids":["m-lexical-distractor"]},
+    {"id":"superseded-negative","query":"old deployment decision","expected_ids":[],"forbidden_ids":["m-superseded"]},
+    {"id":"candidate-negative","query":"unreviewed lesson","expected_ids":[],"forbidden_ids":["m-candidate"]}
+  ]
+}

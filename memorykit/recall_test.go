@@ -83,6 +83,16 @@ func TestRecallPolicyAndConstructorRejectMissingConfiguration(t *testing.T) {
 	}
 }
 
+func TestRecallerExposesOnlyConfiguredMaxQueryRunes(t *testing.T) {
+	policy := testRecallPolicy()
+	policy.MaxQueryRunes = 137
+	recaller := newTestRecaller(t, &fakeRecallStore{}, fixedEmbedder{vector: []float32{1, 0, 0}}, policy)
+
+	if got := recaller.MaxQueryRunes(); got != 137 {
+		t.Fatalf("MaxQueryRunes() = %d, want 137", got)
+	}
+}
+
 func TestRecallerDegradesOnlyTypedRecoverableVectorFailures(t *testing.T) {
 	recoverable := &BackendError{Op: "embed", Recoverable: true, Err: errors.New("provider unavailable for secret query")}
 	store := &fakeRecallStore{set: CandidateSet{

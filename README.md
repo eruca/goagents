@@ -17,6 +17,7 @@ plus unreleased `memorykit`.
 - [`hostkit`](hostkit/README.md): standard-library lifecycle coordination for one host-owned service.
 - [`llmkit`](llmkit/README.md): model routing, provider health, audit, and outcome statistics.
 - [`skillkit`](skillkit/README.md): immutable Skill discovery, gating, activation, and agent projection.
+- [`memorykit`](memorykit/README.md): governed project memory, hybrid recall, pgvector persistence, and candidate review lifecycle.
 - [`contextkit`](contextkit/README.md): context windows, projections, and tool budgets.
 - [`evalkit`](evalkit/README.md): reproducible agent evaluation traces and graders.
 - [`mcpkit`](mcpkit/README.md): MCP transport and tool integration.
@@ -33,6 +34,20 @@ bash ./scripts/verify-all.sh
 
 This runs module tests, race checks for the core execution paths, MCP smokes,
 and runnable examples.
+
+`memorykit` unit tests are part of this workspace command. Its required real
+PostgreSQL/pgvector gate is separate and fail-closed:
+
+```bash
+MEMORYKIT_REQUIRE_POSTGRES=1 \
+MEMORYKIT_POSTGRES_TEST_DSN='postgres://postgres:postgres@localhost:5432/memorykit_test?sslmode=disable' \
+go test -count=1 -race ./memorykit/...
+
+cd examples/host-api
+MEMORYKIT_REQUIRE_POSTGRES=1 \
+MEMORYKIT_POSTGRES_TEST_DSN='postgres://postgres:postgres@localhost:5432/memorykit_test?sslmode=disable' \
+go test -count=1 -race -run '^TestHostMemoryPostgresBlackBox$' ./...
+```
 
 ## Release layout
 
