@@ -3,8 +3,8 @@
 日期：2026-08-07
 
 状态：W17-U01～W17-U05 已按顺序完成实现、本地门禁与独立审核；独立代码审核结论为
-`Critical 0 / Important 0`。当前停在用户最终实际 Diff 审核，不代表已经提交、发布或获准进入
-Week 18。
+`Critical 0 / Important 0`。最终实际 Diff 已于 2026-08-07 获用户批准，按语义提交并快进合并
+到本地 `main`；尚未 push、运行 exact-commit 远端 CI、创建 tag 或发布，Week 18 实现尚未开始。
 
 ## 本周边界
 
@@ -16,7 +16,8 @@ Week 18。
   hostruntime。
 - 没有使用真实 Provider 凭据或业务/用户数据，没有产生 Provider 费用；没有启动 AI Todo
   数据库、Server、容器或浏览器，也没有连接、探测或操作 `127.0.0.1:54321`。
-- 没有 stage、commit、merge、push、tag、Release 或 OCI 操作。
+- 实施和审核阶段没有 Git 发布动作；最终获用户授权后只执行语义 commit 与本地 fast-forward
+  merge，没有 push、tag、Release 或 OCI 操作。
 
 ## 实时基线与隔离
 
@@ -25,7 +26,7 @@ Week 18。
 - AI Todo：`HEAD = main = origin/main =
   713246d09e92ac004cba768b26a7d98897235cb6`，ahead/behind `0/0`，worktree clean。
 - GoAgents 最新远端 CI run `30140268232` 为 success，但只覆盖 clean `0a24e951`；它不覆盖
-  当前未提交 Week 17 Diff。
+  当前本地 main 的 Week 17 提交。
 - GoAgents 主目录用户 memorykit 文档始终保持隔离。最终复核的 tracked/staged/untracked 指纹为：
   - `beafd422a0bbf63212c4616eab2615659b3f58bfd210b36df8bed24815966a5f`
   - `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`
@@ -169,16 +170,29 @@ env -u OPENAI_COMPAT_BASE_URL -u OPENAI_COMPAT_MODEL -u OPENAI_COMPAT_API_KEY \
   U05 取代；U03/U04 顶部现已增加最终状态注记，不影响 runtime 指纹。
 - Gate verdict：W17-U05 / Week 17 独立代码审核 `PASS`。
 
+## Git 收口
+
+- 最终 runtime、module、门禁和证据先形成四个语义提交：
+  - `0577bc5 feat(goagent): 增强 Provider 可靠性边界`
+  - `8ca52c6 feat(llmkit): 收紧取消与预调度语义`
+  - `54a2fa8 ci: 增加 Week 17 外部消费者门禁`
+  - `ba39459 docs: 记录 Week 17 可靠性实施证据`
+- 合并前确认 Week 17 的 26 个路径与主目录七个用户 dirty 文档路径交集为空，随后从
+  `0a24e951` fast-forward 到 `ba39459`；本状态更新另形成一个 docs-only 语义提交。
+- 合并后的本地 `main` 重新执行完整 `verify-all` 与外部 clean consumer，均 exit `0`；用户
+  tracked/staged/untracked 指纹保持不变。
+- 没有删除宿主管理的隔离 worktree，也没有清理其他用户 worktree 或分支。
+
 ## 未完成与失效条件
 
-- 用户尚未审核本次最终实际 Diff；没有 commit，因此还不存在可供 Week 18 固定的精确 clean
-  commit。
-- 远端 CI 尚未覆盖当前 Diff。只有未来获准提交并运行 exact commit CI 后，才能把 CI 层标为
-  通过。
+- 用户最终 Diff 审核、语义提交和本地 main 合并已经完成；Week 18 可以从本地 main 开始新的
+  Unit，但对外依赖和发布仍不能使用未 push、未打 tag 的本地状态。
+- 远端 CI 尚未覆盖当前提交。只有未来另获 push 授权并运行 exact-commit CI 后，才能把 CI
+  层标为通过。
 - `actionlint` 本机不可用；workflow 仅完成 YAML parse、脚本实际运行与完整本地门禁。
 - 历史 `runkit` 独立 `GOWORK=off` 仍缺两条 `go.sum`，已登记为范围外 module 卫生债务；当前
   Week 17 正式 Gate 只要求本周变更的 `goagent`/`llmkit`，没有顺手修改 `runkit`。
 - 任何 `.github`、`goagent`、`llmkit` 或 `scripts` 文件变化都会使上述 runtime/release 指纹、
   snapshot consumer、完整门禁和独立审核失效，必须重新执行。
-- Week 18 仍未开始；必须先取得用户对本总结和最终 Diff 的明确审核结论，再决定 Git 与后续
-  Unit 动作。
+- Week 18 仍未开始；进入其实现前仍需按 Week 18 roadmap 重新做实时基线和 Unit 级授权，
+  不能把本地合并自动扩大为 push、tag、Release 或 OCI 授权。

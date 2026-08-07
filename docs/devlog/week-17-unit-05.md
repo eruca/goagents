@@ -5,7 +5,8 @@
 状态：首轮独立审核结论为 `Critical 0 / Important 3 / Minor 1`。用户于 2026-08-07 批准保持
 `v0.1.1` patch-compatible 的 additive 修复路线；兼容修正、外部 consumer 和全部本地门禁已通过。
 第二次独立审核绑定最终内容指纹，结论为代码 `Critical 0 / Important 0`，仅发现一个历史文档
-措辞 Minor；已增加 superseded 注记并形成 Week 17 总结，等待用户审核最终实际 Diff。
+措辞 Minor；已增加 superseded 注记并形成 Week 17 总结。最终实际 Diff 于 2026-08-07 获用户
+批准，已按语义提交并快进合并到本地 `main`，未 push、tag 或发布。
 
 ## 前置审核与范围
 
@@ -281,7 +282,7 @@ workflow/Host 示例和 goagent test/race/smoke 全部完成；OpenAI-compatible
 | 真实运行 | 已通过本地门禁 | 仓库外空缓存 module proxy consumer 已组合运行全部高风险公开边界 |
 | CI | 未执行 | 远端 success 只覆盖旧 `0a24e951`；新 step 等待未来提交 |
 | 独立审核 | 已通过 | 最终指纹匹配，代码 `Critical 0 / Important 0`；唯一文档 Minor 已修正 |
-| 用户审核 | 待审核 | 提交 W17-U05 与 Week 17 最终实际 Diff 给用户审核 |
+| 用户审核 | 已通过 | 2026-08-07 已批准最终实际 Diff，并授权语义提交与本地 main 合并 |
 
 ## Diff 与停止点
 
@@ -292,5 +293,8 @@ workflow/Host 示例和 goagent test/race/smoke 全部完成；OpenAI-compatible
 - 当前 worktree 仍包含已逐 Unit 审核的 U01～U04 Diff；
 - `actionlint` 本机不可用；shell syntax、真实脚本执行和 workflow 文本 wiring 已验证，远端 CI
   仍待未来精确 commit；
-- stage/commit/merge/push/tag/Release/OCI：均未执行；
-- 当前停止在 W17-U05/Week 17 最终实际 Diff 用户审核；不进入 Week 18。
+- 已形成 `goagent`、`llmkit`、CI/consumer、devlog 四个语义提交，并 fast-forward 合并到本地
+  `main`；本状态更新另形成 docs-only 提交。
+- push/tag/Release/OCI：均未执行；
+- 当前停止在 Week 17 本地 main 收口完成点，准备按新的实时基线进入 Week 18；本 Unit 没有
+  实施任何 Week 18 内容。
