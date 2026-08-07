@@ -3,6 +3,7 @@ package goagent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -24,7 +25,7 @@ func TestOpenAICompatibleProvidersFromConfigUsesBaseURLModelAndAPIKeyEnv(t *test
 		}
 		gotModel = body.Model
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
 	}))
 	defer server.Close()
 
@@ -91,5 +92,41 @@ func TestOpenAICompatibleProvidersFromConfigRejectsMissingBaseURL(t *testing.T) 
 	_, err := OpenAICompatibleProvidersFromConfig(config, func(string) string { return "" }, nil)
 	if err == nil {
 		t.Fatal("OpenAICompatibleProvidersFromConfig() error = nil, want missing base URL error")
+	}
+	var runtimeErr *RuntimeError
+	if !errors.As(err, &runtimeErr) {
+		t.Fatalf("error type = %T, want *RuntimeError", err)
+	}
+	if runtimeErr.Stage != ErrorStageConfig || runtimeErr.Class != llmkit.ErrorClassConfiguration || runtimeErr.ProviderDispatched {
+		t.Fatalf("RuntimeError = %+v, want typed pre-dispatch configuration error", runtimeErr)
+	}
+}
+
+func TestOpenAICompatibleProvidersFromConfigRejectsMissingConfiguredAPIKey(t *testing.T) {
+	config := llmkit.Config{
+		Accounts: []llmkit.AccountConfig{{
+			Alias:     "cloud-primary",
+			Provider:  "openai_compatible",
+			BaseURL:   "https://provider.example/v1",
+			APIKeyEnv: "MISSING_PROVIDER_API_KEY",
+		}},
+		Models: []llmkit.ModelConfig{{
+			Alias:        "cloud-advanced",
+			ModelName:    "gpt-advanced",
+			Provider:     "openai_compatible",
+			AccountAlias: "cloud-primary",
+		}},
+	}
+
+	_, err := OpenAICompatibleProvidersFromConfig(config, func(string) string { return "" }, nil)
+	if err == nil {
+		t.Fatal("OpenAICompatibleProvidersFromConfig() error = nil, want missing API key error")
+	}
+	var runtimeErr *RuntimeError
+	if !errors.As(err, &runtimeErr) {
+		t.Fatalf("error type = %T, want *RuntimeError", err)
+	}
+	if runtimeErr.Stage != ErrorStageConfig || runtimeErr.Class != llmkit.ErrorClassConfiguration || runtimeErr.ProviderDispatched {
+		t.Fatalf("RuntimeError = %+v, want typed pre-dispatch configuration error", runtimeErr)
 	}
 }

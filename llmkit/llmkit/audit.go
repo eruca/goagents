@@ -71,6 +71,15 @@ const (
 	ErrorClassCapabilityMismatch ErrorClass = "capability_mismatch"
 	ErrorClassPolicyBlocked      ErrorClass = "policy_blocked"
 	ErrorClassAuth               ErrorClass = "auth_error"
+	ErrorClassCanceled           ErrorClass = "canceled"
+	ErrorClassConfiguration      ErrorClass = "configuration_error"
+	ErrorClassBudgetExceeded     ErrorClass = "budget_exceeded"
+	ErrorClassPostCall           ErrorClass = "post_call_error"
+	ErrorClassRequestTooLarge    ErrorClass = "request_too_large"
+	ErrorClassResponseTooLarge   ErrorClass = "response_too_large"
+	ErrorClassUsageMissing       ErrorClass = "usage_missing"
+	ErrorClassRedirectBlocked    ErrorClass = "redirect_blocked"
+	ErrorClassInvalidResponse    ErrorClass = "invalid_response"
 	ErrorClassUnknown            ErrorClass = "unknown"
 )
 

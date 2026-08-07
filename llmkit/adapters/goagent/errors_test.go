@@ -26,7 +26,14 @@ func TestDefaultErrorClassifier(t *testing.T) {
 		{name: "internal server error", err: &openaiapi.ResponseError{StatusCode: http.StatusInternalServerError}, want: llmkit.ErrorClassTransient},
 		{name: "service unavailable", err: &openaiapi.ResponseError{StatusCode: http.StatusServiceUnavailable}, want: llmkit.ErrorClassTransient},
 		{name: "bad request", err: &openaiapi.ResponseError{StatusCode: http.StatusBadRequest}, want: llmkit.ErrorClassUnknown},
-		{name: "canceled", err: context.Canceled, want: llmkit.ErrorClassUnknown},
+		{name: "canceled", err: context.Canceled, want: llmkit.ErrorClassCanceled},
+		{name: "request too large", err: classifiedProviderError{class: "request_too_large"}, want: llmkit.ErrorClassRequestTooLarge},
+		{name: "response too large", err: classifiedProviderError{class: "response_too_large"}, want: llmkit.ErrorClassResponseTooLarge},
+		{name: "invalid JSON", err: classifiedProviderError{class: "invalid_json"}, want: llmkit.ErrorClassInvalidJSON},
+		{name: "usage missing", err: classifiedProviderError{class: "usage_missing"}, want: llmkit.ErrorClassUsageMissing},
+		{name: "redirect blocked", err: classifiedProviderError{class: "redirect_blocked"}, want: llmkit.ErrorClassRedirectBlocked},
+		{name: "invalid response", err: classifiedProviderError{class: "invalid_response"}, want: llmkit.ErrorClassInvalidResponse},
+		{name: "budget exceeded", err: classifiedProviderError{class: "budget_exceeded"}, want: llmkit.ErrorClassBudgetExceeded},
 		{name: "unknown", err: errors.New("provider failed"), want: llmkit.ErrorClassUnknown},
 	}
 
@@ -44,3 +51,15 @@ type timeoutProviderError struct{}
 func (timeoutProviderError) Error() string   { return "provider timeout" }
 func (timeoutProviderError) Timeout() bool   { return true }
 func (timeoutProviderError) Temporary() bool { return true }
+
+type classifiedProviderError struct {
+	class string
+}
+
+func (e classifiedProviderError) Error() string {
+	return "classified provider error"
+}
+
+func (e classifiedProviderError) ProviderErrorClass() string {
+	return e.class
+}

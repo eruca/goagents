@@ -18,13 +18,20 @@ func OpenAICompatibleProvidersFromConfig(config llmkit.Config, getenv func(strin
 	for _, model := range config.Models {
 		account, ok := accounts[model.AccountAlias]
 		if !ok {
-			return nil, fmt.Errorf("model %q references unknown account_alias %q", model.Alias, model.AccountAlias)
+			err := fmt.Errorf("model %q references unknown account_alias %q", model.Alias, model.AccountAlias)
+			return nil, newRuntimeError(ErrorStageConfig, llmkit.ErrorClassConfiguration, false, err)
 		}
 		if !isOpenAICompatibleProvider(model.Provider, account.Provider) {
 			continue
 		}
 		if strings.TrimSpace(account.BaseURL) == "" {
-			return nil, fmt.Errorf("account %q base_url is required for OpenAI-compatible provider", account.Alias)
+			err := fmt.Errorf("account %q base_url is required for OpenAI-compatible provider", account.Alias)
+			return nil, newRuntimeError(ErrorStageConfig, llmkit.ErrorClassConfiguration, false, err)
+		}
+		apiKey := apiKeyFromEnv(getenv, account.APIKeyEnv)
+		if strings.TrimSpace(account.APIKeyEnv) != "" && strings.TrimSpace(apiKey) == "" {
+			err := fmt.Errorf("configured API key is unavailable for account %q", account.Alias)
+			return nil, newRuntimeError(ErrorStageConfig, llmkit.ErrorClassConfiguration, false, err)
 		}
 		modelName := strings.TrimSpace(model.ModelName)
 		if modelName == "" {
@@ -32,12 +39,13 @@ func OpenAICompatibleProvidersFromConfig(config llmkit.Config, getenv func(strin
 		}
 		client, err := openaiapi.New(openaiapi.Config{
 			BaseURL:    account.BaseURL,
-			APIKey:     apiKeyFromEnv(getenv, account.APIKeyEnv),
+			APIKey:     apiKey,
 			Model:      modelName,
 			HTTPClient: httpClient,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("create provider for model %q: %w", model.Alias, err)
+			wrapped := fmt.Errorf("create provider for model %q: %w", model.Alias, err)
+			return nil, newRuntimeError(ErrorStageConfig, llmkit.ErrorClassConfiguration, false, wrapped)
 		}
 		providers[model.Alias] = client
 	}

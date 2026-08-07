@@ -218,6 +218,27 @@ client := goagentadapter.NewClient(goagentadapter.Config{
 `MaxAttempts <= 0` preserves the default behavior: try all remaining eligible
 provider-backed candidates.
 
+`NewClient` deliberately preserves the v0.1.0 fallback contract above. New
+reliability-sensitive runtimes should opt into fail-closed behavior and
+allowlist only errors that are known to occur before dispatch:
+
+```go
+client := goagentadapter.NewRuntimeClient(
+    goagentadapter.Config{
+        Candidates: config.Candidates(),
+        Providers:  providers,
+    },
+    goagentadapter.WithRetryableErrorClasses(
+        llmkit.ErrorClassTransient,
+        llmkit.ErrorClassTimeout,
+    ),
+)
+```
+
+The runtime path never falls back when the provider error is dispatched or its
+dispatch status is unknown. `NewClientWithPreDispatch` is a convenience for the
+same fail-closed path with a typed pre-dispatch hook.
+
 Hosts can also classify provider errors for audit and future typed fallback
 rules:
 
@@ -236,7 +257,7 @@ Without `ErrorClassifier`, provider failures keep the existing
 failed outcomes also record `error_class`, such as `timeout` or
 `rate_limited`.
 
-The typed fallback contract is tracked in
+The typed fallback contract is documented in
 `../docs/plans/2026-05-07-llmkit-host-contract-followups-design.md`.
 
 ## API Keys
@@ -302,6 +323,12 @@ import (
 The provider map keys must match `Candidate.Model.Alias`. Missing provider-backed candidates are skipped before routing.
 
 `OpenAICompatibleProvidersFromConfig` supports `provider: openai`, `provider: openai_compatible`, and local OpenAI-compatible servers. It uses account `base_url`, model `model`, and account `api_key_env`; if `model` is omitted, the model alias is used as the provider model id. Passing `nil` as the HTTP client uses the default client.
+
+That factory preserves the v0.1.0 provider behavior. A runtime that requires
+request, response, or output-token bounds should construct each OpenAI-compatible
+provider with `openaiapi.NewWithLimits`, place it in the same alias-keyed provider
+map, and call `ChatWithMaxOutputTokens` through the adapter. Zero-valued limits
+are disabled; limits are never silently inferred from an application profile.
 
 When a selected provider fails, the adapter removes that candidate and asks the policy to select the next best provider-backed candidate. Each attempted route is recorded with an incremented `attempt` value when a recorder is configured.
 
