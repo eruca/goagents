@@ -29,6 +29,7 @@ type Agent struct {
 	outputFormat         OutputFormat
 	outputValidator      OutputValidator
 	budgetGuard          BudgetGuard
+	maxOutputTokens      int
 	maxIterations        int
 }
 
@@ -134,6 +135,13 @@ func WithBudget(budget Budget) Option {
 func WithBudgetGuard(guard BudgetGuard) Option {
 	return func(a *Agent) {
 		a.budgetGuard = guard
+	}
+}
+
+// WithMaxOutputTokens 设置传给 LLM 的单次生成上限。
+func WithMaxOutputTokens(maxOutputTokens int) Option {
+	return func(a *Agent) {
+		a.maxOutputTokens = maxOutputTokens
 	}
 }
 
@@ -268,7 +276,7 @@ func (a *Agent) rehydrateToolProvider(ctx context.Context, state *RunState, regi
 }
 
 func (a *Agent) newReActRunner(runRegistry MutableToolRegistry) *ReActRunner {
-	return NewReActRunner(ReActConfig{
+	return NewReActRunnerWithMaxOutputTokens(ReActConfig{
 		LLM:                  a.llm,
 		PromptCompiler:       a.promptCompiler,
 		PromptBlocks:         a.promptBlocks,
@@ -285,7 +293,7 @@ func (a *Agent) newReActRunner(runRegistry MutableToolRegistry) *ReActRunner {
 		OutputValidator:      a.outputValidator,
 		BudgetGuard:          a.budgetGuard,
 		MaxIterations:        a.maxIterations,
-	})
+	}, a.maxOutputTokens)
 }
 
 func (a *Agent) runErrorResult(state *RunState, detailed bool, err error) (*RunResult, error) {

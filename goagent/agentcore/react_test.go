@@ -12,8 +12,9 @@ import (
 )
 
 type mockLLM struct {
-	requests  []ports.ChatRequest
-	responses []*ports.ChatResponse
+	requests        []ports.ChatRequest
+	maxOutputTokens []int
+	responses       []*ports.ChatResponse
 }
 
 func (m *mockLLM) Chat(ctx context.Context, req ports.ChatRequest) (*ports.ChatResponse, error) {
@@ -24,6 +25,11 @@ func (m *mockLLM) Chat(ctx context.Context, req ports.ChatRequest) (*ports.ChatR
 	resp := m.responses[0]
 	m.responses = m.responses[1:]
 	return resp, nil
+}
+
+func (m *mockLLM) ChatWithMaxOutputTokens(ctx context.Context, req ports.ChatRequest, maxOutputTokens int) (*ports.ChatResponse, error) {
+	m.maxOutputTokens = append(m.maxOutputTokens, maxOutputTokens)
+	return m.Chat(ctx, req)
 }
 
 func TestReActFinalAnswerStopsWithFinalResult(t *testing.T) {

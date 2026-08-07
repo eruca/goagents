@@ -75,6 +75,12 @@ type ReActRunner struct {
 }
 
 func NewReActRunner(config ReActConfig) *ReActRunner {
+	return NewReActRunnerWithMaxOutputTokens(config, 0)
+}
+
+// NewReActRunnerWithMaxOutputTokens 在不改变已发布 ReActConfig 形状的前提下，
+// 为每次模型调用增加生成 token 上限。
+func NewReActRunnerWithMaxOutputTokens(config ReActConfig, maxOutputTokens int) *ReActRunner {
 	maxIterations := config.MaxIterations
 	if maxIterations <= 0 {
 		maxIterations = 8
@@ -83,6 +89,7 @@ func NewReActRunner(config ReActConfig) *ReActRunner {
 	if registry == nil {
 		registry = tools.NewRegistry()
 	}
+	budget := budgetFromGuard(config.BudgetGuard)
 	return &ReActRunner{
 		maxIterations:  maxIterations,
 		memoryProvider: config.MemoryProvider,
@@ -95,8 +102,8 @@ func NewReActRunner(config ReActConfig) *ReActRunner {
 			ToolProviderStage{Provider: config.ToolProvider, Registry: registry},
 			OutputFormatStage{Format: config.OutputFormat},
 			PromptStage{Compiler: config.PromptCompiler, Blocks: config.PromptBlocks},
-			ContextProjectionStage{Projector: config.ContextProjector, Budget: budgetFromGuard(config.BudgetGuard)},
-			ThinkStage{LLM: config.LLM, ToolRegistry: registry},
+			ContextProjectionStage{Projector: config.ContextProjector, Budget: budget},
+			NewThinkStageWithMaxOutputTokens(config.LLM, registry, maxOutputTokens),
 			BudgetStage{Guard: config.BudgetGuard},
 			PolicyStage{Engine: config.PolicyEngine, ToolRegistry: registry},
 			ApprovalStage{Approver: config.ToolApprover},

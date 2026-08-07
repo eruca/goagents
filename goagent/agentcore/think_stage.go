@@ -2,14 +2,35 @@ package agentcore
 
 import (
 	"context"
+	"errors"
 
 	"github.com/eruca/goagents/goagent/ports"
 	"github.com/eruca/goagents/goagent/tools"
 )
 
+var ErrMaxOutputTokensUnsupported = errors.New("LLM does not support per-call max output tokens")
+
 type ThinkStage struct {
 	LLM          ports.LLMClient
 	ToolRegistry ports.ToolRegistry
+}
+
+type maxOutputTokensLLM interface {
+	ChatWithMaxOutputTokens(context.Context, ports.ChatRequest, int) (*ports.ChatResponse, error)
+}
+
+type thinkStageWithMaxOutputTokens struct {
+	ThinkStage
+	maxOutputTokens int
+}
+
+// NewThinkStageWithMaxOutputTokens 保持 ThinkStage 的 v0.1.0 形状，
+// 同时为需要 Provider 侧上限的调用者提供增量入口。
+func NewThinkStageWithMaxOutputTokens(llm ports.LLMClient, registry ports.ToolRegistry, maxOutputTokens int) Stage {
+	return thinkStageWithMaxOutputTokens{
+		ThinkStage:      ThinkStage{LLM: llm, ToolRegistry: registry},
+		maxOutputTokens: maxOutputTokens,
+	}
 }
 
 func (s ThinkStage) Name() string {
@@ -17,11 +38,27 @@ func (s ThinkStage) Name() string {
 }
 
 func (s ThinkStage) Run(ctx context.Context, state *RunState) (StageResult, error) {
+	return s.run(ctx, state, 0)
+}
+
+func (s thinkStageWithMaxOutputTokens) Run(ctx context.Context, state *RunState) (StageResult, error) {
+	return s.ThinkStage.run(ctx, state, s.maxOutputTokens)
+}
+
+func (s ThinkStage) run(ctx context.Context, state *RunState, maxOutputTokens int) (StageResult, error) {
 	req := ports.ChatRequest{
 		Messages: chatMessages(state),
 		Tools:    chatToolSpecs(s.ToolRegistry),
 	}
-	resp, err := s.LLM.Chat(ctx, req)
+	var resp *ports.ChatResponse
+	var err error
+	if maxOutputTokens == 0 {
+		resp, err = s.LLM.Chat(ctx, req)
+	} else if client, ok := s.LLM.(maxOutputTokensLLM); ok {
+		resp, err = client.ChatWithMaxOutputTokens(ctx, req, maxOutputTokens)
+	} else {
+		return StageAbort, ErrMaxOutputTokensUnsupported
+	}
 	if err != nil {
 		return StageAbort, err
 	}

@@ -106,6 +106,13 @@ The core depends only on `ports.LLMClient`. Real model clients live outside `age
 
 `extensions/providers/openaiapi` implements `ports.LLMClient` for OpenAI-compatible Chat Completions services. It maps framework messages, tool specs, tool call IDs, and tool outputs to the compatible request/response shape while keeping provider-specific code out of the core.
 
+`openaiapi.New` preserves the v0.1.0 behavior for existing consumers. Use
+`openaiapi.NewWithLimits` to opt into explicit request-byte, response-byte, and
+maximum-output-token bounds. Pair it with `agentcore.WithMaxOutputTokens` (or
+`ChatWithMaxOutputTokens` at the lower-level API) so the Provider receives the
+per-call generation limit. Zero-valued limits are disabled; the library does
+not hard-code application-specific budgets.
+
 See `examples/openai-compatible` for a real-provider example. The example requires `OPENAI_COMPAT_BASE_URL` and `OPENAI_COMPAT_MODEL`; `OPENAI_COMPAT_API_KEY` is optional. Without the required values it prints a skip message and exits successfully.
 
 ## Observable Runs
