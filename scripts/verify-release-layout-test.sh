@@ -72,7 +72,7 @@ if ! mv "$rewrite_script" "$test_script" >/dev/null 2>&1; then
 fi
 
 if output="$(bash "$test_script" 2>&1)"; then
-  printf 'release layout test error: fourth release delta was accepted\n' >&2
+  printf 'release layout test error: unexpected extra release delta was accepted\n' >&2
   exit 1
 fi
 if [[ "$output" != *"release layout error: release delta set mismatch"* ]]; then
