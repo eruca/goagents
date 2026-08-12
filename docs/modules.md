@@ -80,10 +80,10 @@ host applications            compose whatever modules they need
 ## Local Development
 
 The root `go.work` file is for local development only. It lets the modules use
-workspace sources without publishing intermediate versions. Until `v0.1.0`
-exists remotely, version-specific workspace replacements map internal
-`module@v0.1.0` requirements to the matching local directories. Published module
-`go.mod` files do not contain those replacements.
+workspace sources without publishing intermediate versions. Version-specific
+workspace replacements map current internal module requirements to the matching
+local directories. Published module `go.mod` files do not contain those
+replacements.
 
 Do not rely on `go.work` for external consumers. Published consumers should use
 tagged module versions and no local `replace` directives.
@@ -93,20 +93,24 @@ tagged module versions and no local `replace` directives.
 Use Go subdirectory module tags:
 
 ```text
-goagent/v0.1.0
+goagent/v0.1.2
 hostkit/v0.1.0
 artifactkit/v0.1.0
 contextkit/v0.1.0
 evalkit/v0.1.0
 ocrs/v0.1.0
-runkit/v0.1.0
+runkit/v0.1.1
 skillkit/v0.1.0
-workflowkit/v0.1.0
+workflowkit/v0.1.1
 workflowkit/agentstep/v0.1.0
-llmkit/v0.1.0
+llmkit/v0.1.2
 mcpkit/v0.1.0
 mcpkit/officialsdk/v0.1.0
 ```
+
+The current in-process recovery release advances exactly `goagent/v0.1.2` and
+`llmkit/v0.1.2`. Host modules remain outside this release. Publication evidence
+requires exact immutable annotated tags and clean `GOWORK=off` consumers.
 
 Only tag modules that changed. If `workflowkit/agentstep` changes without a core
 `workflowkit` change, tag only `workflowkit/agentstep`.

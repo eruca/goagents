@@ -38,7 +38,7 @@ for command_name in go shasum zip; do
   fi
 done
 
-candidate_version="v0.1.1-week17.0"
+candidate_version="v0.1.2"
 goagent_module="github.com/eruca/goagents/goagent"
 llmkit_module="github.com/eruca/goagents/llmkit"
 proxy_root="$workdir/proxy"
@@ -482,4 +482,4 @@ done
 
 printf 'week 17 snapshot: goagent=%s llmkit=%s\n' \
   "$(module_snapshot_sha256 goagent)" "$(module_snapshot_sha256 llmkit)"
-printf 'week 17 external consumer verification passed\n'
+printf 'Week 18 in-process release candidate verification passed\n'

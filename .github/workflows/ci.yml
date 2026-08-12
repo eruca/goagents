@@ -28,7 +28,7 @@ jobs:
       - name: Verify release layout
         run: bash ./scripts/verify-release-layout.sh
 
-      - name: Verify Week 17 external consumer
+      - name: Verify in-process module candidate
         run: bash ./scripts/verify-week17-consumer.sh
 
       - name: Verify workspace

@@ -6,16 +6,16 @@ MODULE_PREFIX="github.com/eruca/goagents/"
 APACHE_LICENSE_SHA256="cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
 
 published_modules=(
-  "goagent|${MODULE_PREFIX}goagent|v0.1.0|goagent/v0.1.0|existing"
-  "hostkit|${MODULE_PREFIX}hostkit|v0.1.0|hostkit/v0.1.0|release-delta"
+  "goagent|${MODULE_PREFIX}goagent|v0.1.2|goagent/v0.1.2|release-delta"
+  "hostkit|${MODULE_PREFIX}hostkit|v0.1.0|hostkit/v0.1.0|existing"
   "artifactkit|${MODULE_PREFIX}artifactkit|v0.1.0|artifactkit/v0.1.0|existing"
   "contextkit|${MODULE_PREFIX}contextkit|v0.1.0|contextkit/v0.1.0|existing"
   "evalkit|${MODULE_PREFIX}evalkit|v0.1.0|evalkit/v0.1.0|existing"
   "ocrs|${MODULE_PREFIX}ocrs|v0.1.0|ocrs/v0.1.0|existing"
-  "workflowkit|${MODULE_PREFIX}workflowkit|v0.1.1|workflowkit/v0.1.1|release-delta"
-  "llmkit|${MODULE_PREFIX}llmkit|v0.1.0|llmkit/v0.1.0|existing"
+  "workflowkit|${MODULE_PREFIX}workflowkit|v0.1.1|workflowkit/v0.1.1|existing"
+  "llmkit|${MODULE_PREFIX}llmkit|v0.1.2|llmkit/v0.1.2|release-delta"
   "mcpkit|${MODULE_PREFIX}mcpkit|v0.1.0|mcpkit/v0.1.0|existing"
-  "runkit|${MODULE_PREFIX}runkit|v0.1.1|runkit/v0.1.1|release-delta"
+  "runkit|${MODULE_PREFIX}runkit|v0.1.1|runkit/v0.1.1|existing"
   "skillkit|${MODULE_PREFIX}skillkit|v0.1.0|skillkit/v0.1.0|existing"
   "workflowkit/agentstep|${MODULE_PREFIX}workflowkit/agentstep|v0.1.0|workflowkit/agentstep/v0.1.0|existing"
   "mcpkit/officialsdk|${MODULE_PREFIX}mcpkit/officialsdk|v0.1.0|mcpkit/officialsdk/v0.1.0|existing"
@@ -26,13 +26,12 @@ unreleased_modules=(
 )
 
 release_delta_tags=(
-  "hostkit/v0.1.0"
-  "workflowkit/v0.1.1"
-  "runkit/v0.1.1"
+  "goagent/v0.1.2"
+  "llmkit/v0.1.2"
 )
 
 internal_requirements=(
-  "llmkit|${MODULE_PREFIX}goagent|v0.1.0"
+  "llmkit|${MODULE_PREFIX}goagent|v0.1.2"
   "mcpkit|${MODULE_PREFIX}goagent|v0.1.0"
   "runkit|${MODULE_PREFIX}goagent|v0.1.0"
   "skillkit|${MODULE_PREFIX}goagent|v0.1.0"

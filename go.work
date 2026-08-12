@@ -22,7 +22,7 @@ use (
 	./workflowkit/examples/ocr-review
 )
 
-replace github.com/eruca/goagents/goagent v0.1.0 => ./goagent
+replace github.com/eruca/goagents/goagent v0.1.2 => ./goagent
 
 replace github.com/eruca/goagents/hostkit v0.1.0 => ./hostkit
 
@@ -36,7 +36,7 @@ replace github.com/eruca/goagents/ocrs v0.1.0 => ./ocrs
 
 replace github.com/eruca/goagents/workflowkit v0.1.1 => ./workflowkit
 
-replace github.com/eruca/goagents/llmkit v0.1.0 => ./llmkit
+replace github.com/eruca/goagents/llmkit v0.1.2 => ./llmkit
 
 replace github.com/eruca/goagents/mcpkit v0.1.0 => ./mcpkit
 

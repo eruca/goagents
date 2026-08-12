@@ -3,7 +3,7 @@ module github.com/eruca/goagents/llmkit
 go 1.26.1
 
 require (
-	github.com/eruca/goagents/goagent v0.1.0
+	github.com/eruca/goagents/goagent v0.1.2
 	gopkg.in/yaml.v3 v3.0.1
 )
 

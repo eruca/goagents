@@ -53,9 +53,10 @@ go test -count=1 -race -run '^TestHostMemoryPostgresBlackBox$' ./...
 
 The repository uses one monorepo namespace, `github.com/eruca/goagents`, with
 independently tagged subdirectory modules. The historical v0.1.0 publication
-contains 12 modules; the Host lifecycle v0.1.1 candidate adds `hostkit` and
-selectively versions only modules with public changes. Validate module paths,
-internal dependency edges, workspace mappings, and tag prefixes with:
+contains 12 modules. The current in-process recovery release advances only
+`goagent` and `llmkit` to `v0.1.2`; Host runtime, process protocols, and OCI
+artifacts are outside this release. Validate module paths, internal dependency
+edges, workspace mappings, and tag prefixes with:
 
 ```bash
 bash ./scripts/verify-release-layout.sh
@@ -109,6 +110,8 @@ the [v0.1.0 final acceptance record](docs/superpowers/specs/2026-07-15-mvp-final
 Both lifecycle P2 items are now implemented; the current selective-module
 release boundary is recorded in the
 [v0.1.1 publication record](docs/superpowers/specs/2026-07-18-v0.1.1-publication.md).
+The v0.1.2 tag immutability recovery and public proxy evidence are recorded in
+[the publication record](docs/devlog/v0.1.2-inprocess-tag-publication.md).
 
 ## License
 
