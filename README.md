@@ -110,8 +110,8 @@ the [v0.1.0 final acceptance record](docs/superpowers/specs/2026-07-15-mvp-final
 Both lifecycle P2 items are now implemented; the current selective-module
 release boundary is recorded in the
 [v0.1.1 publication record](docs/superpowers/specs/2026-07-18-v0.1.1-publication.md).
-The v0.1.2 tag immutability recovery is recorded in
-[its focused devlog](docs/devlog/v0.1.2-inprocess-tag-recovery.md).
+The v0.1.2 tag immutability recovery and public proxy evidence are recorded in
+[the publication record](docs/devlog/v0.1.2-inprocess-tag-publication.md).
 
 ## License
 
