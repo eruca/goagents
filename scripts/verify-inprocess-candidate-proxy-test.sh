@@ -28,17 +28,17 @@ fi
 
 printf 'not the project license\n' >"$workdir/wrong-license"
 ln -s "$repo_root/LICENSE" "$workdir/license-link"
-if package_inprocess_module "$repo_root/goagent" github.com/eruca/goagents/goagent v0.1.1 \
+if package_inprocess_module "$repo_root/goagent" github.com/eruca/goagents/goagent v0.1.2 \
   "$workdir/relative-proxy" "$workdir/relative-archive" LICENSE; then
   printf 'candidate packager accepted a relative root LICENSE path\n' >&2
   exit 1
 fi
-if package_inprocess_module "$repo_root/goagent" github.com/eruca/goagents/goagent v0.1.1 \
+if package_inprocess_module "$repo_root/goagent" github.com/eruca/goagents/goagent v0.1.2 \
   "$workdir/symlink-proxy" "$workdir/symlink-archive" "$workdir/license-link"; then
   printf 'candidate packager accepted a symlink root LICENSE\n' >&2
   exit 1
 fi
-if package_inprocess_module "$repo_root/goagent" github.com/eruca/goagents/goagent v0.1.1 \
+if package_inprocess_module "$repo_root/goagent" github.com/eruca/goagents/goagent v0.1.2 \
   "$workdir/wrong-proxy" "$workdir/wrong-archive" "$workdir/wrong-license"; then
   printf 'candidate packager accepted an invalid root LICENSE hash\n' >&2
   exit 1
@@ -70,8 +70,8 @@ done
   cd "$1"
   GOWORK=off go mod init example.invalid/inprocess-proxy-test >/dev/null
   GOWORK=off go mod edit \
-    -require=github.com/eruca/goagents/goagent@v0.1.1 \
-    -require=github.com/eruca/goagents/llmkit@v0.1.1
+    -require=github.com/eruca/goagents/goagent@v0.1.2 \
+    -require=github.com/eruca/goagents/llmkit@v0.1.2
   cat > consumer.go <<'"'"'EOF'"'"'
 package consumer
 
@@ -83,12 +83,12 @@ EOF
   GOWORK=off go mod tidy
   modules="$(GOWORK=off go list -m -f "{{.Path}}|{{.Version}}|{{if .Replace}}{{.Replace.Path}}{{end}}" all)"
   printf "%s\\n" "$modules"
-  grep -Fx "github.com/eruca/goagents/goagent|v0.1.1|" <<<"$modules"
-  grep -Fx "github.com/eruca/goagents/llmkit|v0.1.1|" <<<"$modules"
+  grep -Fx "github.com/eruca/goagents/goagent|v0.1.2|" <<<"$modules"
+  grep -Fx "github.com/eruca/goagents/llmkit|v0.1.2|" <<<"$modules"
   expected_license_sha="cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
   module_cache="$(GOWORK=off go env GOMODCACHE)"
   for module_name in goagent llmkit; do
-    license_path="$module_cache/github.com/eruca/goagents/$module_name@v0.1.1/LICENSE"
+    license_path="$module_cache/github.com/eruca/goagents/$module_name@v0.1.2/LICENSE"
     if [[ ! -f "$license_path" || -L "$license_path" ]]; then
       printf "candidate module %s must contain a regular non-symlink LICENSE\\n" "$module_name" >&2
       exit 1
@@ -108,7 +108,7 @@ EOF
     printf "candidate modules must not have replacements\\n" >&2
     exit 1
   fi
-  if GOPROXY="${GOPROXY%%,*}" GOWORK=off go mod download github.com/eruca/goagents/goagent@v0.1.2; then
+  if GOPROXY="${GOPROXY%%,*}" GOWORK=off go mod download github.com/eruca/goagents/goagent@v0.1.3; then
     printf "candidate proxy forged an unavailable version\\n" >&2
     exit 1
   fi

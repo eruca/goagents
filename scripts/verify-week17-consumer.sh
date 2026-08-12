@@ -38,7 +38,7 @@ for command_name in go shasum zip; do
   fi
 done
 
-candidate_version="v0.1.1"
+candidate_version="v0.1.2"
 goagent_module="github.com/eruca/goagents/goagent"
 llmkit_module="github.com/eruca/goagents/llmkit"
 proxy_root="$workdir/proxy"

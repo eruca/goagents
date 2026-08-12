@@ -28,9 +28,9 @@ fi
 
 proxy_root="$workdir/proxy"
 archive_root="$workdir/archive"
-package_inprocess_module "$repo_root/goagent" github.com/eruca/goagents/goagent v0.1.1 \
+package_inprocess_module "$repo_root/goagent" github.com/eruca/goagents/goagent v0.1.2 \
   "$proxy_root" "$archive_root" "$repo_root/LICENSE"
-package_inprocess_module "$repo_root/llmkit" github.com/eruca/goagents/llmkit v0.1.1 \
+package_inprocess_module "$repo_root/llmkit" github.com/eruca/goagents/llmkit v0.1.2 \
   "$proxy_root" "$archive_root" "$repo_root/LICENSE"
 
 mkdir -p "$workdir/modcache" "$workdir/buildcache"

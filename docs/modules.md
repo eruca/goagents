@@ -93,7 +93,7 @@ tagged module versions and no local `replace` directives.
 Use Go subdirectory module tags:
 
 ```text
-goagent/v0.1.0
+goagent/v0.1.2
 hostkit/v0.1.0
 artifactkit/v0.1.0
 contextkit/v0.1.0
@@ -103,15 +103,14 @@ runkit/v0.1.1
 skillkit/v0.1.0
 workflowkit/v0.1.1
 workflowkit/agentstep/v0.1.0
-llmkit/v0.1.0
+llmkit/v0.1.2
 mcpkit/v0.1.0
 mcpkit/officialsdk/v0.1.0
 ```
 
-The current unreleased in-process candidate advances exactly
-`goagent/v0.1.1` and `llmkit/v0.1.1`. These target names are not publication
-evidence; publication still requires the exact reviewed remote commit, CI,
-annotated tags, and a clean tagged consumer.
+The current in-process recovery release advances exactly `goagent/v0.1.2` and
+`llmkit/v0.1.2`. Host modules remain outside this release. Publication evidence
+requires exact immutable annotated tags and clean `GOWORK=off` consumers.
 
 Only tag modules that changed. If `workflowkit/agentstep` changes without a core
 `workflowkit` change, tag only `workflowkit/agentstep`.
