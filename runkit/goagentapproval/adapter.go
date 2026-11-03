@@ -92,7 +92,7 @@ func (a *Adapter) SavePending(ctx context.Context, pending PendingCheckpoint) er
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidPendingCheckpoint, err)
 	}
-	ciphertext, err := a.cipher.Encrypt(ctx, payload, checkpointAAD(pending.ID, pending.TenantID, pending.DefinitionHash))
+	ciphertext, err := a.cipher.Encrypt(ctx, payload, checkpointAAD(pending.ID, pending.Checkpoint.RunID, pending.TenantID, pending.DefinitionHash))
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrCheckpointEncrypt, err)
 	}
@@ -164,7 +164,7 @@ func (a *Adapter) ApproveAndResume(ctx context.Context, request ResumeRequest) (
 }
 
 func (a *Adapter) decryptCheckpoint(ctx context.Context, checkpoint runkit.ApprovalCheckpoint) (agentcore.RunCheckpoint, error) {
-	payload, err := a.cipher.Decrypt(ctx, checkpoint.Ciphertext, checkpointAAD(checkpoint.ID, checkpoint.TenantID, checkpoint.DefinitionHash))
+	payload, err := a.cipher.Decrypt(ctx, checkpoint.Ciphertext, checkpointAAD(checkpoint.ID, checkpoint.RunID, checkpoint.TenantID, checkpoint.DefinitionHash))
 	if err != nil {
 		return agentcore.RunCheckpoint{}, fmt.Errorf("%w: %v", ErrCheckpointDecrypt, err)
 	}
@@ -175,13 +175,18 @@ func (a *Adapter) decryptCheckpoint(ctx context.Context, checkpoint runkit.Appro
 	return runCheckpoint, nil
 }
 
-func checkpointAAD(checkpointID, tenantID, definitionHash string) []byte {
+// checkpointAAD binds a ciphertext to its checkpoint row, so a ciphertext
+// copied to another checkpoint, run, tenant, or agent definition fails to
+// decrypt instead of resuming the wrong run.
+func checkpointAAD(checkpointID, runID, tenantID, definitionHash string) []byte {
 	encoded, _ := json.Marshal(struct {
 		CheckpointID   string `json:"checkpoint_id"`
+		RunID          string `json:"run_id"`
 		TenantID       string `json:"tenant_id"`
 		DefinitionHash string `json:"definition_hash"`
 	}{
 		CheckpointID:   checkpointID,
+		RunID:          runID,
 		TenantID:       tenantID,
 		DefinitionHash: definitionHash,
 	})
