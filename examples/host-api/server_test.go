@@ -644,7 +644,7 @@ func TestHostAPIQueuedWorkerStatusTracksCompletedRun(t *testing.T) {
 
 	status := waitForQueuedWorkerStatus(t, server.Handler(), func(status queuedWorkerStatusResponse) bool {
 		return status.Started &&
-			status.WorkerID == queuedWorkerID &&
+			status.WorkerID == server.workerID &&
 			status.Claimed >= 1 &&
 			status.Completed >= 1 &&
 			status.LastWorkflowID == "wf-worker-status"
@@ -2396,4 +2396,33 @@ func routeCandidate(t *testing.T, candidates []llmRouteCandidateResponse, alias 
 	}
 	t.Fatalf("route candidate %q not found: %+v", alias, candidates)
 	return llmRouteCandidateResponse{}
+}
+
+func TestHostAPIServersSharingADatabaseUseDistinctLeaseOwners(t *testing.T) {
+	home := t.TempDir()
+	first, err := NewServer(Config{RuntimeHome: home})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+	defer first.Close(context.Background())
+	if err := first.workflows.Save(context.Background(), workflowkit.WorkflowRun{ID: "wf-shared", Status: workflowkit.StatusPending}); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := first.queue.ClaimRunnable(context.Background(), first.workerID, time.Minute)
+	if err != nil {
+		t.Fatalf("ClaimRunnable returned error: %v", err)
+	}
+
+	second, err := NewServer(Config{RuntimeHome: home})
+	if err != nil {
+		t.Fatalf("second NewServer returned error: %v", err)
+	}
+	defer second.Close(context.Background())
+	if second.workerID == first.workerID {
+		t.Fatalf("both servers use worker id %q", first.workerID)
+	}
+	// The second process must not release the first one's live lease.
+	if _, err := second.queue.ReleaseLease(context.Background(), claimed.ID, second.workerID); !errors.Is(err, workflowkit.ErrWorkflowLeaseNotOwned) {
+		t.Fatalf("ReleaseLease by another process = %v, want ErrWorkflowLeaseNotOwned", err)
+	}
 }
