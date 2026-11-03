@@ -20,7 +20,7 @@ type Store struct {
 const SchemaVersion = 2
 
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", dsn(path))
 	if err != nil {
 		return nil, err
 	}
@@ -31,6 +31,21 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	return store, nil
+}
+
+// dsn sets per-connection options: enforce foreign keys, wait on locks held by
+// other processes instead of failing, use WAL so readers do not block the
+// writer, and take the write lock when a transaction begins so read-then-write
+// transactions cannot deadlock on lock upgrade.
+//
+// Every time is written in UTC: the driver stores times as text and SQLite
+// compares them as strings, which only orders correctly within one zone.
+func dsn(path string) string {
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	return path + separator + "_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_txlock=immediate"
 }
 
 func (s *Store) Close() error {
@@ -47,10 +62,11 @@ func (s *Store) Create(ctx context.Context, record runkit.RunRecord) error {
 	if strings.TrimSpace(record.RunID) == "" {
 		return fmt.Errorf("run id is required")
 	}
-	now := time.Now()
+	now := time.Now().UTC()
 	if record.CreatedAt.IsZero() {
 		record.CreatedAt = now
 	}
+	record.CreatedAt = record.CreatedAt.UTC()
 	record.UpdatedAt = now
 
 	row, err := encodeRun(record)
@@ -118,6 +134,7 @@ func (s *Store) AppendEvent(ctx context.Context, event runkit.RunEvent) error {
 	if event.RecordedAt.IsZero() {
 		event.RecordedAt = time.Now()
 	}
+	event.RecordedAt = event.RecordedAt.UTC()
 	metadata, err := marshalJSON(event.Metadata)
 	if err != nil {
 		return err
@@ -213,7 +230,7 @@ UPDATE agent_runs SET
 WHERE run_id = ?
 `, summary.Status, summary.Status, summary.ContentRef, summary.AbortReason,
 		summary.InputTokens, summary.OutputTokens, summary.LLMCalls, summary.ToolCalls,
-		usedTools, time.Now(), runID)
+		usedTools, time.Now().UTC(), runID)
 	if err != nil {
 		return err
 	}
@@ -276,8 +293,6 @@ func (s *Store) requireRun(ctx context.Context, runID string) error {
 
 func (s *Store) migrate(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `
-PRAGMA foreign_keys = ON;
-
 CREATE TABLE IF NOT EXISTS runkit_schema (
 	id TEXT PRIMARY KEY,
 	version INTEGER NOT NULL,
