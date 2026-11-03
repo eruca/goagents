@@ -563,7 +563,7 @@ func TestHostAPIQueuedWorkerRecoversPendingWorkflowAfterReopen(t *testing.T) {
 		t.Fatalf("reopen NewServer returned error: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+	stopWorkerOnCleanup(t, reopened, cancel)
 	reopened.StartQueuedWorker(ctx)
 
 	loaded := waitForWorkflowStatus(t, reopened.Handler(), "wf-queued-recover", workflowkit.StatusWaitingApproval)
@@ -602,7 +602,7 @@ func TestHostAPIQueuedWorkerFailsRunningWorkflowWithExpiredLease(t *testing.T) {
 		t.Fatalf("Save running workflow returned error: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+	stopWorkerOnCleanup(t, server, cancel)
 	server.StartQueuedWorker(ctx)
 
 	waitForWorkflowStatus(t, server.Handler(), "wf-crashed", workflowkit.StatusFailed)
@@ -628,7 +628,7 @@ func TestHostAPIQueuedWorkerStatusTracksCompletedRun(t *testing.T) {
 		t.Fatalf("NewServer returned error: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+	stopWorkerOnCleanup(t, server, cancel)
 	server.StartQueuedWorker(ctx)
 
 	queued := doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]string{
@@ -978,7 +978,7 @@ func TestHostAPIQueuedWorkerExtendsLeaseWhileWorkflowRuns(t *testing.T) {
 		slowApprovalStep{delay: 800 * time.Millisecond},
 	})
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+	stopWorkerOnCleanup(t, server, cancel)
 	server.StartQueuedWorker(ctx)
 
 	queued := doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]string{
@@ -1020,7 +1020,7 @@ func TestHostAPIQueuedWorkerStatusTracksRunError(t *testing.T) {
 		t.Fatalf("Save pending workflow returned error: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+	stopWorkerOnCleanup(t, server, cancel)
 	server.StartQueuedWorker(ctx)
 
 	waitForWorkflowStatus(t, server.Handler(), "wf-worker-error", workflowkit.StatusFailed)
@@ -1053,7 +1053,7 @@ func TestHostAPIRequeuesFailedWorkflow(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+	stopWorkerOnCleanup(t, server, cancel)
 	server.StartQueuedWorker(ctx)
 	failed := waitForWorkflowStatus(t, server.Handler(), "wf-requeue-failed", workflowkit.StatusFailed)
 	if failed.RunMode != string(RunModeQueued) {
@@ -1101,7 +1101,7 @@ func TestHostAPIWorkflowEventsExposeStepFailureAndRequeue(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+	stopWorkerOnCleanup(t, server, cancel)
 	server.StartQueuedWorker(ctx)
 	waitForWorkflowStatus(t, server.Handler(), "wf-events", workflowkit.StatusFailed)
 
@@ -1770,7 +1770,7 @@ func TestHostAPIRunModeSyncAndQueuedSemantics(t *testing.T) {
 		t.Fatalf("NewServer returned error: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+	stopWorkerOnCleanup(t, server, cancel)
 	server.StartQueuedWorker(ctx)
 
 	syncRun := doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]string{
@@ -2044,6 +2044,24 @@ func selectedModelAlias(t *testing.T, routes llmRoutesResponse) string {
 func selectedTaskType(t *testing.T, routes llmRoutesResponse) string {
 	t.Helper()
 	return selectedRoute(t, routes).TaskType
+}
+
+// stopWorkerOnCleanup cancels the queued worker, waits for it to exit, and
+// closes the server's stores. Registered after t.TempDir, it runs before the
+// directory is removed, so no background write races the removal.
+func stopWorkerOnCleanup(t *testing.T, server *Server, cancel context.CancelFunc) {
+	t.Helper()
+	t.Cleanup(func() {
+		cancel()
+		ctx, done := context.WithTimeout(context.Background(), testWaitTimeout)
+		defer done()
+		if err := server.WaitQueuedWorker(ctx); err != nil {
+			t.Errorf("queued worker did not stop: %v", err)
+		}
+		if err := server.Close(ctx); err != nil {
+			t.Errorf("Close returned error: %v", err)
+		}
+	})
 }
 
 // testWaitTimeout bounds polling waits for background work. Waits return as
