@@ -74,7 +74,10 @@ A typed recoverable embedding/vector failure degrades to the remaining
 exact/full-text channels and records only content-free channel/ID metadata.
 If the entire Recall Store returns a typed recoverable failure, the Agent
 Projector injects no memory, records a content-free degradation marker, and
-continues through the next projector/main task path. Invalid Scope or
+continues through the next projector/main task path. The same degradation
+applies when Recall's own deadline expires while the caller's context is still
+alive. The Projector keeps only the last `MaxQueryRunes` runes of an oversized
+query instead of failing the turn. Invalid Scope or
 authorization, policy, candidate shape, and Store integrity still fail closed.
 Raw query text, content, vectors, bearer headers, provider payloads, and
 Artifact bodies are not valid log/event/error fields.

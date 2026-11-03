@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/eruca/goagents/goagent/agentcore"
 	"github.com/eruca/goagents/goagent/ports"
@@ -982,4 +983,68 @@ func cloneMetadataForTest(input map[string]any) map[string]any {
 		}
 	}
 	return output
+}
+
+type blockingRecallStore struct{}
+
+func (blockingRecallStore) SearchCandidates(ctx context.Context, _ memorykit.CandidateQuery) (memorykit.CandidateSet, error) {
+	<-ctx.Done()
+	return memorykit.CandidateSet{}, ctx.Err()
+}
+
+func TestProjectorDegradesWhenOwnRecallDeadlineExpires(t *testing.T) {
+	t.Parallel()
+	recaller, err := memorykit.NewRecaller(memorykit.RecallConfig{
+		Store:       blockingRecallStore{},
+		CountTokens: func(text string) int { return len(text) },
+		Policy: memorykit.RecallPolicy{
+			Version: "test-policy", ExactLimit: 8, FullTextLimit: 8,
+			RRFK: 60, MaxItems: 8, MaxTokens: 10000,
+			MaxQueryRunes: 1000, MaxKeys: 16, Deadline: 20 * time.Millisecond,
+			EmbeddingProfileID: "test-profile", EmbeddingDimensions: 3,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer := &recordingObserver{}
+	projector := mustProjector(t, ProjectorConfig{
+		Recall:       recaller,
+		ResolveScope: func(map[string]any) (memorykit.Scope, error) { return testScope, nil },
+		BuildQuery:   DefaultQueryBuilder,
+		Observe:      observer,
+	})
+	messages := []agentcore.Message{{Role: "user", Content: "query"}}
+
+	got, err := projector.Project(context.Background(), agentcore.ContextProjectionRequest{Messages: messages})
+	if err != nil {
+		t.Fatalf("Project returned error: %v", err)
+	}
+	if !reflect.DeepEqual(got.Messages, messages) || got.Metadata["memory.degraded"] != true {
+		t.Fatalf("projection = %#v, want messages unchanged and memory.degraded", got)
+	}
+	observer.assertSingleContentFreeEvent(t, "memory.degraded", map[string]any{"memory.degraded": true})
+}
+
+func TestProjectorTruncatesOversizedQueryKeepingTail(t *testing.T) {
+	t.Parallel()
+	store := &projectorRecallStore{}
+	projector := mustProjector(t, ProjectorConfig{
+		Recall:       newProjectorRecaller(t, store),
+		ResolveScope: func(map[string]any) (memorykit.Scope, error) { return testScope, nil },
+		BuildQuery:   DefaultQueryBuilder,
+	})
+	pasted := strings.Repeat("日志行", 600) + "我们选了哪个数据库？"
+
+	if _, err := projector.Project(context.Background(), agentcore.ContextProjectionRequest{
+		Messages: []agentcore.Message{{Role: "user", Content: pasted}},
+	}); err != nil {
+		t.Fatalf("Project returned error: %v", err)
+	}
+	if got := utf8.RuneCountInString(store.query.Text); got != 1000 {
+		t.Fatalf("query runes = %d, want 1000", got)
+	}
+	if !strings.HasSuffix(store.query.Text, "我们选了哪个数据库？") {
+		t.Fatalf("query tail lost: %q", store.query.Text[len(store.query.Text)-40:])
+	}
 }

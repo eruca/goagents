@@ -3,12 +3,14 @@ package agentadapter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"reflect"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/eruca/goagents/goagent/agentcore"
 	"github.com/eruca/goagents/memorykit"
@@ -67,6 +69,7 @@ func (p *Projector) Project(ctx context.Context, request agentcore.ContextProjec
 	if err != nil {
 		return nil, err
 	}
+	text = lastRunes(text, p.cfg.Recall.MaxQueryRunes())
 	result, err := p.cfg.Recall.Recall(ctx, memorykit.RecallRequest{
 		Scope: scope,
 		Text:  text,
@@ -75,7 +78,10 @@ func (p *Projector) Project(ctx context.Context, request agentcore.ContextProjec
 		Now:   time.Now().UTC(),
 	})
 	if err != nil {
-		if !memorykit.IsRecoverable(err) {
+		// Recall's own deadline expiring while the turn is still alive means a
+		// slow dependency, which degrades to no memory like a recoverable error.
+		ownDeadline := errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil
+		if !memorykit.IsRecoverable(err) && !ownDeadline {
 			return nil, err
 		}
 		metadata, metadataErr := projectionBaseMetadata(canonical.Metadata)
@@ -113,6 +119,16 @@ func (p *Projector) Project(ctx context.Context, request agentcore.ContextProjec
 	}
 	p.record(ctx, event, eventPayload)
 	return p.projectNext(ctx, messages, canonical.Budget, metadata)
+}
+
+// lastRunes keeps the end of an oversized query, where a pasted log or
+// document is usually followed by the actual question.
+func lastRunes(text string, limit int) string {
+	if limit <= 0 || utf8.RuneCountInString(text) <= limit {
+		return text
+	}
+	runes := []rune(text)
+	return string(runes[len(runes)-limit:])
 }
 
 func DefaultQueryBuilder(ctx context.Context, request agentcore.ContextProjectionRequest) (string, []string, []memorykit.Kind, error) {
