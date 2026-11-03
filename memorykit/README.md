@@ -68,7 +68,11 @@ immediately before the current user message.
 
 On-demand recall uses request-scoped `search_memory` and `read_memory` tools.
 Their schemas contain no Scope fields. `remember_project_memory` is registered
-only when trusted Host metadata grants explicit write intent.
+only when trusted Host metadata grants explicit write intent. A model write
+takes effect immediately only for a new kind/key or to replace the model's own
+untouched earlier write. If the current active record was written, reviewed,
+or corrected by anyone else, the write is stored as a candidate for review and
+the existing record stays in effect.
 
 A typed recoverable embedding/vector failure degrades to the remaining
 exact/full-text channels and records only content-free channel/ID metadata.

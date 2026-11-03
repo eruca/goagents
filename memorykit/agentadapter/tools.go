@@ -311,7 +311,7 @@ func (p *ToolProvider) newWriteTool(scope memorykit.Scope, actor string, runID a
 			}
 			digest := sha256.Sum256(canonical)
 			id := uuid.NewSHA1(uuid.UUID(runID), digest[:]).String()
-			idempotencyKey := "agent-write:" + runID.String() + ":" + hex.EncodeToString(digest[:])
+			idempotencyKey := agentWriteKeyPrefix + runID.String() + ":" + hex.EncodeToString(digest[:])
 
 			validationErr := p.cfg.ValidateContent.ValidateMemoryContent(ctx, parsed.Content)
 			if contextErr := canonicalContextError(ctx, validationErr); contextErr != nil {
@@ -350,9 +350,16 @@ func (p *ToolProvider) newWriteTool(scope memorykit.Scope, actor string, runID a
 			if validUntil != nil {
 				until = *validUntil
 			}
+			status, statusErr := p.writeStatus(ctx, scope, parsed.Kind, parsed.Key)
+			if contextErr := canonicalContextError(ctx, statusErr); contextErr != nil {
+				return nil, contextErr
+			}
+			if statusErr != nil {
+				return memoryWriteFailure(env), nil
+			}
 			request := memorykit.CreateRequest{
 				ID: id, Scope: scope, Kind: parsed.Kind, Key: parsed.Key,
-				Status: memorykit.StatusActive, Content: parsed.Content,
+				Status: status, Content: parsed.Content,
 				ValidFrom: now, ValidUntil: until,
 				Importance: 0, Confidence: 0, SourceAgentID: runID.String(),
 				Actor: actor, Reason: parsed.Reason,
@@ -388,6 +395,28 @@ func (p *ToolProvider) newWriteTool(scope memorykit.Scope, actor string, runID a
 	}
 }
 
+const agentWriteKeyPrefix = "agent-write:"
+
+// writeStatus decides whether a model write takes effect now. Creating an
+// active record supersedes the current one for the same kind and key, so the
+// model may only replace its own untouched writes. Memory a person wrote,
+// reviewed, or corrected stays in effect; the new content becomes a candidate
+// for review instead, which keeps a prompt-injected write from rewriting it.
+func (p *ToolProvider) writeStatus(ctx context.Context, scope memorykit.Scope, kind memorykit.Kind, key string) (memorykit.Status, error) {
+	current, err := p.cfg.Store.List(ctx, memorykit.ListQuery{
+		Scope: scope, Kind: kind, Key: key, Status: memorykit.StatusActive, Limit: 1,
+	})
+	if err != nil {
+		return "", err
+	}
+	for _, memory := range current {
+		if !strings.HasPrefix(memory.IdempotencyKey, agentWriteKeyPrefix) || memory.Version != 1 {
+			return memorykit.StatusCandidate, nil
+		}
+	}
+	return memorykit.StatusActive, nil
+}
+
 type writeExpectation struct {
 	id, key, actor, sourceAgentID, idempotencyKey string
 	scope                                         memorykit.Scope
@@ -398,7 +427,8 @@ func validateReplayMemory(memory memorykit.Memory, expected writeExpectation, li
 	if memory.ID != expected.id || memory.Scope != expected.scope || memory.Kind != expected.kind || memory.Key != expected.key ||
 		memory.CreatedBy != expected.actor || memory.SourceAgentID != expected.sourceAgentID ||
 		memory.IdempotencyKey != expected.idempotencyKey || strings.TrimSpace(memory.Content) == "" ||
-		(memory.Status != memorykit.StatusActive && memory.Status != memorykit.StatusInactive) {
+		(memory.Status != memorykit.StatusActive && memory.Status != memorykit.StatusInactive &&
+			memory.Status != memorykit.StatusCandidate) {
 		return memorykit.ErrInvalidRecallResult
 	}
 	if err := validateStoredMemory(memory, nil, limits); err != nil {
@@ -430,14 +460,23 @@ func timeDifference(left, right time.Time) time.Duration {
 }
 
 func memoryWriteSuccess(memory memorykit.Memory) (*tools.Result, error) {
-	encoded, err := json.Marshal(struct {
+	result := struct {
 		ID      string `json:"id"`
 		Version int64  `json:"version"`
-	}{ID: memory.ID, Version: memory.Version})
+		Status  string `json:"status,omitempty"`
+		Note    string `json:"note,omitempty"`
+	}{ID: memory.ID, Version: memory.Version}
+	forUser := "项目记忆已保存"
+	if memory.Status == memorykit.StatusCandidate {
+		result.Status = string(memorykit.StatusCandidate)
+		result.Note = "pending review; the existing reviewed memory for this key stays in effect"
+		forUser = "项目记忆已提交审核"
+	}
+	encoded, err := json.Marshal(result)
 	if err != nil {
 		return nil, fmt.Errorf("%w: encode memory write result", memorykit.ErrInvalidRecallResult)
 	}
-	return &tools.Result{ForLLM: string(encoded), ForUser: "项目记忆已保存"}, nil
+	return &tools.Result{ForLLM: string(encoded), ForUser: forUser}, nil
 }
 
 type toolRecord struct {
