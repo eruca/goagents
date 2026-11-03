@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"reflect"
 	"sync"
 
 	"github.com/eruca/goagents/goagent/ports"
@@ -56,13 +57,20 @@ func (e *Executor) Execute(ctx context.Context, calls []Call, env Env) ([]Execut
 }
 
 func executeParallel(ctx context.Context, calls []Call, resolved []Tool, env Env, results []Execution, errs []error, offset int) {
+	// Each parallel call writes to its own metadata copy; the writes are merged
+	// back afterwards so tools can still report through Env.Metadata.
+	original := maps.Clone(env.Metadata)
+	copies := make([]map[string]any, len(calls))
 	var wg sync.WaitGroup
 	for i, call := range calls {
 		tool := resolved[i]
+		callEnv := env
+		callEnv.Metadata = maps.Clone(env.Metadata)
+		copies[i] = callEnv.Metadata
 		wg.Add(1)
 		go func(i int, call Call, tool Tool) {
 			defer wg.Done()
-			result, err := runTool(ctx, tool, call, env)
+			result, err := runTool(ctx, tool, call, callEnv)
 			if err != nil {
 				errs[i] = classifyToolError(err)
 				return
@@ -71,6 +79,27 @@ func executeParallel(ctx context.Context, calls []Call, resolved []Tool, env Env
 		}(i, call, tool)
 	}
 	wg.Wait()
+	mergeMetadataWrites(env.Metadata, original, copies)
+}
+
+// mergeMetadataWrites applies each copy's changes relative to original to
+// shared, in call order, so a later call wins on conflicting keys.
+func mergeMetadataWrites(shared, original map[string]any, copies []map[string]any) {
+	if shared == nil {
+		return
+	}
+	for _, copied := range copies {
+		for key := range original {
+			if _, kept := copied[key]; !kept {
+				delete(shared, key)
+			}
+		}
+		for key, value := range copied {
+			if previous, existed := original[key]; !existed || !reflect.DeepEqual(previous, value) {
+				shared[key] = value
+			}
+		}
+	}
 }
 
 func executeOne(ctx context.Context, call Call, tool Tool, env Env, results []Execution, errs []error, index int) {
@@ -91,8 +120,6 @@ func runTool(ctx context.Context, tool Tool, call Call, env Env) (result *Result
 			err = fmt.Errorf("%w: tool %q panicked: %v", ErrToolExecutionFailed, call.Name, recovered)
 		}
 	}()
-	// Parallel calls share the caller's Env, so each call gets its own top-level metadata map.
-	env.Metadata = maps.Clone(env.Metadata)
 	return toolHandler(tool)(toolCtx, call.Input, env)
 }
 

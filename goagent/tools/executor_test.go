@@ -503,24 +503,53 @@ func TestExecutorConvertsToolPanicToError(t *testing.T) {
 	}
 }
 
-func TestExecutorIsolatesEnvMetadataPerCall(t *testing.T) {
+func TestExecutorMergesParallelMetadataWritesWithoutRace(t *testing.T) {
 	registry := NewRegistry()
 	registry.Register(testTool{
 		spec: Spec{Name: "writer", Permission: policy.PermissionRead},
 		run: func(ctx context.Context, input json.RawMessage, env Env) (*Result, error) {
+			var call struct{ N int }
+			_ = json.Unmarshal(input, &call)
 			for i := range 100 {
-				env.Metadata[fmt.Sprintf("key_%d", i)] = i
+				env.Metadata[fmt.Sprintf("key_%d_%d", call.N, i)] = i
 			}
+			env.Metadata["last"] = call.N
 			return &Result{ForLLM: "ok"}, nil
 		},
 	})
-	metadata := map[string]any{"tenant": "t1"}
+	metadata := map[string]any{"tenant": "t1", "last": -1}
 
-	calls := []Call{{Name: "writer"}, {Name: "writer"}, {Name: "writer"}}
+	calls := []Call{
+		{Name: "writer", Input: json.RawMessage(`{"N":0}`)},
+		{Name: "writer", Input: json.RawMessage(`{"N":1}`)},
+		{Name: "writer", Input: json.RawMessage(`{"N":2}`)},
+	}
 	if _, err := NewExecutor(registry).Execute(context.Background(), calls, Env{Metadata: metadata}); err != nil {
 		t.Fatalf("Execute returned error: %v", err)
 	}
-	if len(metadata) != 1 || metadata["tenant"] != "t1" {
-		t.Fatalf("caller metadata mutated: %#v", metadata)
+	if len(metadata) != 302 || metadata["tenant"] != "t1" || metadata["key_1_99"] != 99 {
+		t.Fatalf("merged metadata has %d keys, want every call's writes", len(metadata))
+	}
+	if metadata["last"] != 2 {
+		t.Fatalf("last = %v, want the last call in order to win", metadata["last"])
+	}
+}
+
+func TestExecutorSequentialToolWritesReachCallerMetadata(t *testing.T) {
+	registry := NewRegistry()
+	registry.Register(testTool{
+		spec: Spec{Name: "remember", Permission: policy.PermissionWrite},
+		run: func(ctx context.Context, input json.RawMessage, env Env) (*Result, error) {
+			env.Metadata["write_failed"] = true
+			return &Result{ForLLM: "not saved", IsError: true}, nil
+		},
+	})
+	metadata := map[string]any{}
+
+	if _, err := NewExecutor(registry).Execute(context.Background(), []Call{{Name: "remember"}}, Env{Metadata: metadata}); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if metadata["write_failed"] != true {
+		t.Fatalf("metadata = %#v, want the tool's write visible to the run", metadata)
 	}
 }
