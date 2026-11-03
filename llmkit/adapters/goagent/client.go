@@ -14,7 +14,7 @@ import (
 	"github.com/eruca/goagents/llmkit"
 )
 
-var _ ports.LLMClient = (*Client)(nil)
+var _ ports.StreamingLLMClient = (*Client)(nil)
 
 const providerOutcomeCleanupTimeout = 2 * time.Second
 
@@ -27,6 +27,12 @@ type ProviderClient interface {
 // Provider 不支持时，pre-dispatch hook 必须 fail closed。
 type ProviderRequestDigester interface {
 	ProviderRequestSHA256(ports.ChatRequest) ([sha256.Size]byte, error)
+}
+
+// ProviderStreamRequestDigester is ProviderRequestDigester for the body a
+// streaming provider's ChatStream sends.
+type ProviderStreamRequestDigester interface {
+	ProviderStreamRequestSHA256(ports.ChatRequest) ([sha256.Size]byte, error)
 }
 
 // ProfileProvider supplies task routing metadata for a goagent request.
@@ -206,6 +212,18 @@ func newClient(config Config, runtime runtimeOptions, strictFallback bool) *Clie
 // Chat selects a route, records the route trace, and delegates to the selected
 // provider client.
 func (c *Client) Chat(ctx context.Context, req ports.ChatRequest) (*ports.ChatResponse, error) {
+	return c.route(ctx, req, nil)
+}
+
+// ChatStream routes like Chat and delivers the selected provider's output to
+// onDelta: streamed when the provider implements ports.StreamingLLMClient,
+// otherwise as one delta of the complete response. An attempt that already
+// delivered output never falls back, so the caller never sees two answers.
+func (c *Client) ChatStream(ctx context.Context, req ports.ChatRequest, onDelta func(ports.ChatDelta) error) (*ports.ChatResponse, error) {
+	return c.route(ctx, req, onDelta)
+}
+
+func (c *Client) route(ctx context.Context, req ports.ChatRequest, onDelta func(ports.ChatDelta) error) (*ports.ChatResponse, error) {
 	profile := llmkit.DefaultTaskProfile()
 	if c.profileProvider != nil {
 		profile = c.profileProvider(ctx, req)
@@ -254,9 +272,11 @@ func (c *Client) Chat(ctx context.Context, req ports.ChatRequest) (*ports.ChatRe
 			err := fmt.Errorf("missing provider client for selected model alias %q", decision.SelectedAlias)
 			return nil, newRuntimeError(ErrorStageConfig, llmkit.ErrorClassConfiguration, false, err)
 		} else {
+			streaming, streams := provider.(ports.StreamingLLMClient)
+			streams = streams && onDelta != nil
 			if c.preDispatchHook != nil {
 				// claim 未明确成功前不能开始 health、调用 Provider 或进入 fallback。
-				providerCallIndex, err := c.runPreDispatchHook(ctx, req, provider, trace, lastProviderCallIndex)
+				providerCallIndex, err := c.runPreDispatchHook(ctx, req, provider, streams, trace, lastProviderCallIndex)
 				if err != nil {
 					return nil, err
 				}
@@ -268,7 +288,17 @@ func (c *Client) Chat(ctx context.Context, req ports.ChatRequest) (*ports.ChatRe
 				}
 			}
 			callStarted := time.Now()
-			resp, providerErr := provider.Chat(ctx, req)
+			delivered := false
+			var resp *ports.ChatResponse
+			var providerErr error
+			if streams {
+				resp, providerErr = streaming.ChatStream(ctx, req, func(delta ports.ChatDelta) error {
+					delivered = true
+					return onDelta(delta)
+				})
+			} else {
+				resp, providerErr = provider.Chat(ctx, req)
+			}
 			latency := time.Since(callStarted)
 			if requestErr := ctx.Err(); requestErr != nil {
 				// 取消优先于晚到 Provider 结果，完整响应不得继续向上返回。
@@ -278,6 +308,11 @@ func (c *Client) Chat(ctx context.Context, req ports.ChatRequest) (*ports.ChatRe
 			if providerErr == nil {
 				if err := c.recordOutcomeAfterCall(ctx, profile, decision, trace, latency, resp, nil); err != nil {
 					return nil, newRuntimeError(ErrorStagePostCall, llmkit.ErrorClassPostCall, true, err)
+				}
+				if onDelta != nil && !streams && resp.Content != "" {
+					if err := onDelta(ports.ChatDelta{Content: resp.Content}); err != nil {
+						return nil, err
+					}
 				}
 				return resp, nil
 			}
@@ -291,7 +326,7 @@ func (c *Client) Chat(ctx context.Context, req ports.ChatRequest) (*ports.ChatRe
 				providerErr,
 			)
 			failures = append(failures, runtimeErr)
-			if ctx.Err() != nil || !c.allowsFallback(runtimeErr) {
+			if ctx.Err() != nil || delivered || !c.allowsFallback(runtimeErr) {
 				return nil, joinRouteErrors(runtimeErr, failures[:len(failures)-1])
 			}
 		}
@@ -428,8 +463,8 @@ func (c *Client) routeTrace(profile llmkit.TaskProfile, decision llmkit.RouteDec
 	}
 }
 
-func (c *Client) runPreDispatchHook(ctx context.Context, req ports.ChatRequest, provider ProviderClient, trace llmkit.RouteTrace, lastProviderCallIndex int) (int, error) {
-	providerDigest, err := providerRequestSHA256(provider, req)
+func (c *Client) runPreDispatchHook(ctx context.Context, req ports.ChatRequest, provider ProviderClient, stream bool, trace llmkit.RouteTrace, lastProviderCallIndex int) (int, error) {
+	providerDigest, err := providerRequestSHA256(provider, req, stream)
 	if err != nil {
 		var runtimeErr *RuntimeError
 		if errors.As(err, &runtimeErr) {
@@ -481,7 +516,14 @@ func (c *Client) allowsFallback(err *RuntimeError) bool {
 	return slices.Contains(c.retryableErrorClass, err.Class)
 }
 
-func providerRequestSHA256(provider ProviderClient, req ports.ChatRequest) ([sha256.Size]byte, error) {
+func providerRequestSHA256(provider ProviderClient, req ports.ChatRequest, stream bool) ([sha256.Size]byte, error) {
+	if stream {
+		digester, ok := provider.(ProviderStreamRequestDigester)
+		if !ok {
+			return [sha256.Size]byte{}, newRuntimeError(ErrorStageConfig, llmkit.ErrorClassConfiguration, false, fmt.Errorf("provider stream request digester is required when pre-dispatch hook is configured"))
+		}
+		return digester.ProviderStreamRequestSHA256(req)
+	}
 	digester, ok := provider.(ProviderRequestDigester)
 	if !ok {
 		return [sha256.Size]byte{}, newRuntimeError(ErrorStageConfig, llmkit.ErrorClassConfiguration, false, fmt.Errorf("provider request digester is required when pre-dispatch hook is configured"))

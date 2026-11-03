@@ -338,6 +338,8 @@ builds, and `ports.ChatRequest.MaxOutputTokens` reaches the selected provider
 unchanged. Zero values disable a bound; limits are never silently inferred from
 an application profile.
 
+The adapter implements `ports.StreamingLLMClient`, so `Agent.Stream` receives model output as it is generated. `ChatStream` streams through providers that implement `ports.StreamingLLMClient`, such as `openaiapi`, and delivers any other provider's complete response as one delta. An attempt that has already delivered output never falls back to another candidate, so a consumer never sees two answers spliced together. With a pre-dispatch hook, streaming providers must implement `ProviderStreamRequestDigester` so the claim covers the exact streaming request body.
+
 When a selected provider fails, the adapter removes that candidate and asks the policy to select the next best provider-backed candidate. Each attempted route is recorded with an incremented `attempt` value when a recorder is configured.
 
 See `examples/goagent-routing` for a minimal host-style example that loads `LLMKIT_HOME/config.yaml`, builds OpenAI-compatible providers, wires the goagent adapter, runs one request, and writes `route-events.jsonl` plus `outcomes.jsonl`.

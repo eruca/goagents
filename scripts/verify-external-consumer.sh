@@ -77,8 +77,17 @@ func (scriptedLLM) Chat(context.Context, ports.ChatRequest) (*ports.ChatResponse
 	return &ports.ChatResponse{Content: "consumer answer"}, nil
 }
 
-func TestAgentRunsThroughRoutedWorkflowStep(t *testing.T) {
-	routed := goagentadapter.NewClient(goagentadapter.Config{
+func (scriptedLLM) ChatStream(_ context.Context, _ ports.ChatRequest, onDelta func(ports.ChatDelta) error) (*ports.ChatResponse, error) {
+	for _, chunk := range []string{"consumer ", "answer"} {
+		if err := onDelta(ports.ChatDelta{Content: chunk}); err != nil {
+			return nil, err
+		}
+	}
+	return &ports.ChatResponse{Content: "consumer answer"}, nil
+}
+
+func routedClient() *goagentadapter.Client {
+	return goagentadapter.NewClient(goagentadapter.Config{
 		Candidates: []llmkit.Candidate{{
 			Model: llmkit.ModelCapability{
 				Alias: "local", Provider: "local", IsLocal: true,
@@ -89,7 +98,27 @@ func TestAgentRunsThroughRoutedWorkflowStep(t *testing.T) {
 		}},
 		Providers: map[string]goagentadapter.ProviderClient{"local": scriptedLLM{}},
 	})
-	agent, err := agentcore.NewAgent(agentcore.WithLLM(routed))
+}
+
+func TestAgentStreamsRoutedModelOutput(t *testing.T) {
+	agent, err := agentcore.NewAgent(agentcore.WithLLM(routedClient()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream := agent.Stream(context.Background(), agentcore.RunRequest{Input: "hello"})
+	text := ""
+	for event := range stream.Events {
+		if event.Delta != nil {
+			text += event.Delta.Content
+		}
+	}
+	if result, err := stream.Wait(); err != nil || result.Content != "consumer answer" || text != "consumer answer" {
+		t.Fatalf("result = %+v, streamed = %q, err = %v", result, text, err)
+	}
+}
+
+func TestAgentRunsThroughRoutedWorkflowStep(t *testing.T) {
+	agent, err := agentcore.NewAgent(agentcore.WithLLM(routedClient()))
 	if err != nil {
 		t.Fatal(err)
 	}
