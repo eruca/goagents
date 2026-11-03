@@ -161,7 +161,7 @@ result, err := stream.Wait()
 `Stream` uses `RunDetailed` semantics for terminal results. On abort, `Wait` returns the partial result and error. Existing sinks configured with `WithEventSink` still receive runtime events.
 Call `stream.DiscardEvents()` if the host stops reading `Events`; this releases the event relay without canceling the Agent run or the configured event sink.
 
-When the LLM implements `ports.StreamingLLMClient`, the stream also carries model output as it is generated: events with a non-nil `Delta` hold a `ModelDelta` whose `Iteration` identifies the model call. Deltas go only to the stream, never to the configured event sink, so durable audit storage does not record every token. `Run` and `RunDetailed` always use `Chat`. `extensions/providers/openaiapi` streams over server-sent events.
+When the LLM implements `ports.StreamingLLMClient`, the stream also carries model output as it is generated: events with a non-nil `Delta` hold a `ModelDelta` whose `Iteration` identifies the model call. A delta carries text, a piece of a tool call (`ToolCall`: the call's `Index`, its `ID` and `Name` on the first piece, then fragments of its JSON `Arguments`), or both; a streamed tool call is only what the model asked for, and validation, policy, and approval still decide whether it runs. Deltas go only to the stream, never to the configured event sink, so durable audit storage does not record every token. `Run` and `RunDetailed` always use `Chat`. `extensions/providers/openaiapi` streams over server-sent events.
 
 The stream is in-process and transport-neutral; HTTP, SSE, WebSocket, and durable audit storage belong in the host application.
 

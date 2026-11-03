@@ -86,6 +86,26 @@ func TestClientChatStreamDeliversNonStreamingProviderAsOneDelta(t *testing.T) {
 	}
 }
 
+func TestClientChatStreamDeliversNonStreamingProviderToolCalls(t *testing.T) {
+	local := &fakeProviderClient{response: &ports.ChatResponse{ToolCalls: []ports.ToolCall{{ID: "call_1", Name: "lookup", Input: []byte(`{"q":"go"}`)}}}}
+	client := NewClient(Config{
+		Candidates:      testCandidates()[:1],
+		Providers:       map[string]ProviderClient{"local-small": local},
+		ProfileProvider: fixedProfile(simpleProfile()),
+	})
+
+	var pieces []ports.ToolCallDelta
+	_, err := client.ChatStream(context.Background(), ports.ChatRequest{}, func(delta ports.ChatDelta) error {
+		if delta.ToolCall != nil {
+			pieces = append(pieces, *delta.ToolCall)
+		}
+		return nil
+	})
+	if err != nil || len(pieces) != 1 || pieces[0] != (ports.ToolCallDelta{ID: "call_1", Name: "lookup", Arguments: `{"q":"go"}`}) {
+		t.Fatalf("tool call pieces = %+v, err = %v; want the whole call as one piece", pieces, err)
+	}
+}
+
 func TestClientChatStreamFallsBackOnlyBeforeOutput(t *testing.T) {
 	for _, tc := range []struct {
 		name         string

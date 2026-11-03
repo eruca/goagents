@@ -329,9 +329,11 @@ func (c *Client) attempt(ctx context.Context, req ports.ChatRequest, onDelta fun
 		if err := c.recordOutcomeAfterCall(ctx, profile, decision, trace, latency, resp, nil); err != nil {
 			return nil, delivered, newRuntimeError(ErrorStagePostCall, llmkit.ErrorClassPostCall, true, err)
 		}
-		if onDelta != nil && !streams && resp.Content != "" {
-			if err := onDelta(ports.ChatDelta{Content: resp.Content}); err != nil {
-				return nil, true, err
+		if onDelta != nil && !streams {
+			for _, delta := range ports.ResponseDeltas(resp) {
+				if err := onDelta(delta); err != nil {
+					return nil, true, err
+				}
 			}
 		}
 		return resp, delivered, nil

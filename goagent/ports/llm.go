@@ -18,16 +18,47 @@ type LLMClient interface {
 
 // StreamingLLMClient is an LLMClient that can deliver output while a call
 // runs. ChatStream calls onDelta with each increment in order and returns the
-// complete response, the same one Chat would return; tool calls arrive only in
-// that response. An error from onDelta aborts the call and is returned.
+// complete response, the same one Chat would return. Concatenating the
+// deltas' Content gives the response's Content, and concatenating the
+// ToolCall pieces of each Index gives its ToolCalls. An error from onDelta
+// aborts the call and is returned.
 type StreamingLLMClient interface {
 	LLMClient
 	ChatStream(ctx context.Context, req ChatRequest, onDelta func(ChatDelta) error) (*ChatResponse, error)
 }
 
-// ChatDelta is an increment of generated text.
+// ChatDelta is an increment of model output: generated text, a piece of a
+// tool call, or both.
 type ChatDelta struct {
-	Content string
+	Content  string
+	ToolCall *ToolCallDelta
+}
+
+// ToolCallDelta is a piece of the tool call at Index, its position in the
+// response's ToolCalls. ID and Name are set on the piece that first carries
+// them; Arguments is the next fragment of the call's JSON arguments, which are
+// valid JSON only once complete.
+type ToolCallDelta struct {
+	Index     int
+	ID        string
+	Name      string
+	Arguments string
+}
+
+// ResponseDeltas splits a complete response into the deltas a streaming client
+// would have sent, for clients that only have the whole response.
+func ResponseDeltas(resp *ChatResponse) []ChatDelta {
+	if resp == nil {
+		return nil
+	}
+	var deltas []ChatDelta
+	if resp.Content != "" {
+		deltas = append(deltas, ChatDelta{Content: resp.Content})
+	}
+	for i, call := range resp.ToolCalls {
+		deltas = append(deltas, ChatDelta{ToolCall: &ToolCallDelta{Index: i, ID: call.ID, Name: call.Name, Arguments: string(call.Input)}})
+	}
+	return deltas
 }
 
 type ChatRequest struct {

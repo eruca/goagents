@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -92,13 +93,24 @@ func TestChatStreamMergesToolCallArgumentsByIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var deltas []string
-	resp, err := client.ChatStream(context.Background(), ports.ChatRequest{}, collectDeltas(&deltas))
+	var deltas []ports.ChatDelta
+	resp, err := client.ChatStream(context.Background(), ports.ChatRequest{}, func(delta ports.ChatDelta) error {
+		deltas = append(deltas, delta)
+		return nil
+	})
 	if err != nil {
 		t.Fatalf("ChatStream returned error: %v", err)
 	}
-	if len(deltas) != 0 || len(resp.ToolCalls) != 2 {
-		t.Fatalf("deltas = %q, tool calls = %+v", deltas, resp.ToolCalls)
+	if len(resp.ToolCalls) != 2 {
+		t.Fatalf("tool calls = %+v, want 2", resp.ToolCalls)
+	}
+	// Pieces of each call, joined by index, rebuild the response's calls.
+	streamed := assembleToolCallDeltas(t, deltas)
+	if !reflect.DeepEqual(streamed, resp.ToolCalls) {
+		t.Fatalf("streamed tool calls = %+v, response = %+v", streamed, resp.ToolCalls)
+	}
+	if deltas[0].ToolCall == nil || deltas[0].ToolCall.ID != "call_1" || deltas[0].ToolCall.Name != "lookup" {
+		t.Fatalf("first delta = %+v, want the call header before its arguments", deltas[0])
 	}
 	first, second := resp.ToolCalls[0], resp.ToolCalls[1]
 	if first.ID != "call_1" || first.Name != "lookup" || string(first.Input) != `{"q":"go"}` ||
@@ -254,5 +266,54 @@ func TestChatStreamReportsCancellationMidStream(t *testing.T) {
 	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}
+
+func assembleToolCallDeltas(t *testing.T, deltas []ports.ChatDelta) []ports.ToolCall {
+	t.Helper()
+	var calls []ports.ToolCall
+	for _, delta := range deltas {
+		if delta.Content != "" {
+			t.Fatalf("unexpected content delta %q", delta.Content)
+		}
+		piece := delta.ToolCall
+		if piece == nil {
+			continue
+		}
+		for len(calls) <= piece.Index {
+			calls = append(calls, ports.ToolCall{})
+		}
+		call := &calls[piece.Index]
+		if piece.ID != "" {
+			call.ID = piece.ID
+		}
+		if piece.Name != "" {
+			call.Name = piece.Name
+		}
+		call.Input = append(call.Input, piece.Arguments...)
+	}
+	return calls
+}
+
+func TestChatStreamJSONFallbackStreamsToolCalls(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"go\"}"}}]}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	}))
+	t.Cleanup(server.Close)
+	client, err := New(Config{BaseURL: server.URL, Model: "test-model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var deltas []ports.ChatDelta
+	resp, err := client.ChatStream(context.Background(), ports.ChatRequest{}, func(delta ports.ChatDelta) error {
+		deltas = append(deltas, delta)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ChatStream returned error: %v", err)
+	}
+	if streamed := assembleToolCallDeltas(t, deltas); !reflect.DeepEqual(streamed, resp.ToolCalls) || len(streamed) != 1 {
+		t.Fatalf("streamed = %+v, response = %+v", streamed, resp.ToolCalls)
 	}
 }

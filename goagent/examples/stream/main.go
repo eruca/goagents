@@ -23,14 +23,23 @@ func (m *mockLLM) Chat(ctx context.Context, req ports.ChatRequest) (*ports.ChatR
 }
 
 // ChatStream makes mockLLM a ports.StreamingLLMClient: it streams the
-// response word by word before returning it whole.
+// response's text word by word and each tool call as one piece before
+// returning the response whole.
 func (m *mockLLM) ChatStream(ctx context.Context, req ports.ChatRequest, onDelta func(ports.ChatDelta) error) (*ports.ChatResponse, error) {
 	resp, err := m.Chat(ctx, req)
 	if err != nil {
 		return nil, err
 	}
 	for _, word := range strings.SplitAfter(resp.Content, " ") {
+		if word == "" {
+			continue
+		}
 		if err := onDelta(ports.ChatDelta{Content: word}); err != nil {
+			return nil, err
+		}
+	}
+	for i, call := range resp.ToolCalls {
+		if err := onDelta(ports.ChatDelta{ToolCall: &ports.ToolCallDelta{Index: i, ID: call.ID, Name: call.Name, Arguments: string(call.Input)}}); err != nil {
 			return nil, err
 		}
 	}
@@ -73,8 +82,12 @@ func main() {
 
 	stream := agent.Stream(ctx, agentcore.RunRequest{Input: "Check account acct_1."})
 	for event := range stream.Events {
-		if event.Delta != nil {
-			fmt.Printf("stream=delta iteration=%d text=%q\n", event.Delta.Iteration, event.Delta.Content)
+		if delta := event.Delta; delta != nil {
+			if delta.ToolCall != nil {
+				fmt.Printf("stream=delta iteration=%d tool_call=%s args=%s\n", delta.Iteration, delta.ToolCall.Name, delta.ToolCall.Arguments)
+			} else {
+				fmt.Printf("stream=delta iteration=%d text=%q\n", delta.Iteration, delta.Content)
+			}
 			continue
 		}
 		if event.Done {
