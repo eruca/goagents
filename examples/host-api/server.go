@@ -208,6 +208,7 @@ const (
 	queuedPollInterval                = 100 * time.Millisecond
 	minQueuedHeartbeatInterval        = time.Millisecond
 	requeueEventsMetadataKey          = "requeue_events"
+	queuedLeaseExpiredCode            = "queued_lease_expired"
 )
 
 var (
@@ -936,6 +937,7 @@ func (s *Server) runOneQueuedWorkflow(intakeCtx context.Context, executionCtx co
 	if s.queue == nil {
 		return false, true, nil
 	}
+	s.failExpiredQueuedWorkflows(intakeCtx)
 	s.worker.recordClaimAttempt()
 	claimed, err := s.queue.ClaimRunnable(intakeCtx, queuedWorkerID, s.queuedLeaseDuration())
 	if err != nil {
@@ -981,6 +983,27 @@ func (s *Server) runOneQueuedWorkflow(intakeCtx context.Context, executionCtx co
 	}
 	s.worker.recordCompleted(claimed.ID)
 	return true, true, nil
+}
+
+// failExpiredQueuedWorkflows fails queued runs whose worker stopped
+// heartbeating, for example after a host crash. The interrupted step is not
+// replayed because it may already have had side effects; an operator can
+// requeue the failed run, which resumes after its completed steps.
+func (s *Server) failExpiredQueuedWorkflows(ctx context.Context) {
+	recovery, ok := s.queue.(workflowkit.QueueRecoveryStore)
+	if !ok {
+		return
+	}
+	failed, err := recovery.FailExpiredRunning(ctx, queuedLeaseExpiredCode)
+	if err != nil {
+		s.worker.recordError(fmt.Errorf("fail expired queued workflows: %w", err))
+		return
+	}
+	for _, run := range failed {
+		if err := s.failRunningAgentRun(ctx, run.AgentRunID, queuedLeaseExpiredCode); err != nil {
+			s.worker.recordWorkflowError(run.ID, err)
+		}
+	}
 }
 
 func (s *Server) releaseQueuedWorkflowLease(workflowID string) {

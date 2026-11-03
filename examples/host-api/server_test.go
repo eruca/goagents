@@ -576,6 +576,52 @@ func TestHostAPIQueuedWorkerRecoversPendingWorkflowAfterReopen(t *testing.T) {
 	}
 }
 
+func TestHostAPIQueuedWorkerFailsRunningWorkflowWithExpiredLease(t *testing.T) {
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+	// A previous host process crashed mid-step: its lease expired and nothing
+	// will ever heartbeat or finish this run.
+	if err := server.runs.Create(context.Background(), runkit.RunRecord{
+		RunID:      "agent-crashed",
+		WorkflowID: "wf-crashed",
+		Status:     runkit.StatusRunning,
+	}); err != nil {
+		t.Fatalf("Create AgentRun returned error: %v", err)
+	}
+	if err := server.workflows.Save(context.Background(), workflowkit.WorkflowRun{
+		ID:             "wf-crashed",
+		Status:         workflowkit.StatusRunning,
+		AgentRunID:     "agent-crashed",
+		CurrentStep:    "agent",
+		CompletedSteps: []string{"prepare"},
+		LeaseOwner:     "crashed-worker",
+		LeaseUntil:     time.Now().Add(-time.Minute).UTC(),
+	}); err != nil {
+		t.Fatalf("Save running workflow returned error: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	server.StartQueuedWorker(ctx)
+
+	waitForWorkflowStatus(t, server.Handler(), "wf-crashed", workflowkit.StatusFailed)
+	failed, err := server.workflows.Get(context.Background(), "wf-crashed")
+	if err != nil {
+		t.Fatalf("Get workflow returned error: %v", err)
+	}
+	if failed.Error != queuedLeaseExpiredCode || failed.LeaseOwner != "" {
+		t.Fatalf("failed workflow = %+v, want %s with cleared lease", failed, queuedLeaseExpiredCode)
+	}
+	agentRun, err := server.runs.Get(context.Background(), "agent-crashed")
+	if err != nil {
+		t.Fatalf("Get AgentRun returned error: %v", err)
+	}
+	if agentRun.Status != runkit.StatusFailed || agentRun.Summary.AbortReason != queuedLeaseExpiredCode {
+		t.Fatalf("agent run = %+v, want failed with %s", agentRun, queuedLeaseExpiredCode)
+	}
+}
+
 func TestHostAPIQueuedWorkerStatusTracksCompletedRun(t *testing.T) {
 	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
 	if err != nil {
