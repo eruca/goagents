@@ -2,6 +2,7 @@ package sqlitestore
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -284,5 +285,62 @@ func TestStoreMigratesSchemaVersion(t *testing.T) {
 	}
 	if version != SchemaVersion {
 		t.Fatalf("schema version = %d, want %d", version, SchemaVersion)
+	}
+}
+
+func TestOpenConvertsLegacyTextTimes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "workflow.db")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Schema version 2 let the driver store times as zone-qualified text.
+	if _, err := legacy.Exec(`
+CREATE TABLE workflow_runs (
+	id TEXT PRIMARY KEY, status TEXT NOT NULL,
+	input_ref TEXT NOT NULL DEFAULT '', output_ref TEXT NOT NULL DEFAULT '',
+	agent_run_id TEXT NOT NULL DEFAULT '', audit_ref TEXT NOT NULL DEFAULT '',
+	error TEXT NOT NULL DEFAULT '', approval_ref TEXT NOT NULL DEFAULT '',
+	waiting_reason TEXT NOT NULL DEFAULT '', current_step TEXT NOT NULL DEFAULT '',
+	completed_steps_json TEXT NOT NULL DEFAULT '[]', step_attempts_json TEXT NOT NULL DEFAULT '{}',
+	step_records_json TEXT NOT NULL DEFAULT '[]', metadata_json TEXT NOT NULL DEFAULT '{}',
+	lease_owner TEXT NOT NULL DEFAULT '',
+	lease_until TIMESTAMP NOT NULL DEFAULT '0001-01-01T00:00:00Z',
+	created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL
+)`); err != nil {
+		t.Fatal(err)
+	}
+	utc9 := time.FixedZone("UTC+9", 9*3600)
+	base := time.Now().Add(-time.Hour).Truncate(time.Second)
+	insert := `INSERT INTO workflow_runs (id, status, lease_owner, lease_until, created_at, updated_at) VALUES (?, 'pending', ?, ?, ?, ?)`
+	// wf-older was created first but in a zone whose text sorts later, and
+	// its lease expired a minute ago.
+	if _, err := legacy.Exec(insert, "wf-older", "crashed-worker", time.Now().Add(-time.Minute).In(utc9), base.In(utc9), base.In(utc9)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(insert, "wf-newer", "", time.Time{}, base.Add(time.Minute).UTC(), base.UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+
+	var textTimes int
+	if err := store.db.QueryRow(`SELECT count(*) FROM workflow_runs WHERE typeof(created_at) = 'text' OR typeof(lease_until) = 'text'`).Scan(&textTimes); err != nil || textTimes != 0 {
+		t.Fatalf("text times left = %d, %v; want all converted", textTimes, err)
+	}
+	older, err := store.Get(context.Background(), "wf-older")
+	if err != nil || !older.CreatedAt.Equal(base) {
+		t.Fatalf("Get(wf-older) = %+v, %v; want created at %s", older, err, base)
+	}
+	claimed, err := store.ClaimRunnable(context.Background(), "worker-1", time.Minute)
+	if err != nil || claimed.ID != "wf-older" {
+		t.Fatalf("ClaimRunnable = %s, %v; want the older run with the expired lease", claimed.ID, err)
 	}
 }

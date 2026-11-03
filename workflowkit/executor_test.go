@@ -697,3 +697,102 @@ func TestExecutorRunRejectsPendingRunClaimedByAnotherOwner(t *testing.T) {
 		t.Fatalf("Run err = %v, want ErrRunPreempted", err)
 	}
 }
+
+func TestRetryPolicyBackoffIsJitteredAndCapped(t *testing.T) {
+	policy := RetryPolicy{BaseDelay: 10 * time.Millisecond, MaxDelay: 40 * time.Millisecond}
+	for retry, ceiling := range map[int]time.Duration{1: 10, 2: 20, 3: 40, 10: 40} {
+		ceiling *= time.Millisecond
+		seen := map[time.Duration]bool{}
+		for range 200 {
+			delay := policy.Backoff(retry)
+			if delay < 0 || delay > ceiling {
+				t.Fatalf("Backoff(%d) = %s, want within [0, %s]", retry, delay, ceiling)
+			}
+			seen[delay] = true
+		}
+		if len(seen) < 10 {
+			t.Fatalf("Backoff(%d) produced %d distinct delays, want jitter", retry, len(seen))
+		}
+	}
+	if got := (RetryPolicy{}).Backoff(3); got != 0 {
+		t.Fatalf("Backoff without BaseDelay = %s, want 0", got)
+	}
+}
+
+func TestExecutorYieldsLeasedRunBetweenRetriesAndKeepsBudgetAcrossClaims(t *testing.T) {
+	store := NewMemoryStore()
+	attempts := 0
+	executor := NewExecutor(store, []Step{
+		stepFunc{name: "flaky", run: func(context.Context, WorkflowRun) (StepResult, error) {
+			attempts++
+			return StepResult{}, TransientError{Err: errors.New("temporary outage")}
+		}},
+	}, WithRetryPolicy(RetryPolicy{MaxAttempts: 3, BaseDelay: time.Hour}))
+	if err := store.Save(context.Background(), WorkflowRun{ID: "wf-yield", Status: StatusPending}); err != nil {
+		t.Fatal(err)
+	}
+
+	claimAndRun := func() (WorkflowRun, error) {
+		t.Helper()
+		claimed, err := store.ClaimRunnable(context.Background(), "worker-1", time.Minute)
+		if err != nil {
+			t.Fatalf("ClaimRunnable returned error: %v", err)
+		}
+		run, runErr := executor.Run(context.Background(), claimed)
+		if _, err := store.ReleaseLease(context.Background(), run.ID, "worker-1"); err != nil {
+			t.Fatalf("ReleaseLease returned error: %v", err)
+		}
+		return run, runErr
+	}
+	makeDue := func() {
+		t.Helper()
+		if _, err := store.Update(context.Background(), "wf-yield", func(run WorkflowRun) (WorkflowRun, error) {
+			run.NextAttemptAt = time.Now().Add(-time.Second)
+			return run, nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for retry := 1; retry <= 2; retry++ {
+		before := time.Now()
+		run, err := claimAndRun()
+		if err != nil {
+			t.Fatalf("attempt %d: Run returned error: %v", retry, err)
+		}
+		if run.Status != StatusPending || run.StepRetries != retry || run.NextAttemptAt.Before(before) {
+			t.Fatalf("attempt %d: run = %+v, want pending retry %d scheduled ahead", retry, run, retry)
+		}
+		if _, err := store.ClaimRunnable(context.Background(), "worker-2", time.Minute); !errors.Is(err, ErrNoRunnableWorkflow) {
+			t.Fatalf("attempt %d: claim before retry is due = %v, want none", retry, err)
+		}
+		makeDue()
+	}
+
+	run, err := claimAndRun()
+	if err == nil || run.Status != StatusFailed {
+		t.Fatalf("final run = %+v, %v; want failure after the budget", run, err)
+	}
+	if attempts != 3 || run.StepAttempts["flaky"] != 3 || run.StepRetries != 0 {
+		t.Fatalf("attempts = %d, run = %+v; want 3 attempts and a reset retry count", attempts, run)
+	}
+}
+
+func TestExecutorWaitsInProcessForUnleasedRetry(t *testing.T) {
+	store := NewMemoryStore()
+	attempts := 0
+	executor := NewExecutor(store, []Step{
+		stepFunc{name: "flaky", run: func(context.Context, WorkflowRun) (StepResult, error) {
+			attempts++
+			if attempts < 3 {
+				return StepResult{}, TransientError{Err: errors.New("temporary outage")}
+			}
+			return StepResult{}, nil
+		}},
+	}, WithRetryPolicy(RetryPolicy{MaxAttempts: 3, BaseDelay: time.Millisecond}))
+
+	run, err := executor.Run(context.Background(), WorkflowRun{ID: "wf-sync-retry"})
+	if err != nil || run.Status != StatusSucceeded || attempts != 3 || run.StepRetries != 0 {
+		t.Fatalf("run = %+v, %v, attempts = %d; want success after in-process retries", run, err, attempts)
+	}
+}

@@ -228,7 +228,7 @@ func (s *MemoryStore) ClaimRunnable(ctx context.Context, workerID string, lease 
 
 	for _, id := range ids {
 		run := s.runs[id]
-		if run.Status != StatusPending {
+		if run.Status != StatusPending || run.NextAttemptAt.After(now) {
 			continue
 		}
 		if run.LeaseOwner != "" && run.LeaseUntil.After(now) {

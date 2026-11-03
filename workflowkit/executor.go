@@ -27,6 +27,11 @@ type StepResult struct {
 // running under the executor's lease owner, so a cancelled, failed, or
 // reclaimed run returns ErrRunPreempted instead of being overwritten.
 //
+// With a RetryPolicy, a run claimed from a queue does not hold its worker
+// during a backoff: Run returns it in StatusPending with NextAttemptAt set,
+// the worker releases its lease as usual, and ClaimRunnable hands it out
+// again once the retry is due.
+//
 // If ctx is cancelled, the executor stops without recording a terminal state;
 // the caller owns finalization. Queued runs left running this way are failed
 // by QueueRecoveryStore.FailExpiredRunning once their lease expires.
@@ -78,6 +83,7 @@ func (e *Executor) Run(ctx context.Context, run WorkflowRun) (WorkflowRun, error
 // and held by the same lease owner, so two workers cannot both start it.
 func (e *Executor) start(ctx context.Context, run WorkflowRun) (WorkflowRun, error) {
 	run.Status = StatusRunning
+	run.NextAttemptAt = time.Time{}
 	if e.store == nil {
 		return run, nil
 	}
@@ -180,7 +186,10 @@ func (e *Executor) runFrom(ctx context.Context, run WorkflowRun) (WorkflowRun, e
 		if err := e.save(ctx, run); err != nil {
 			return run, err
 		}
-		result, err := e.runStepWithRetry(ctx, step, &run)
+		result, yielded, err := e.runStepWithRetry(ctx, step, &run)
+		if yielded {
+			return run, nil
+		}
 		if err != nil {
 			if errors.Is(err, ErrRunPreempted) {
 				return run, err
@@ -216,15 +225,16 @@ func (e *Executor) runFrom(ctx context.Context, run WorkflowRun) (WorkflowRun, e
 	return run, nil
 }
 
-func (e *Executor) runStepWithRetry(ctx context.Context, step Step, run *WorkflowRun) (StepResult, error) {
-	maxAttempts := e.retryPolicy.MaxAttempts
-	if maxAttempts <= 0 {
-		maxAttempts = 1
-	}
-	var lastErr error
-	var lastResult StepResult
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
+// runStepWithRetry runs step until it succeeds, fails permanently, or uses up
+// the retry budget. Before a backed-off retry, a run claimed from a queue (it
+// has a lease owner) yields instead of sleeping: it goes back to pending with
+// NextAttemptAt set and yielded is true, so the worker can release its lease
+// and serve other runs until the retry is due. Unleased runs wait in-process.
+func (e *Executor) runStepWithRetry(ctx context.Context, step Step, run *WorkflowRun) (result StepResult, yielded bool, err error) {
+	maxAttempts := max(e.retryPolicy.MaxAttempts, 1)
+	for {
 		recordStepAttempt(run, step.Name())
+		run.NextAttemptAt = time.Time{}
 		record := StepRecord{
 			Name:      step.Name(),
 			Status:    StatusRunning,
@@ -232,7 +242,7 @@ func (e *Executor) runStepWithRetry(ctx context.Context, step Step, run *Workflo
 			StartedAt: time.Now(),
 		}
 		if err := e.save(ctx, *run); err != nil {
-			return StepResult{}, err
+			return StepResult{}, false, err
 		}
 		result, err := step.Run(ctx, cloneRun(*run))
 		if err == nil {
@@ -241,38 +251,49 @@ func (e *Executor) runStepWithRetry(ctx context.Context, step Step, run *Workflo
 		if err == nil {
 			finishStepRecord(&record, result, "")
 			run.StepRecords = append(run.StepRecords, record)
+			run.StepRetries = 0
 			if err := e.save(ctx, *run); err != nil {
-				return StepResult{}, err
+				return StepResult{}, false, err
 			}
-			return result, nil
+			return result, false, nil
 		}
-		lastErr = err
 		failedResult := result
 		failedResult.Status = StatusFailed
 		failedResult.Error = err.Error()
-		lastResult = failedResult
 		finishStepRecord(&record, failedResult, err.Error())
 		run.StepRecords = append(run.StepRecords, record)
+
+		retryable := IsTransient(err) && !errors.Is(err, ErrInvalidStatus) && run.StepRetries+1 < maxAttempts
+		if !retryable {
+			run.StepRetries = 0
+			if err := e.save(ctx, *run); err != nil {
+				return StepResult{}, false, err
+			}
+			return failedResult, false, err
+		}
+		run.StepRetries++
+		delay := e.retryPolicy.Backoff(run.StepRetries)
+		if run.LeaseOwner != "" && delay > 0 {
+			run.Status = StatusPending
+			run.NextAttemptAt = time.Now().Add(delay)
+			if err := e.save(ctx, *run); err != nil {
+				return StepResult{}, false, err
+			}
+			return StepResult{}, true, nil
+		}
 		if err := e.save(ctx, *run); err != nil {
-			return StepResult{}, err
+			return StepResult{}, false, err
 		}
-		if errors.Is(err, ErrInvalidStatus) {
-			return failedResult, err
-		}
-		if !IsTransient(err) || attempt == maxAttempts {
-			return failedResult, err
-		}
-		if e.retryPolicy.Delay > 0 {
-			timer := time.NewTimer(e.retryPolicy.Delay)
+		if delay > 0 {
+			timer := time.NewTimer(delay)
 			select {
 			case <-ctx.Done():
 				timer.Stop()
-				return StepResult{}, ctx.Err()
+				return StepResult{}, false, ctx.Err()
 			case <-timer.C:
 			}
 		}
 	}
-	return lastResult, lastErr
 }
 
 func finishStepRecord(record *StepRecord, result StepResult, err string) {

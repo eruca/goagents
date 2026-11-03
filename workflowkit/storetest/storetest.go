@@ -108,6 +108,43 @@ func RunQueueStoreConformance(t *testing.T, newStore NewStore) {
 	t.Helper()
 	RunStoreConformance(t, newStore)
 
+	t.Run("claim skips a retry until it is due and claims oldest first", func(t *testing.T) {
+		store := queueStore(t, newStore)
+		base := time.Now().Add(-time.Hour)
+		// Created times in different zones must still order by instant.
+		older := base.In(time.FixedZone("UTC+9", 9*3600))
+		newer := base.Add(time.Minute).UTC()
+		for _, run := range []workflowkit.WorkflowRun{
+			{ID: "wf-retry-later", Status: workflowkit.StatusPending, CreatedAt: base.Add(-time.Minute), NextAttemptAt: time.Now().Add(time.Hour), StepRetries: 1},
+			{ID: "wf-newer", Status: workflowkit.StatusPending, CreatedAt: newer},
+			{ID: "wf-older", Status: workflowkit.StatusPending, CreatedAt: older},
+		} {
+			if err := store.Save(context.Background(), run); err != nil {
+				t.Fatalf("Save(%s) returned error: %v", run.ID, err)
+			}
+		}
+		for _, want := range []string{"wf-older", "wf-newer"} {
+			claimed, err := store.ClaimRunnable(context.Background(), "worker-1", time.Minute)
+			if err != nil || claimed.ID != want {
+				t.Fatalf("ClaimRunnable = %s, %v; want %s", claimed.ID, err, want)
+			}
+		}
+		if claimed, err := store.ClaimRunnable(context.Background(), "worker-1", time.Minute); !errors.Is(err, workflowkit.ErrNoRunnableWorkflow) {
+			t.Fatalf("ClaimRunnable = %s, %v; want the retry held back", claimed.ID, err)
+		}
+
+		if _, err := store.Update(context.Background(), "wf-retry-later", func(run workflowkit.WorkflowRun) (workflowkit.WorkflowRun, error) {
+			run.NextAttemptAt = time.Now().Add(-time.Second)
+			return run, nil
+		}); err != nil {
+			t.Fatalf("Update returned error: %v", err)
+		}
+		claimed, err := store.ClaimRunnable(context.Background(), "worker-1", time.Minute)
+		if err != nil || claimed.ID != "wf-retry-later" || claimed.StepRetries != 1 {
+			t.Fatalf("ClaimRunnable = %+v, %v; want due retry with its retry count", claimed, err)
+		}
+	})
+
 	t.Run("claim runnable pending workflow with lease", func(t *testing.T) {
 		store := queueStore(t, newStore)
 		if err := store.Save(context.Background(), workflowkit.WorkflowRun{

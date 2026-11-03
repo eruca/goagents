@@ -134,7 +134,11 @@ Configure retry policy on the executor:
 
 ```go
 executor := workflowkit.NewExecutor(store, steps,
-	workflowkit.WithRetryPolicy(workflowkit.RetryPolicy{MaxAttempts: 3}),
+	workflowkit.WithRetryPolicy(workflowkit.RetryPolicy{
+		MaxAttempts: 3,               // attempts per step, counting the first
+		BaseDelay:   time.Second,     // retry n waits rand[0, BaseDelay*2^(n-1)]
+		MaxDelay:    time.Minute,     // backoff cap (default 32 x BaseDelay)
+	}),
 )
 ```
 
@@ -144,8 +148,15 @@ Only errors marked as transient are retried:
 return workflowkit.StepResult{}, workflowkit.TransientError{Err: err}
 ```
 
-Plain Go errors fail the workflow immediately. Retry is intentionally local to a
-step execution; it is not a distributed scheduler or delayed job queue.
+Plain Go errors fail the workflow immediately.
+
+Backoff uses full jitter, so many runs failing together do not retry in
+lockstep. A run claimed from a queue (it has a lease owner) does not hold its
+worker during the wait: `Run` returns it as `pending` with `NextAttemptAt` set,
+the worker releases its lease, and `ClaimRunnable` skips it until the retry is
+due. The retry budget travels with the run in `StepRetries`, so it holds across
+claims; it resets when the step succeeds or the run fails, so requeueing a
+failed run starts a fresh budget. Runs without a lease wait in-process.
 
 ## Step History
 
