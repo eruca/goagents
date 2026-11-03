@@ -82,11 +82,17 @@ func main() {
 		panic(err)
 	}
 
-	result, err := agent.Run(context.Background(), agentcore.RunRequest{Input: "Check the demo account."})
-	if err != nil {
+	// The provider streams over server-sent events; print text as it arrives.
+	stream := agent.Stream(context.Background(), agentcore.RunRequest{Input: "Check the demo account."})
+	for event := range stream.Events {
+		if event.Delta != nil {
+			fmt.Print(event.Delta.Content)
+		}
+	}
+	if _, err := stream.Wait(); err != nil {
 		panic(err)
 	}
-	fmt.Println(result.Content)
+	fmt.Println()
 }
 
 var _ ports.Tool = accountLookupTool{}

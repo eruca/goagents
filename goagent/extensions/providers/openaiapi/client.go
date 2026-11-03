@@ -78,6 +78,21 @@ func (c *Client) Chat(ctx context.Context, req ports.ChatRequest) (*ports.ChatRe
 	if err != nil {
 		return nil, err
 	}
+	resp, err := c.post(ctx, payload)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	data, err := readResponseBody(resp, c.limits.MaxResponseBytes)
+	if err != nil {
+		return nil, err
+	}
+	return parseChatResponse(data)
+}
+
+// post sends a chat completions body and returns a successful response.
+func (c *Client) post(ctx context.Context, payload []byte) (*http.Response, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return nil, newProviderError("configuration_error", false, ErrInvalidConfig)
@@ -94,17 +109,14 @@ func (c *Client) Chat(ctx context.Context, req ports.ChatRequest) (*ports.ChatRe
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		resp.Body.Close()
 		return nil, &ResponseError{StatusCode: resp.StatusCode}
 	}
+	return resp, nil
+}
 
-	data, err := readResponseBody(resp, c.limits.MaxResponseBytes)
-	if err != nil {
-		return nil, err
-	}
-
+func parseChatResponse(data []byte) (*ports.ChatResponse, error) {
 	var decoded chatCompletionsResponse
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return nil, newProviderError("invalid_json", true, ErrInvalidJSON)
@@ -115,10 +127,13 @@ func (c *Client) Chat(ctx context.Context, req ports.ChatRequest) (*ports.ChatRe
 	if len(decoded.Choices) == 0 {
 		return nil, newProviderError("invalid_response", true, ErrInvalidResponse)
 	}
-	result := &ports.ChatResponse{}
 	message := decoded.Choices[0].Message
-	result.Content = message.Content
-	for _, call := range message.ToolCalls {
+	return chatResponse(message.Content, message.ToolCalls, *decoded.Usage)
+}
+
+func chatResponse(content string, calls []chatToolCall, usage chatUsage) (*ports.ChatResponse, error) {
+	result := &ports.ChatResponse{Content: content}
+	for _, call := range calls {
 		if call.ID == "" || call.Function.Name == "" {
 			return nil, newProviderError("tool_call_invalid", true, ErrInvalidResponse)
 		}
@@ -128,8 +143,8 @@ func (c *Client) Chat(ctx context.Context, req ports.ChatRequest) (*ports.ChatRe
 			Input: json.RawMessage(call.Function.Arguments),
 		})
 	}
-	result.Usage.InputTokens = decoded.Usage.PromptTokens
-	result.Usage.OutputTokens = decoded.Usage.CompletionTokens
+	result.Usage.InputTokens = usage.PromptTokens
+	result.Usage.OutputTokens = usage.CompletionTokens
 	return result, nil
 }
 
@@ -143,6 +158,10 @@ func (c *Client) ProviderRequestSHA256(req ports.ChatRequest) ([sha256.Size]byte
 }
 
 func (c *Client) providerRequestPayload(req ports.ChatRequest) ([]byte, error) {
+	return c.requestPayload(req, false)
+}
+
+func (c *Client) requestPayload(req ports.ChatRequest, stream bool) ([]byte, error) {
 	maxTokens, err := normalizedMaxOutputTokens(req.MaxOutputTokens, c.limits.MaxOutputTokens)
 	if err != nil {
 		return nil, err
@@ -152,6 +171,10 @@ func (c *Client) providerRequestPayload(req ports.ChatRequest) ([]byte, error) {
 		Messages:  buildMessages(req.Messages),
 		Tools:     buildTools(req.Tools),
 		MaxTokens: maxTokens,
+	}
+	if stream {
+		body.Stream = true
+		body.StreamOptions = &streamOptions{IncludeUsage: true}
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -195,10 +218,16 @@ func readResponseBody(resp *http.Response, maxResponseBytes int) ([]byte, error)
 }
 
 type chatCompletionsRequest struct {
-	Model     string        `json:"model"`
-	Messages  []chatMessage `json:"messages"`
-	Tools     []chatTool    `json:"tools,omitempty"`
-	MaxTokens int           `json:"max_tokens,omitempty"`
+	Model         string         `json:"model"`
+	Messages      []chatMessage  `json:"messages"`
+	Tools         []chatTool     `json:"tools,omitempty"`
+	MaxTokens     int            `json:"max_tokens,omitempty"`
+	Stream        bool           `json:"stream,omitempty"`
+	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+}
+
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type chatMessage struct {

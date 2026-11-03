@@ -299,7 +299,7 @@ func TestClientDoesNotExposeNon2xxResponseBody(t *testing.T) {
 	if !errors.As(err, &responseErr) {
 		t.Fatalf("err type = %T, want *ResponseError", err)
 	}
-	if responseErr.StatusCode != http.StatusBadRequest || responseErr.Body != "" {
+	if responseErr.StatusCode != http.StatusBadRequest {
 		t.Fatalf("ResponseError = %+v, want status only", responseErr)
 	}
 }

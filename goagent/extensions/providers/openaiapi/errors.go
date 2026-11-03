@@ -53,11 +53,10 @@ func newProviderError(class string, dispatched bool, cause error) error {
 	return &providerError{class: class, dispatched: dispatched, cause: cause}
 }
 
-// ResponseError 只保留 Host 错误策略所需的 HTTP 状态码。
+// ResponseError reports a non-2xx HTTP status. It keeps only the status code
+// so provider response bodies never reach host errors or logs.
 type ResponseError struct {
 	StatusCode int
-	// Body 仅为源码兼容保留，不再填充或输出。
-	Body string
 }
 
 func (e *ResponseError) Error() string {
