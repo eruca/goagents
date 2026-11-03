@@ -66,6 +66,15 @@ call, enforces one configured deadline and item/token budget, fuses exact,
 PostgreSQL full-text, and pgvector ranks, and inserts a bounded memory view
 immediately before the current user message.
 
+Full-text recall splits the query with `memorykit.SearchTerms`: words match
+the `simple` tsvector, and runs of Chinese or Japanese characters, which the
+default PostgreSQL parser does not segment, become overlapping two-character
+grams matched as substrings. A memory matches if it shares any term; only
+memories matching more than half as many terms as the best match are kept, and
+results rank by matched terms. `memorystore` and `pgstore` apply the same rule,
+checked by `storetest.RunFullTextRecallConformance`. The query is evaluated per
+scope without the GIN index, which is fine at project-memory scale.
+
 On-demand recall uses request-scoped `search_memory` and `read_memory` tools.
 Their schemas contain no Scope fields. `remember_project_memory` is registered
 only when trusted Host metadata grants explicit write intent. A model write

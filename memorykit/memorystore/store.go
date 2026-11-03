@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -228,7 +227,8 @@ func (s *Store) SearchCandidates(ctx context.Context, query memorykit.CandidateQ
 	for _, kind := range query.Kinds {
 		kinds[kind] = struct{}{}
 	}
-	foldedText := strings.ToLower(query.Text)
+	words, grams := memorykit.SearchTerms(query.Text)
+	fullTextHits := map[string]int{}
 	result := memorykit.CandidateSet{
 		Exact: make([]memorykit.Candidate, 0), FullText: make([]memorykit.Candidate, 0),
 		Vector: make([]memorykit.Candidate, 0),
@@ -246,9 +246,11 @@ func (s *Store) SearchCandidates(ctx context.Context, query memorykit.CandidateQ
 				result.Exact = append(result.Exact, memorykit.Candidate{Memory: memory, Sources: sources})
 			}
 		}
-		if query.FullTextLimit > 0 && foldedText != "" &&
-			(strings.Contains(strings.ToLower(memory.Key), foldedText) || strings.Contains(strings.ToLower(memory.Content), foldedText)) {
-			result.FullText = append(result.FullText, memorykit.Candidate{Memory: memory, Sources: copySources(sources)})
+		if query.FullTextLimit > 0 {
+			if hits := memorykit.CountSearchTermHits(memory.Key, memory.Content, words, grams); hits > 0 {
+				fullTextHits[id] = hits
+				result.FullText = append(result.FullText, memorykit.Candidate{Memory: memory, Sources: copySources(sources)})
+			}
 		}
 		if query.VectorLimit > 0 {
 			embedding, exists := s.embeddings[embeddingIdentity{memoryID: id, profileID: query.EmbeddingProfileID}]
@@ -266,7 +268,26 @@ func (s *Store) SearchCandidates(ctx context.Context, query memorykit.CandidateQ
 	}
 
 	sort.Slice(result.Exact, func(i, j int) bool { return candidateMetadataLess(result.Exact[i], result.Exact[j]) })
-	sort.Slice(result.FullText, func(i, j int) bool { return candidateMetadataLess(result.FullText[i], result.FullText[j]) })
+	// Same cutoff and order as pgstore: keep memories matching more than half
+	// as many terms as the best match, then rank by matched terms.
+	bestHits := 0
+	for _, hits := range fullTextHits {
+		bestHits = max(bestHits, hits)
+	}
+	kept := result.FullText[:0]
+	for _, candidate := range result.FullText {
+		if fullTextHits[candidate.Memory.ID]*2 > bestHits {
+			kept = append(kept, candidate)
+		}
+	}
+	result.FullText = kept
+	sort.Slice(result.FullText, func(i, j int) bool {
+		left, right := fullTextHits[result.FullText[i].Memory.ID], fullTextHits[result.FullText[j].Memory.ID]
+		if left != right {
+			return left > right
+		}
+		return candidateMetadataLess(result.FullText[i], result.FullText[j])
+	})
 	sort.Slice(result.Vector, func(i, j int) bool {
 		if result.Vector[i].Similarity != result.Vector[j].Similarity {
 			return result.Vector[i].Similarity > result.Vector[j].Similarity
