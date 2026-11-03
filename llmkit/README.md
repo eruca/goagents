@@ -159,7 +159,8 @@ This keeps newly written outcomes useful without waiting for a process restart.
 
 - in-flight calls and concurrency ceilings
 - quota exhaustion
-- failure streaks
+- failure streaks, counting only failures attributable to the provider; a
+  cancelled, oversized, or over-budget request does not degrade it
 - degraded or unavailable providers
 - cooldown windows after repeated failures
 

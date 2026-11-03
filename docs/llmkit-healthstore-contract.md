@@ -112,6 +112,10 @@ Required behavior:
   - reset `failure_streak`
   - set `availability=available`
   - clear `cooldown_until`
+- On a failure the caller caused (`CountsTowardProviderHealth(outcome.ErrorClass)`
+  is false: canceled, request too large, budget exceeded, policy blocked,
+  capability mismatch, post-call error), leave `failure_streak`,
+  `availability`, and `cooldown_until` unchanged.
 - On provider failure:
   - increment `failure_streak`
   - mark the entry `degraded` until the cooldown threshold is reached

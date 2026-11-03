@@ -124,6 +124,11 @@ func (s *MemoryHealthStore) RecordOutcome(ctx context.Context, outcome TaskOutco
 		entry.InFlight--
 	}
 	now := s.now()
+	if !outcome.Success && !CountsTowardProviderHealth(outcome.ErrorClass) {
+		entry.UpdatedAt = now
+		s.entries[key] = entry
+		return nil
+	}
 	if outcome.Success {
 		entry.FailureStreak = 0
 		entry.Availability = ProviderAvailable
@@ -140,6 +145,20 @@ func (s *MemoryHealthStore) RecordOutcome(ctx context.Context, outcome TaskOutco
 	entry.UpdatedAt = now
 	s.entries[key] = entry
 	return nil
+}
+
+// CountsTowardProviderHealth reports whether a failure says something about
+// the provider. Failures the caller caused, such as cancelling the request or
+// sending one that is too large or over budget, leave provider health alone.
+// An unclassified failure counts, which keeps the conservative default.
+func CountsTowardProviderHealth(class ErrorClass) bool {
+	switch class {
+	case ErrorClassCanceled, ErrorClassRequestTooLarge, ErrorClassBudgetExceeded,
+		ErrorClassPolicyBlocked, ErrorClassCapabilityMismatch, ErrorClassPostCall:
+		return false
+	default:
+		return true
+	}
 }
 
 func (s *MemoryHealthStore) Snapshot() ProviderHealthSnapshot {

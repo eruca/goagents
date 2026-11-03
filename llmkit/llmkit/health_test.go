@@ -186,3 +186,35 @@ func candidateExcludedFor(candidates []CandidateScore, alias, reasonPart string)
 	}
 	return false
 }
+
+func TestMemoryHealthStoreIgnoresCallerCausedFailures(t *testing.T) {
+	store := NewMemoryHealthStore(HealthPolicy{FailureCooldownThreshold: 2, CooldownDuration: time.Minute})
+	c := candidate("local-free", CapabilitySimple, PriceFree, LatencyNormalClass, true)
+	key := ProviderHealthKey(c.AccountAlias, c.Model.Alias, c.Model.Provider)
+	outcome := func(class ErrorClass) TaskOutcome {
+		return TaskOutcome{AccountAlias: c.AccountAlias, ModelAlias: c.Model.Alias, Provider: c.Model.Provider, ErrorClass: class}
+	}
+
+	for _, class := range []ErrorClass{ErrorClassCanceled, ErrorClassRequestTooLarge, ErrorClassBudgetExceeded, ErrorClassCanceled} {
+		if err := store.Begin(context.Background(), c); err != nil {
+			t.Fatalf("Begin returned error: %v", err)
+		}
+		if err := store.RecordOutcome(context.Background(), outcome(class)); err != nil {
+			t.Fatalf("RecordOutcome(%s) returned error: %v", class, err)
+		}
+	}
+	entry := store.Snapshot().Entries[key]
+	if entry.InFlight != 0 || entry.FailureStreak != 0 || entry.Availability != ProviderAvailable {
+		t.Fatalf("entry after caller-caused failures = %+v, want available with no streak", entry)
+	}
+
+	for _, class := range []ErrorClass{ErrorClassTimeout, ErrorClassRateLimited} {
+		if err := store.RecordOutcome(context.Background(), outcome(class)); err != nil {
+			t.Fatalf("RecordOutcome(%s) returned error: %v", class, err)
+		}
+	}
+	entry = store.Snapshot().Entries[key]
+	if entry.FailureStreak != 2 || entry.Availability != ProviderUnavailable {
+		t.Fatalf("entry after provider failures = %+v, want unavailable", entry)
+	}
+}
