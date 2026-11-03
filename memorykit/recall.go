@@ -486,16 +486,10 @@ func equalStrings(left, right []string) bool {
 }
 
 func validateEmbeddingResult(vectors [][]float32, dimensions int) ([]float32, error) {
-	if len(vectors) != 1 || len(vectors[0]) != dimensions {
+	if len(vectors) != 1 || len(vectors[0]) != dimensions || !validVector(vectors[0]) {
 		return nil, fmt.Errorf("%w: invalid embedding result", ErrInvalidMemory)
 	}
-	result := append([]float32(nil), vectors[0]...)
-	for _, value := range result {
-		if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
-			return nil, fmt.Errorf("%w: invalid embedding result", ErrInvalidMemory)
-		}
-	}
-	return result, nil
+	return append([]float32(nil), vectors[0]...), nil
 }
 
 func containsChannel(channels []Channel, target Channel) bool {

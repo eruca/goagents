@@ -120,12 +120,26 @@ func ValidatePutEmbeddingRequest(request PutEmbeddingRequest, limits Limits) err
 		request.Dimensions <= 0 || len(request.Vector) != request.Dimensions {
 		return fmt.Errorf("%w: invalid embedding request", ErrInvalidMemory)
 	}
-	for _, value := range request.Vector {
-		if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
-			return fmt.Errorf("%w: embedding values must be finite", ErrInvalidMemory)
-		}
+	if !validVector(request.Vector) {
+		return fmt.Errorf("%w: embedding values must be finite with a non-zero norm", ErrInvalidMemory)
 	}
 	return nil
+}
+
+// validVector reports whether every value is finite and the norm is non-zero.
+// Cosine similarity is undefined for a zero vector: pgvector returns NaN,
+// which PostgreSQL orders above every number, so it would pass any similarity
+// threshold.
+func validVector(vector []float32) bool {
+	var squared float64
+	for _, value := range vector {
+		v := float64(value)
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return false
+		}
+		squared += v * v
+	}
+	return squared > 0
 }
 
 func validEmbeddingMetadata(value string, limits Limits) bool {
@@ -187,10 +201,8 @@ func ValidateCandidateQuery(query CandidateQuery, limits Limits) error {
 		query.MinVectorSimilarity < 0 || query.MinVectorSimilarity > 1 {
 		return fmt.Errorf("%w: invalid vector query", ErrInvalidMemory)
 	}
-	for _, value := range query.QueryVector {
-		if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
-			return fmt.Errorf("%w: vector values must be finite", ErrInvalidMemory)
-		}
+	if !validVector(query.QueryVector) {
+		return fmt.Errorf("%w: vector values must be finite with a non-zero norm", ErrInvalidMemory)
 	}
 	return nil
 }

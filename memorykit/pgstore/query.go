@@ -143,6 +143,7 @@ func (s *Store) searchVector(ctx context.Context, query memorykit.CandidateQuery
 		  AND e.embedding_profile_id = $5
 		  AND e.dimension = $6
 		  AND e.content_hash = m.content_hash
+		  AND vector_norm(e.embedding) > 0
 		  AND 1 - (e.embedding <=> $7) >= $8
 		  AND (cardinality($10::text[]) = 0 OR m.kind = ANY($10::text[]))
 		ORDER BY e.embedding <=> $7, m.importance DESC, m.updated_at DESC, m.id
