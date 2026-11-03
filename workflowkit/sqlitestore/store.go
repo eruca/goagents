@@ -348,6 +348,62 @@ WHERE id = ?
 	return s.Get(ctx, id)
 }
 
+func (s *Store) FailExpiredRunning(ctx context.Context, reason string) ([]workflowkit.WorkflowRun, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	now := time.Now().UTC()
+	rows, err := tx.QueryContext(ctx, `
+SELECT id
+FROM workflow_runs
+WHERE status = ?
+  AND lease_owner != ''
+  AND lease_until <= ?
+ORDER BY id ASC
+`, string(workflowkit.StatusRunning), now)
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	failed := make([]workflowkit.WorkflowRun, 0, len(ids))
+	for _, id := range ids {
+		if _, err := tx.ExecContext(ctx, `
+UPDATE workflow_runs
+SET status = ?, error = ?, lease_owner = '', lease_until = ?, updated_at = ?
+WHERE id = ?
+`, string(workflowkit.StatusFailed), reason, time.Time{}, now, id); err != nil {
+			return nil, err
+		}
+		run, err := getRun(ctx, tx, id)
+		if err != nil {
+			return nil, err
+		}
+		failed = append(failed, run)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return failed, nil
+}
+
 func (s *Store) migrate(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS workflowkit_schema (

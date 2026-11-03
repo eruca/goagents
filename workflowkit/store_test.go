@@ -13,8 +13,8 @@ func TestMemoryStoreConformance(t *testing.T) {
 	})
 }
 
-func TestMemoryQueueLeaseStoreConformance(t *testing.T) {
-	storetest.RunQueueLeaseStoreConformance(t, func(t *testing.T) workflowkit.Store {
+func TestMemoryQueueRecoveryStoreConformance(t *testing.T) {
+	storetest.RunQueueRecoveryStoreConformance(t, func(t *testing.T) workflowkit.Store {
 		return workflowkit.NewMemoryStore()
 	})
 }

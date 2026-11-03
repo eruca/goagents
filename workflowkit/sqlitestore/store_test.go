@@ -26,8 +26,8 @@ func TestStoreConformance(t *testing.T) {
 	})
 }
 
-func TestQueueLeaseStoreConformance(t *testing.T) {
-	storetest.RunQueueLeaseStoreConformance(t, func(t *testing.T) workflowkit.Store {
+func TestQueueRecoveryStoreConformance(t *testing.T) {
+	storetest.RunQueueRecoveryStoreConformance(t, func(t *testing.T) workflowkit.Store {
 		store, err := Open(filepath.Join(t.TempDir(), "workflow.db"))
 		if err != nil {
 			t.Fatalf("Open returned error: %v", err)

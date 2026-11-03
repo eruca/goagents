@@ -257,6 +257,65 @@ func RunQueueLeaseStoreConformance(t *testing.T, newStore NewStore) {
 	})
 }
 
+func RunQueueRecoveryStoreConformance(t *testing.T, newStore NewStore) {
+	t.Helper()
+	RunQueueLeaseStoreConformance(t, newStore)
+
+	t.Run("fail expired running fails only leased running workflows past their lease", func(t *testing.T) {
+		store := queueRecoveryStore(t, newStore)
+		expired := time.Now().Add(-time.Minute).UTC()
+		active := time.Now().Add(time.Hour).UTC()
+		for _, run := range []workflowkit.WorkflowRun{
+			{ID: "wf-expired", Status: workflowkit.StatusRunning, LeaseOwner: "worker-1", LeaseUntil: expired, CompletedSteps: []string{"prepare"}},
+			{ID: "wf-active", Status: workflowkit.StatusRunning, LeaseOwner: "worker-1", LeaseUntil: active},
+			{ID: "wf-unleased", Status: workflowkit.StatusRunning},
+			{ID: "wf-pending-expired", Status: workflowkit.StatusPending, LeaseOwner: "worker-1", LeaseUntil: expired},
+			{ID: "wf-waiting-expired", Status: workflowkit.StatusWaitingApproval, LeaseOwner: "worker-1", LeaseUntil: expired},
+		} {
+			if err := store.Save(context.Background(), run); err != nil {
+				t.Fatalf("Save(%s) returned error: %v", run.ID, err)
+			}
+		}
+
+		failed, err := store.FailExpiredRunning(context.Background(), "lease_expired")
+		if err != nil {
+			t.Fatalf("FailExpiredRunning returned error: %v", err)
+		}
+		if !equalStrings(workflowIDs(failed), []string{"wf-expired"}) {
+			t.Fatalf("failed = %v, want [wf-expired]", workflowIDs(failed))
+		}
+		stored, err := store.Get(context.Background(), "wf-expired")
+		if err != nil {
+			t.Fatalf("Get returned error: %v", err)
+		}
+		if stored.Status != workflowkit.StatusFailed || stored.Error != "lease_expired" || stored.LeaseOwner != "" || !stored.LeaseUntil.IsZero() {
+			t.Fatalf("stored = %+v, want failed lease_expired with cleared lease", stored)
+		}
+		if !equalStrings(stored.CompletedSteps, []string{"prepare"}) {
+			t.Fatalf("completed steps = %v, want progress kept for requeue", stored.CompletedSteps)
+		}
+		for id, want := range map[string]workflowkit.Status{
+			"wf-active":          workflowkit.StatusRunning,
+			"wf-unleased":        workflowkit.StatusRunning,
+			"wf-pending-expired": workflowkit.StatusPending,
+			"wf-waiting-expired": workflowkit.StatusWaitingApproval,
+		} {
+			run, err := store.Get(context.Background(), id)
+			if err != nil {
+				t.Fatalf("Get(%s) returned error: %v", id, err)
+			}
+			if run.Status != want {
+				t.Fatalf("%s status = %s, want %s", id, run.Status, want)
+			}
+		}
+
+		again, err := store.FailExpiredRunning(context.Background(), "lease_expired")
+		if err != nil || len(again) != 0 {
+			t.Fatalf("second FailExpiredRunning = %v, %v; want none", workflowIDs(again), err)
+		}
+	})
+}
+
 func RunWorkflowQueryStoreConformance(t *testing.T, newStore NewStore) {
 	t.Helper()
 	RunStoreConformance(t, newStore)
@@ -398,4 +457,14 @@ func queueLeaseStore(t *testing.T, newStore NewStore) workflowkit.QueueLeaseStor
 		t.Fatalf("%T does not implement workflowkit.QueueLeaseStore", store)
 	}
 	return queue
+}
+
+func queueRecoveryStore(t *testing.T, newStore NewStore) workflowkit.QueueRecoveryStore {
+	t.Helper()
+	store := newStore(t)
+	recovery, ok := store.(workflowkit.QueueRecoveryStore)
+	if !ok {
+		t.Fatalf("%T does not implement workflowkit.QueueRecoveryStore", store)
+	}
+	return recovery
 }
