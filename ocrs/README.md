@@ -9,15 +9,10 @@ RAG codebase.
 ## Install
 
 ```bash
-go get github.com/eruca/goagents/ocrs
+go get github.com/eruca/goagents@latest
 ```
 
-For local development before publishing:
-
-```bash
-go mod edit -replace github.com/eruca/goagents/ocrs=/Users/nick/VibeCoding/goagents/ocrs
-go get github.com/eruca/goagents/ocrs
-```
+Then import `github.com/eruca/goagents/ocrs`.
 
 ## Packages
 

@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/eruca/goagents/goagent/ports"
-	"github.com/eruca/goagents/llmkit/llmkit"
+	"github.com/eruca/goagents/llmkit"
 )
 
 func TestOpenAICompatibleProvidersFromConfigUsesBaseURLModelAndAPIKeyEnv(t *testing.T) {

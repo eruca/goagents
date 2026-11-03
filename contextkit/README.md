@@ -8,15 +8,10 @@ how to use the returned projection.
 ## Install
 
 ```bash
-go get github.com/eruca/goagents/contextkit
+go get github.com/eruca/goagents@latest
 ```
 
-For local development before publishing:
-
-```bash
-go mod edit -replace github.com/eruca/goagents/contextkit=/Users/nick/VibeCoding/goagents/contextkit
-go get github.com/eruca/goagents/contextkit
-```
+Then import `github.com/eruca/goagents/contextkit`.
 
 ## Compression Profile
 

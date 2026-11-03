@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/eruca/goagents/goagent/extensions/providers/openaiapi"
-	"github.com/eruca/goagents/llmkit/llmkit"
+	"github.com/eruca/goagents/llmkit"
 )
 
 // OpenAICompatibleProvidersFromConfig builds provider clients for configured

@@ -8,7 +8,7 @@ import (
 	"net/http"
 
 	"github.com/eruca/goagents/goagent/extensions/providers/openaiapi"
-	"github.com/eruca/goagents/llmkit/llmkit"
+	"github.com/eruca/goagents/llmkit"
 )
 
 // ErrorStage 无需解析错误文本即可标识 runtime 调用的失败阶段。

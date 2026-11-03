@@ -8,8 +8,8 @@ import (
 	"github.com/eruca/goagents/artifactkit"
 	"github.com/eruca/goagents/goagent/agentcore"
 	"github.com/eruca/goagents/goagent/ports"
+	"github.com/eruca/goagents/llmkit"
 	goagentadapter "github.com/eruca/goagents/llmkit/adapters/goagent"
-	"github.com/eruca/goagents/llmkit/llmkit"
 	"github.com/eruca/goagents/runkit"
 	"github.com/eruca/goagents/workflowkit"
 )

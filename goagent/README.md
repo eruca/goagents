@@ -4,17 +4,14 @@ This framework is a small Go library for building ReAct-style agents with typed 
 
 ## Quickstart
 
-Run the full local verification suite:
+Run the tests and the basic example from the repository root:
 
 ```bash
-make verify
+go test -race ./goagent/...
+go run ./goagent/examples/basic
 ```
 
-Run the basic example:
-
-```bash
-go run ./examples/basic
-```
+`scripts/verify-all.sh` runs every goagent example as a smoke test.
 
 ## Learning Path
 

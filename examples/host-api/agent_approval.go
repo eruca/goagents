@@ -13,7 +13,7 @@ import (
 	"github.com/eruca/goagents/goagent/policy"
 	"github.com/eruca/goagents/goagent/ports"
 	"github.com/eruca/goagents/goagent/tools"
-	"github.com/eruca/goagents/llmkit/llmkit"
+	"github.com/eruca/goagents/llmkit"
 	"github.com/eruca/goagents/runkit"
 	"github.com/eruca/goagents/runkit/approvalcrypto"
 	"github.com/eruca/goagents/runkit/goagentapproval"

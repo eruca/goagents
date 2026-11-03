@@ -9,8 +9,8 @@ import (
 	"github.com/eruca/goagents/goagent/agentcore"
 	"github.com/eruca/goagents/goagent/ports"
 	"github.com/eruca/goagents/goagent/prompt"
+	"github.com/eruca/goagents/llmkit"
 	goagentadapter "github.com/eruca/goagents/llmkit/adapters/goagent"
-	"github.com/eruca/goagents/llmkit/llmkit"
 )
 
 func main() {

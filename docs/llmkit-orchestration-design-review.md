@@ -38,7 +38,7 @@ host task
 ### 独立模块边界
 
 - `llmkit` 是独立 Go module。
-- `llmkit/llmkit` 不依赖 `goagent`。
+- `llmkit` 核心包不依赖 `goagent`。
 - `llmkit/adapters/goagent` 是唯一的 goagent adapter 边界。
 - `goagent` core 仍只依赖 `ports.LLMClient`，不吸收多 provider 编排。
 - `examples/host-api` 是 host composition 示例，负责组合 `workflowkit`、`runkit`、

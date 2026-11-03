@@ -14,7 +14,7 @@ import (
 
 	"github.com/eruca/goagents/goagent/extensions/providers/openaiapi"
 	"github.com/eruca/goagents/goagent/ports"
-	"github.com/eruca/goagents/llmkit/llmkit"
+	"github.com/eruca/goagents/llmkit"
 )
 
 func TestClientImplementsGoagentLLMClient(t *testing.T) {

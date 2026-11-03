@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/eruca/goagents/goagent/ports"
-	"github.com/eruca/goagents/llmkit/llmkit"
+	"github.com/eruca/goagents/llmkit"
 )
 
 var _ ports.LLMClient = (*Client)(nil)

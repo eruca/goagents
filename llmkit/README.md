@@ -325,7 +325,7 @@ Import aliases are host-owned; one common pattern is:
 ```go
 import (
     goagentadapter "github.com/eruca/goagents/llmkit/adapters/goagent"
-    "github.com/eruca/goagents/llmkit/llmkit"
+    "github.com/eruca/goagents/llmkit"
 )
 ```
 
@@ -365,23 +365,11 @@ Important behavior:
 See `../docs/host-api-contract.md` for the prose endpoint contract and
 `../examples/host-api/openapi.yaml` for the machine-readable contract.
 
-## Independent Testing
-
-Run llmkit tests from the module directory:
+## Testing
 
 ```sh
-cd llmkit
-go test ./...
+go test ./llmkit/...
 ```
 
-After the internal `goagent/v0.1.0` tag is available, use `GOWORK=off` to test
-llmkit as an independent module:
-
-```sh
-cd llmkit
-GOWORK=off go test ./...
-```
-
-The published `llmkit/go.mod` intentionally has no local replace. Before the tag
-exists, the root `go.work` supplies the exact local `goagent@v0.1.0` mapping for
-workspace tests; this does not count as a clean consumer check.
+The core `llmkit` package does not import `goagent`; only
+`llmkit/adapters/goagent` does. `internal/boundary` enforces this.
