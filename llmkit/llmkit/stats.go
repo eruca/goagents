@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -76,7 +77,9 @@ func BuildModelStats(home string) (*ModelStats, error) {
 			builder.addOutcome(outcome)
 			return nil
 		}
-		latestOutcomes[outcome.RouteID] = outcome
+		// A later record for the same attempt, such as a business outcome,
+		// replaces the provider outcome; fallback attempts are kept apart.
+		latestOutcomes[outcomeKey(outcome.RouteID, outcome.Attempt)] = outcome
 		return nil
 	}); err != nil {
 		return nil, err
@@ -124,8 +127,13 @@ func ApplyModelStats(stats ModelStats, profile TaskProfile, candidates []Candida
 		}
 		enriched[i].Model.RecentFailureCount = entry.Failures
 		enriched[i].Model.RecentFailureRate = entry.FailureRate
-		enriched[i].Model.RecentLatencyMillis = entry.AvgLatencyMillis
-		enriched[i].Model.EstimatedCents = entry.AvgEstimatedCents
+		// Without observed samples the configured values stay authoritative.
+		if entry.AvgLatencyMillis > 0 {
+			enriched[i].Model.RecentLatencyMillis = entry.AvgLatencyMillis
+		}
+		if entry.AvgEstimatedCents > 0 {
+			enriched[i].Model.EstimatedCents = entry.AvgEstimatedCents
+		}
 	}
 	return enriched
 }
@@ -160,9 +168,11 @@ type modelStatsBuilder struct {
 type modelStatsAccumulator struct {
 	entry              ModelStatsEntry
 	latencyTotal       int
+	latencySamples     int
 	inputTokenTotal    int
 	outputTokenTotal   int
 	estimatedCentTotal int
+	costSamples        int
 }
 
 func (b *modelStatsBuilder) addRoute(trace RouteTrace) {
@@ -181,10 +191,17 @@ func (b *modelStatsBuilder) addOutcome(outcome TaskOutcome) {
 	} else {
 		acc.entry.Failures++
 	}
-	acc.latencyTotal += outcome.LatencyMillis
+	// Outcomes that did not report latency or cost must not pull averages toward zero.
+	if outcome.LatencyMillis > 0 {
+		acc.latencyTotal += outcome.LatencyMillis
+		acc.latencySamples++
+	}
 	acc.inputTokenTotal += outcome.InputTokens
 	acc.outputTokenTotal += outcome.OutputTokens
-	acc.estimatedCentTotal += outcome.EstimatedCents
+	if outcome.EstimatedCents > 0 {
+		acc.estimatedCentTotal += outcome.EstimatedCents
+		acc.costSamples++
+	}
 	acc.observe(outcome.RecordedAt)
 }
 
@@ -218,10 +235,14 @@ func (b *modelStatsBuilder) stats() *ModelStats {
 		if entry.OutcomeCount > 0 {
 			entry.SuccessRate = float64(entry.Successes) / float64(entry.OutcomeCount)
 			entry.FailureRate = float64(entry.Failures) / float64(entry.OutcomeCount)
-			entry.AvgLatencyMillis = acc.latencyTotal / entry.OutcomeCount
 			entry.AvgInputTokens = acc.inputTokenTotal / entry.OutcomeCount
 			entry.AvgOutputTokens = acc.outputTokenTotal / entry.OutcomeCount
-			entry.AvgEstimatedCents = acc.estimatedCentTotal / entry.OutcomeCount
+		}
+		if acc.latencySamples > 0 {
+			entry.AvgLatencyMillis = acc.latencyTotal / acc.latencySamples
+		}
+		if acc.costSamples > 0 {
+			entry.AvgEstimatedCents = acc.estimatedCentTotal / acc.costSamples
 		}
 		stats.Models[key] = entry
 	}
@@ -236,6 +257,10 @@ func (a *modelStatsAccumulator) observe(seen time.Time) {
 		seen = seen.UTC()
 		a.entry.LastSeen = &seen
 	}
+}
+
+func outcomeKey(routeID string, attempt int) string {
+	return routeID + "|" + strconv.Itoa(attempt)
 }
 
 func modelStatsKey(taskType, accountAlias, modelAlias, provider string) string {

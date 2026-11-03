@@ -231,6 +231,29 @@ func TestClientRefreshesModelStatsForEachChat(t *testing.T) {
 	}
 }
 
+func TestClientRecordsProviderLatency(t *testing.T) {
+	local := &fakeProviderClient{chat: func(context.Context, ports.ChatRequest) (*ports.ChatResponse, error) {
+		time.Sleep(5 * time.Millisecond)
+		return &ports.ChatResponse{Content: "local"}, nil
+	}}
+	recorder := &fakeRecorder{}
+	client := NewClient(Config{
+		Candidates:            testCandidates(),
+		Providers:             map[string]ProviderClient{"local-small": local, "cloud-advanced": &fakeProviderClient{}},
+		ProfileProvider:       fixedProfile(simpleProfile()),
+		RouteMetadataProvider: fixedRouteMetadata(RouteMetadata{RouteID: "route-latency", TaskID: "task-latency", Attempt: 1}),
+		Recorder:              recorder,
+		RecordOutcomes:        true,
+	})
+
+	if _, err := client.Chat(context.Background(), ports.ChatRequest{}); err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if len(recorder.outcomes) != 1 || recorder.outcomes[0].LatencyMillis < 5 {
+		t.Fatalf("recorded outcomes = %+v, want measured latency of at least 5ms", recorder.outcomes)
+	}
+}
+
 func TestClientRespectsFallbackMaxAttempts(t *testing.T) {
 	local := &fakeProviderClient{err: errors.New("local failed")}
 	cloud := &fakeProviderClient{response: &ports.ChatResponse{Content: "cloud"}}

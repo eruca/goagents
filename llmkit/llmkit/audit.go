@@ -157,7 +157,7 @@ func (r *JSONLRecorder) RecordOutcome(ctx context.Context, outcome TaskOutcome) 
 }
 
 // ReadRouteAudits reads route audit records from home and joins matching
-// outcomes by route_id. It is a read-only helper for host observability APIs.
+// outcomes by route_id and attempt. It is a read-only helper for host observability APIs.
 func ReadRouteAudits(home string, filter AuditFilter) ([]RouteAuditRecord, error) {
 	clean := filepath.Clean(home)
 	outcomes := map[string]TaskOutcome{}
@@ -169,7 +169,7 @@ func ReadRouteAudits(home string, filter AuditFilter) ([]RouteAuditRecord, error
 		if !matchesAuditFilter(outcome.TaskID, filter) {
 			return nil
 		}
-		outcomes[outcome.RouteID] = outcome
+		outcomes[outcomeKey(outcome.RouteID, outcome.Attempt)] = outcome
 		return nil
 	}); err != nil {
 		return nil, err
@@ -185,7 +185,7 @@ func ReadRouteAudits(home string, filter AuditFilter) ([]RouteAuditRecord, error
 			return nil
 		}
 		record := RouteAuditRecord{Route: trace}
-		if outcome, ok := outcomes[trace.RouteID]; ok {
+		if outcome, ok := outcomes[outcomeKey(trace.RouteID, trace.Attempt)]; ok {
 			record.Outcome = &outcome
 		}
 		records = append(records, record)

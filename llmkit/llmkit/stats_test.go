@@ -408,3 +408,106 @@ func findCandidateScore(t *testing.T, scores []CandidateScore, alias string) Can
 	t.Fatalf("candidate score %q not found in %+v", alias, scores)
 	return CandidateScore{}
 }
+
+func recordFallbackRoute(t *testing.T, home string) {
+	t.Helper()
+	recorder, err := NewJSONLRecorder(home)
+	if err != nil {
+		t.Fatalf("NewJSONLRecorder returned error: %v", err)
+	}
+	attempts := []struct {
+		attempt int
+		model   string
+		success bool
+		latency int
+		cents   int
+	}{
+		{attempt: 1, model: "local-small", success: false, latency: 0, cents: 0},
+		{attempt: 2, model: "cloud-large", success: true, latency: 800, cents: 12},
+	}
+	for _, attempt := range attempts {
+		trace := RouteTrace{RouteID: "route-fallback", TaskID: "task-1", Attempt: attempt.attempt, TaskType: "review", AccountAlias: "acct", ModelAlias: attempt.model, Provider: "p", Selected: true}
+		if err := recorder.RecordRoute(context.Background(), trace); err != nil {
+			t.Fatalf("RecordRoute returned error: %v", err)
+		}
+		if err := recorder.RecordOutcome(context.Background(), TaskOutcome{
+			RouteID: "route-fallback", TaskID: "task-1", Attempt: attempt.attempt, TaskType: "review",
+			AccountAlias: "acct", ModelAlias: attempt.model, Provider: "p", Success: attempt.success,
+			LatencyMillis: attempt.latency, EstimatedCents: attempt.cents,
+		}); err != nil {
+			t.Fatalf("RecordOutcome returned error: %v", err)
+		}
+	}
+}
+
+func TestRefreshModelStatsCountsEveryFallbackAttempt(t *testing.T) {
+	home := t.TempDir()
+	recordFallbackRoute(t, home)
+
+	stats, err := RefreshModelStats(home)
+	if err != nil {
+		t.Fatalf("RefreshModelStats returned error: %v", err)
+	}
+	failed := stats.Models["review|acct|local-small|p"]
+	if failed.OutcomeCount != 1 || failed.Failures != 1 || failed.PendingOutcomes != 0 {
+		t.Fatalf("failed attempt stats = %+v, want one recorded failure", failed)
+	}
+	succeeded := stats.Models["review|acct|cloud-large|p"]
+	if succeeded.OutcomeCount != 1 || succeeded.Successes != 1 {
+		t.Fatalf("fallback attempt stats = %+v, want one success", succeeded)
+	}
+}
+
+func TestReadRouteAuditsJoinsOutcomePerAttempt(t *testing.T) {
+	home := t.TempDir()
+	recordFallbackRoute(t, home)
+
+	records, err := ReadRouteAudits(home, AuditFilter{TaskID: "task-1"})
+	if err != nil {
+		t.Fatalf("ReadRouteAudits returned error: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("records = %+v, want two attempts", records)
+	}
+	for _, record := range records {
+		if record.Outcome == nil || record.Outcome.ModelAlias != record.Route.ModelAlias {
+			t.Fatalf("route %s attempt %d joined to %+v", record.Route.ModelAlias, record.Route.Attempt, record.Outcome)
+		}
+	}
+}
+
+func TestModelStatsAverageCostAndLatencyOnlyOverReportedSamples(t *testing.T) {
+	home := t.TempDir()
+	recordFallbackRoute(t, home)
+	recorder, err := NewJSONLRecorder(home)
+	if err != nil {
+		t.Fatalf("NewJSONLRecorder returned error: %v", err)
+	}
+	if err := recorder.RecordOutcome(context.Background(), TaskOutcome{
+		RouteID: "route-unpriced", TaskID: "task-2", Attempt: 1, TaskType: "review",
+		AccountAlias: "acct", ModelAlias: "cloud-large", Provider: "p", Success: true,
+	}); err != nil {
+		t.Fatalf("RecordOutcome returned error: %v", err)
+	}
+
+	stats, err := BuildModelStats(home)
+	if err != nil {
+		t.Fatalf("BuildModelStats returned error: %v", err)
+	}
+	cloud := stats.Models["review|acct|cloud-large|p"]
+	if cloud.OutcomeCount != 2 || cloud.AvgEstimatedCents != 12 || cloud.AvgLatencyMillis != 800 {
+		t.Fatalf("cloud stats = %+v, want averages over the one reported sample", cloud)
+	}
+
+	profile := DefaultTaskProfile()
+	profile.TaskType = "review"
+	local := candidate("local-small", CapabilitySimple, PriceFree, LatencyFastClass, true)
+	local.AccountAlias = "acct"
+	local.Model.Provider = "p"
+	local.Model.EstimatedCents = 3
+	local.Model.LatencyClass = LatencyFastClass
+	enriched := ApplyModelStats(*stats, profile, []Candidate{local})
+	if enriched[0].Model.EstimatedCents != 3 || enriched[0].Model.RecentLatencyMillis != 0 {
+		t.Fatalf("enriched = %+v, want configured cost kept without cost or latency samples", enriched[0].Model)
+	}
+}

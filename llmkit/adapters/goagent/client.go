@@ -293,19 +293,21 @@ func (c *Client) chat(ctx context.Context, req ports.ChatRequest, maxOutputToken
 					return nil, newRuntimeError(ErrorStagePreCall, c.errorClassifier(err), false, err)
 				}
 			}
+			callStarted := time.Now()
 			resp, providerErr := callProvider(ctx, provider, req, maxOutputTokens)
+			latency := time.Since(callStarted)
 			if requestErr := ctx.Err(); requestErr != nil {
 				// 取消优先于晚到 Provider 结果，完整响应不得继续向上返回。
 				resp = nil
 				providerErr = requestErr
 			}
 			if providerErr == nil {
-				if err := c.recordOutcomeAfterCall(ctx, profile, decision, trace, resp, nil); err != nil {
+				if err := c.recordOutcomeAfterCall(ctx, profile, decision, trace, latency, resp, nil); err != nil {
 					return nil, newRuntimeError(ErrorStagePostCall, llmkit.ErrorClassPostCall, true, err)
 				}
 				return resp, nil
 			}
-			if err := c.recordOutcomeAfterCall(ctx, profile, decision, trace, nil, providerErr); err != nil {
+			if err := c.recordOutcomeAfterCall(ctx, profile, decision, trace, latency, nil, providerErr); err != nil {
 				return nil, newRuntimeError(ErrorStagePostCall, llmkit.ErrorClassPostCall, true, err)
 			}
 			runtimeErr := newRuntimeError(
@@ -335,14 +337,14 @@ func (c *Client) chat(ctx context.Context, req ports.ChatRequest, maxOutputToken
 	)
 }
 
-func (c *Client) recordOutcomeAfterCall(requestCtx context.Context, profile llmkit.TaskProfile, decision llmkit.RouteDecision, trace llmkit.RouteTrace, resp *ports.ChatResponse, providerErr error) error {
+func (c *Client) recordOutcomeAfterCall(requestCtx context.Context, profile llmkit.TaskProfile, decision llmkit.RouteDecision, trace llmkit.RouteTrace, latency time.Duration, resp *ports.ChatResponse, providerErr error) error {
 	// Provider 返回后不能复用可能已取消的请求 context，否则已开始的 health 计数无法归零。
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(requestCtx), providerOutcomeCleanupTimeout)
 	defer cancel()
-	return c.recordOutcome(cleanupCtx, profile, decision, trace, resp, providerErr)
+	return c.recordOutcome(cleanupCtx, profile, decision, trace, latency, resp, providerErr)
 }
 
-func (c *Client) recordOutcome(ctx context.Context, profile llmkit.TaskProfile, decision llmkit.RouteDecision, trace llmkit.RouteTrace, resp *ports.ChatResponse, providerErr error) error {
+func (c *Client) recordOutcome(ctx context.Context, profile llmkit.TaskProfile, decision llmkit.RouteDecision, trace llmkit.RouteTrace, latency time.Duration, resp *ports.ChatResponse, providerErr error) error {
 	outcome := llmkit.TaskOutcome{
 		RouteID:      trace.RouteID,
 		TaskID:       trace.TaskID,
@@ -352,6 +354,10 @@ func (c *Client) recordOutcome(ctx context.Context, profile llmkit.TaskProfile, 
 		ModelAlias:   decision.SelectedAlias,
 		Provider:     decision.Selected.Model.Provider,
 		Success:      providerErr == nil,
+	}
+	if latency > 0 {
+		// Round up so a sub-millisecond call still counts as a latency sample.
+		outcome.LatencyMillis = int((latency + time.Millisecond - 1) / time.Millisecond)
 	}
 	if resp != nil {
 		outcome.InputTokens = resp.Usage.InputTokens
