@@ -10,7 +10,8 @@ func (s ObserveStage) Name() string {
 }
 
 func (s ObserveStage) Run(ctx context.Context, state *RunState) (StageResult, error) {
-	if len(state.ToolResults) == 0 {
+	rejectedOnly := state.LastResponse != nil && len(state.LastResponse.ToolCalls) > 0 && len(state.PendingCalls) == 0
+	if len(state.ToolResults) == 0 && !rejectedOnly {
 		return StageContinue, nil
 	}
 	for _, result := range state.ToolResults {

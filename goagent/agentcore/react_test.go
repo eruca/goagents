@@ -3,6 +3,7 @@ package agentcore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -324,4 +325,117 @@ func (t testAgentTool) Spec() tools.Spec {
 
 func (t testAgentTool) Execute(ctx context.Context, input json.RawMessage, env tools.Env) (*tools.Result, error) {
 	return t.run(ctx, input, env)
+}
+
+func lastToolReply(t *testing.T, req ports.ChatRequest, callID string) ports.ChatMessage {
+	t.Helper()
+	for _, message := range req.Messages {
+		if message.Role == "tool" && message.ToolCallID == callID {
+			return message
+		}
+	}
+	t.Fatalf("no tool reply for %s in %#v", callID, req.Messages)
+	return ports.ChatMessage{}
+}
+
+func TestReActAnswersUnknownToolCallSoModelCanRecover(t *testing.T) {
+	sink := &recordingEventSink{}
+	llm := &mockLLM{responses: []*ports.ChatResponse{
+		{ToolCalls: []ports.ToolCall{{ID: "call_bad", Name: "serach", Input: json.RawMessage(`{}`)}}},
+		{Content: "done"},
+	}}
+	registry := tools.NewRegistry()
+	registry.Register(testAgentTool{
+		spec: tools.Spec{Name: "search", Permission: policy.PermissionRead},
+		run: func(ctx context.Context, input json.RawMessage, env tools.Env) (*tools.Result, error) {
+			return &tools.Result{ForLLM: "results"}, nil
+		},
+	})
+	agent, err := NewAgent(WithLLM(llm), WithToolRegistry(registry), WithEventSink(sink))
+	if err != nil {
+		t.Fatalf("NewAgent returned error: %v", err)
+	}
+
+	result, err := agent.Run(context.Background(), RunRequest{Input: "hello"})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if result.Content != "done" || len(llm.requests) != 2 {
+		t.Fatalf("result = %#v, LLM requests = %d", result, len(llm.requests))
+	}
+	reply := lastToolReply(t, llm.requests[1], "call_bad")
+	if !strings.Contains(reply.Content, `"serach" is not available`) || !strings.Contains(reply.Content, "search") {
+		t.Fatalf("reply = %q, want unknown tool with available names", reply.Content)
+	}
+	if !sink.hasEvent(EventToolRejected, result.RunID) {
+		t.Fatalf("events = %#v, want tool.rejected", sink.events)
+	}
+}
+
+func TestReActAnswersSchemaInvalidArgumentsWithoutRunningTool(t *testing.T) {
+	llm := &mockLLM{responses: []*ports.ChatResponse{
+		{ToolCalls: []ports.ToolCall{
+			{ID: "call_bad", Name: "lookup", Input: json.RawMessage(`{"q":1}`)},
+			{ID: "call_ok", Name: "lookup", Input: json.RawMessage(`{"q":"go"}`)},
+		}},
+		{Content: "done"},
+	}}
+	var executed []string
+	registry := tools.NewRegistry()
+	registry.Register(testAgentTool{
+		spec: tools.Spec{
+			Name:       "lookup",
+			Permission: policy.PermissionRead,
+			Schema:     tools.Schema{JSONSchema: json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}`)},
+		},
+		run: func(ctx context.Context, input json.RawMessage, env tools.Env) (*tools.Result, error) {
+			executed = append(executed, string(input))
+			return &tools.Result{ForLLM: "found"}, nil
+		},
+	})
+	agent, err := NewAgent(WithLLM(llm), WithToolRegistry(registry))
+	if err != nil {
+		t.Fatalf("NewAgent returned error: %v", err)
+	}
+
+	if _, err := agent.Run(context.Background(), RunRequest{Input: "hello"}); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(executed) != 1 || executed[0] != `{"q":"go"}` {
+		t.Fatalf("executed = %v, want only the valid call", executed)
+	}
+	bad := lastToolReply(t, llm.requests[1], "call_bad")
+	if !strings.Contains(bad.Content, "Tool lookup returned a recoverable error") || !strings.Contains(bad.Content, "Correct the arguments") {
+		t.Fatalf("bad reply = %q", bad.Content)
+	}
+	if ok := lastToolReply(t, llm.requests[1], "call_ok"); ok.Content != "found" {
+		t.Fatalf("ok reply = %q", ok.Content)
+	}
+}
+
+func TestReActStillAbortsOnBrokenToolSchema(t *testing.T) {
+	llm := &mockLLM{responses: []*ports.ChatResponse{
+		{ToolCalls: []ports.ToolCall{{ID: "call_1", Name: "broken", Input: json.RawMessage(`{}`)}}},
+		{Content: "done"},
+	}}
+	registry := tools.NewRegistry()
+	registry.Register(testAgentTool{
+		spec: tools.Spec{
+			Name:       "broken",
+			Permission: policy.PermissionRead,
+			Schema:     tools.Schema{JSONSchema: json.RawMessage(`{"type":"nope"}`)},
+		},
+		run: func(ctx context.Context, input json.RawMessage, env tools.Env) (*tools.Result, error) {
+			t.Fatal("tool with broken schema ran")
+			return nil, nil
+		},
+	})
+	agent, err := NewAgent(WithLLM(llm), WithToolRegistry(registry))
+	if err != nil {
+		t.Fatalf("NewAgent returned error: %v", err)
+	}
+
+	if _, err := agent.Run(context.Background(), RunRequest{Input: "hello"}); !errors.Is(err, tools.ErrToolSchemaInvalid) {
+		t.Fatalf("Run err = %v, want ErrToolSchemaInvalid", err)
+	}
 }

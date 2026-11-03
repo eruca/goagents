@@ -74,6 +74,8 @@ Common framework-owned abort reasons are classifiable with `errors.Is`:
 - `tools.ErrToolExecutionFailed`
 - `tools.ErrToolTimeout`
 
+`tools.ErrToolNotFound` and `tools.ErrToolInputInvalid` are returned by direct `tools.Executor` use; inside an `Agent` run those model mistakes become recoverable observations instead.
+
 Provider-specific failures remain host-owned errors.
 
 ## Implementing A Module
@@ -366,5 +368,6 @@ A tool is a host-owned typed action. Keep each tool focused on one operation and
 - Return `ForLLM` for compact model observations, `ForUser` for host/UI output, and `Ref` when the full result lives in host storage.
 - Use `Silent` when a successful tool result's content should not be appended to model context.
 - Use `IsError` for recoverable domain errors the model can correct; return a Go error for executor failures that should abort the run.
+- Calls to an unregistered tool, or with arguments that fail `Schema` validation, never reach policy, approval, or execution. The agent answers them with a recoverable error observation and emits `tool.rejected`, so the model can correct itself on the next turn. A tool whose own JSON Schema is invalid still aborts the run with `tools.ErrToolSchemaInvalid`.
 
 See `examples/tools` for a minimal tool-authoring example.

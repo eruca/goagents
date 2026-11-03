@@ -26,12 +26,22 @@ func Chain(middlewares ...Middleware) Middleware {
 func SchemaValidator(schema Schema) Middleware {
 	return func(next Handler) Handler {
 		return func(ctx context.Context, input json.RawMessage, env Env) (*Result, error) {
-			if err := schema.ValidateInput(input); err != nil {
-				return nil, classifySchemaError(err)
+			if err := ValidateInput(schema, input); err != nil {
+				return nil, err
 			}
 			return next(ctx, input, env)
 		}
 	}
+}
+
+// ValidateInput checks model-supplied input against a tool schema. Errors wrap
+// ErrToolInputInvalid when the input is at fault and ErrToolSchemaInvalid when
+// the schema itself is broken.
+func ValidateInput(schema Schema, input json.RawMessage) error {
+	if err := schema.ValidateInput(input); err != nil {
+		return classifySchemaError(err)
+	}
+	return nil
 }
 
 func classifySchemaError(err error) error {
