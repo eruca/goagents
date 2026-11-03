@@ -22,7 +22,14 @@ func TestSideEffectSmokeControlsStayOutOfProductionHost(t *testing.T) {
 
 func assertHostSideEffectTestIsolation(t *testing.T) {
 	t.Helper()
-	for _, path := range []string{"main.go", "server.go"} {
+	sources, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range sources {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
 		source, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("read production host source %s: %v", path, err)
