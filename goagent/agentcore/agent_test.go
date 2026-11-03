@@ -1061,34 +1061,6 @@ func TestAgentPassesPerCallMaxOutputTokensToLLM(t *testing.T) {
 	}
 }
 
-func TestAgentFailsClosedWhenLLMDoesNotSupportChatOptions(t *testing.T) {
-	llm := &legacyOnlyLLM{}
-	agent, err := NewAgent(
-		WithLLM(llm),
-		WithMaxOutputTokens(4096),
-	)
-	if err != nil {
-		t.Fatalf("NewAgent returned error: %v", err)
-	}
-
-	_, err = agent.Run(context.Background(), RunRequest{Input: "hello"})
-	if !errors.Is(err, ErrMaxOutputTokensUnsupported) {
-		t.Fatalf("Run error = %v, want ErrMaxOutputTokensUnsupported", err)
-	}
-	if llm.calls != 0 {
-		t.Fatalf("legacy LLM calls = %d, want zero", llm.calls)
-	}
-}
-
-type legacyOnlyLLM struct {
-	calls int
-}
-
-func (l *legacyOnlyLLM) Chat(context.Context, ports.ChatRequest) (*ports.ChatResponse, error) {
-	l.calls++
-	return &ports.ChatResponse{Content: "unexpected"}, nil
-}
-
 func TestAgentRunDetailedReturnsExecutionSummaryOnBudgetExceeded(t *testing.T) {
 	llm := &mockLLM{responses: []*ports.ChatResponse{{
 		Content: "agent answer",

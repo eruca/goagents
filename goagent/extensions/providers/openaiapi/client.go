@@ -20,10 +20,10 @@ type Config struct {
 	Model      string
 	HTTPClient *http.Client
 	Headers    map[string]string
+	Limits     Limits
 }
 
-// Limits 是显式启用的 Provider 侧边界；零值关闭对应边界，
-// 从而让 New 为既有 consumer 保持 v0.1.0 行为。
+// Limits bounds provider requests and responses. A zero field disables that bound.
 type Limits struct {
 	MaxOutputTokens  int
 	MaxRequestBytes  int
@@ -38,12 +38,7 @@ type Client struct {
 }
 
 func New(config Config) (*Client, error) {
-	return NewWithLimits(config, Limits{})
-}
-
-// NewWithLimits 创建带显式请求、响应与输出 token 边界的 client。
-// 需要可靠性限制的调用者必须主动选择该入口。
-func NewWithLimits(config Config, limits Limits) (*Client, error) {
+	limits := config.Limits
 	if limits.MaxOutputTokens < 0 || limits.MaxRequestBytes < 0 || limits.MaxResponseBytes < 0 {
 		return nil, newProviderError("configuration_error", false, ErrInvalidConfig)
 	}
@@ -79,17 +74,7 @@ func NewWithLimits(config Config, limits Limits) (*Client, error) {
 }
 
 func (c *Client) Chat(ctx context.Context, req ports.ChatRequest) (*ports.ChatResponse, error) {
-	return c.chat(ctx, req, 0)
-}
-
-// ChatWithMaxOutputTokens 在保持 ChatRequest v0.1.0 形状的同时，
-// 使用显式生成上限发送一次请求。
-func (c *Client) ChatWithMaxOutputTokens(ctx context.Context, req ports.ChatRequest, maxOutputTokens int) (*ports.ChatResponse, error) {
-	return c.chat(ctx, req, maxOutputTokens)
-}
-
-func (c *Client) chat(ctx context.Context, req ports.ChatRequest, maxOutputTokens int) (*ports.ChatResponse, error) {
-	payload, err := c.providerRequestPayload(req, maxOutputTokens)
+	payload, err := c.providerRequestPayload(req)
 	if err != nil {
 		return nil, err
 	}
@@ -148,27 +133,17 @@ func (c *Client) chat(ctx context.Context, req ports.ChatRequest, maxOutputToken
 	return result, nil
 }
 
-// ProviderRequestSHA256 返回 Chat 实际发送的 JSON body 摘要。
+// ProviderRequestSHA256 returns the digest of the exact JSON body Chat sends.
 func (c *Client) ProviderRequestSHA256(req ports.ChatRequest) ([sha256.Size]byte, error) {
-	payload, err := c.providerRequestPayload(req, 0)
+	payload, err := c.providerRequestPayload(req)
 	if err != nil {
 		return [sha256.Size]byte{}, err
 	}
 	return sha256.Sum256(payload), nil
 }
 
-// ProviderRequestSHA256WithMaxOutputTokens 计算限额请求的精确 body 摘要，
-// 避免 pre-dispatch claim 与真实 dispatch 内容分叉。
-func (c *Client) ProviderRequestSHA256WithMaxOutputTokens(req ports.ChatRequest, maxOutputTokens int) ([sha256.Size]byte, error) {
-	payload, err := c.providerRequestPayload(req, maxOutputTokens)
-	if err != nil {
-		return [sha256.Size]byte{}, err
-	}
-	return sha256.Sum256(payload), nil
-}
-
-func (c *Client) providerRequestPayload(req ports.ChatRequest, requestedMaxOutputTokens int) ([]byte, error) {
-	maxTokens, err := normalizedMaxOutputTokens(requestedMaxOutputTokens, c.limits.MaxOutputTokens)
+func (c *Client) providerRequestPayload(req ports.ChatRequest) ([]byte, error) {
+	maxTokens, err := normalizedMaxOutputTokens(req.MaxOutputTokens, c.limits.MaxOutputTokens)
 	if err != nil {
 		return nil, err
 	}

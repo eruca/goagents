@@ -138,7 +138,7 @@ func WithBudgetGuard(guard BudgetGuard) Option {
 	}
 }
 
-// WithMaxOutputTokens 设置传给 LLM 的单次生成上限。
+// WithMaxOutputTokens caps generated tokens per model call.
 func WithMaxOutputTokens(maxOutputTokens int) Option {
 	return func(a *Agent) {
 		a.maxOutputTokens = maxOutputTokens
@@ -276,7 +276,7 @@ func (a *Agent) rehydrateToolProvider(ctx context.Context, state *RunState, regi
 }
 
 func (a *Agent) newReActRunner(runRegistry MutableToolRegistry) *ReActRunner {
-	return NewReActRunnerWithMaxOutputTokens(ReActConfig{
+	return NewReActRunner(ReActConfig{
 		LLM:                  a.llm,
 		PromptCompiler:       a.promptCompiler,
 		PromptBlocks:         a.promptBlocks,
@@ -293,7 +293,8 @@ func (a *Agent) newReActRunner(runRegistry MutableToolRegistry) *ReActRunner {
 		OutputValidator:      a.outputValidator,
 		BudgetGuard:          a.budgetGuard,
 		MaxIterations:        a.maxIterations,
-	}, a.maxOutputTokens)
+		MaxOutputTokens:      a.maxOutputTokens,
+	})
 }
 
 func (a *Agent) runErrorResult(state *RunState, detailed bool, err error) (*RunResult, error) {

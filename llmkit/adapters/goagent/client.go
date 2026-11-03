@@ -23,20 +23,10 @@ type ProviderClient interface {
 	Chat(context.Context, ports.ChatRequest) (*ports.ChatResponse, error)
 }
 
-// ProviderClientWithMaxOutputTokens 是显式生成上限使用的增量 Provider 能力。
-type ProviderClientWithMaxOutputTokens interface {
-	ChatWithMaxOutputTokens(context.Context, ports.ChatRequest, int) (*ports.ChatResponse, error)
-}
-
 // ProviderRequestDigester 暴露 Provider 实际发送的请求 body 摘要；
 // Provider 不支持时，pre-dispatch hook 必须 fail closed。
 type ProviderRequestDigester interface {
 	ProviderRequestSHA256(ports.ChatRequest) ([sha256.Size]byte, error)
-}
-
-// ProviderRequestDigesterWithMaxOutputTokens 计算限额 Provider 请求的精确摘要。
-type ProviderRequestDigesterWithMaxOutputTokens interface {
-	ProviderRequestSHA256WithMaxOutputTokens(ports.ChatRequest, int) ([sha256.Size]byte, error)
 }
 
 // ProfileProvider supplies task routing metadata for a goagent request.
@@ -216,16 +206,6 @@ func newClient(config Config, runtime runtimeOptions, strictFallback bool) *Clie
 // Chat selects a route, records the route trace, and delegates to the selected
 // provider client.
 func (c *Client) Chat(ctx context.Context, req ports.ChatRequest) (*ports.ChatResponse, error) {
-	return c.chat(ctx, req, 0)
-}
-
-// ChatWithMaxOutputTokens 在保持 ChatRequest v0.1.0 形状的同时路由限额请求，
-// 并要求 Provider 明确支持该能力。
-func (c *Client) ChatWithMaxOutputTokens(ctx context.Context, req ports.ChatRequest, maxOutputTokens int) (*ports.ChatResponse, error) {
-	return c.chat(ctx, req, maxOutputTokens)
-}
-
-func (c *Client) chat(ctx context.Context, req ports.ChatRequest, maxOutputTokens int) (*ports.ChatResponse, error) {
 	profile := llmkit.DefaultTaskProfile()
 	if c.profileProvider != nil {
 		profile = c.profileProvider(ctx, req)
@@ -274,15 +254,9 @@ func (c *Client) chat(ctx context.Context, req ports.ChatRequest, maxOutputToken
 			err := fmt.Errorf("missing provider client for selected model alias %q", decision.SelectedAlias)
 			return nil, newRuntimeError(ErrorStageConfig, llmkit.ErrorClassConfiguration, false, err)
 		} else {
-			if maxOutputTokens != 0 {
-				if _, ok := provider.(ProviderClientWithMaxOutputTokens); !ok {
-					err := fmt.Errorf("provider max output tokens capability is required")
-					return nil, newRuntimeError(ErrorStageConfig, llmkit.ErrorClassConfiguration, false, err)
-				}
-			}
 			if c.preDispatchHook != nil {
 				// claim 未明确成功前不能开始 health、调用 Provider 或进入 fallback。
-				providerCallIndex, err := c.runPreDispatchHook(ctx, req, maxOutputTokens, provider, trace, lastProviderCallIndex)
+				providerCallIndex, err := c.runPreDispatchHook(ctx, req, provider, trace, lastProviderCallIndex)
 				if err != nil {
 					return nil, err
 				}
@@ -294,7 +268,7 @@ func (c *Client) chat(ctx context.Context, req ports.ChatRequest, maxOutputToken
 				}
 			}
 			callStarted := time.Now()
-			resp, providerErr := callProvider(ctx, provider, req, maxOutputTokens)
+			resp, providerErr := provider.Chat(ctx, req)
 			latency := time.Since(callStarted)
 			if requestErr := ctx.Err(); requestErr != nil {
 				// 取消优先于晚到 Provider 结果，完整响应不得继续向上返回。
@@ -454,8 +428,8 @@ func (c *Client) routeTrace(profile llmkit.TaskProfile, decision llmkit.RouteDec
 	}
 }
 
-func (c *Client) runPreDispatchHook(ctx context.Context, req ports.ChatRequest, maxOutputTokens int, provider ProviderClient, trace llmkit.RouteTrace, lastProviderCallIndex int) (int, error) {
-	providerDigest, err := providerRequestSHA256(provider, req, maxOutputTokens)
+func (c *Client) runPreDispatchHook(ctx context.Context, req ports.ChatRequest, provider ProviderClient, trace llmkit.RouteTrace, lastProviderCallIndex int) (int, error) {
+	providerDigest, err := providerRequestSHA256(provider, req)
 	if err != nil {
 		var runtimeErr *RuntimeError
 		if errors.As(err, &runtimeErr) {
@@ -507,21 +481,7 @@ func (c *Client) allowsFallback(err *RuntimeError) bool {
 	return slices.Contains(c.retryableErrorClass, err.Class)
 }
 
-func callProvider(ctx context.Context, provider ProviderClient, req ports.ChatRequest, maxOutputTokens int) (*ports.ChatResponse, error) {
-	if maxOutputTokens == 0 {
-		return provider.Chat(ctx, req)
-	}
-	return provider.(ProviderClientWithMaxOutputTokens).ChatWithMaxOutputTokens(ctx, req, maxOutputTokens)
-}
-
-func providerRequestSHA256(provider ProviderClient, req ports.ChatRequest, maxOutputTokens int) ([sha256.Size]byte, error) {
-	if maxOutputTokens != 0 {
-		digester, ok := provider.(ProviderRequestDigesterWithMaxOutputTokens)
-		if !ok {
-			return [sha256.Size]byte{}, newRuntimeError(ErrorStageConfig, llmkit.ErrorClassConfiguration, false, fmt.Errorf("provider limited request digester is required when pre-dispatch hook is configured"))
-		}
-		return digester.ProviderRequestSHA256WithMaxOutputTokens(req, maxOutputTokens)
-	}
+func providerRequestSHA256(provider ProviderClient, req ports.ChatRequest) ([sha256.Size]byte, error) {
 	digester, ok := provider.(ProviderRequestDigester)
 	if !ok {
 		return [sha256.Size]byte{}, newRuntimeError(ErrorStageConfig, llmkit.ErrorClassConfiguration, false, fmt.Errorf("provider request digester is required when pre-dispatch hook is configured"))

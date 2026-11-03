@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/eruca/goagents/goagent/agentcore"
+	"github.com/eruca/goagents/goagent/extensions/providers/openaiapi"
 	"github.com/eruca/goagents/goagent/ports"
 	"github.com/eruca/goagents/goagent/prompt"
 	"github.com/eruca/goagents/llmkit"
@@ -33,7 +34,7 @@ func main() {
 		TaskID:  "task-example-1",
 		Attempt: 1,
 	}
-	providers, err := goagentadapter.OpenAICompatibleProvidersFromConfig(*config, os.Getenv, nil)
+	providers, err := goagentadapter.OpenAICompatibleProvidersFromConfig(*config, os.Getenv, nil, openaiapi.Limits{})
 	if err != nil {
 		panic(err)
 	}

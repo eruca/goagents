@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/eruca/goagents/goagent/extensions/providers/openaiapi"
 	"github.com/eruca/goagents/goagent/ports"
 	"github.com/eruca/goagents/llmkit"
 )
@@ -49,7 +50,7 @@ func TestOpenAICompatibleProvidersFromConfigUsesBaseURLModelAndAPIKeyEnv(t *test
 			return "secret-value"
 		}
 		return ""
-	}, server.Client())
+	}, server.Client(), openaiapi.Limits{})
 	if err != nil {
 		t.Fatalf("OpenAICompatibleProvidersFromConfig() error = %v", err)
 	}
@@ -89,7 +90,7 @@ func TestOpenAICompatibleProvidersFromConfigRejectsMissingBaseURL(t *testing.T) 
 		}},
 	}
 
-	_, err := OpenAICompatibleProvidersFromConfig(config, func(string) string { return "" }, nil)
+	_, err := OpenAICompatibleProvidersFromConfig(config, func(string) string { return "" }, nil, openaiapi.Limits{})
 	if err == nil {
 		t.Fatal("OpenAICompatibleProvidersFromConfig() error = nil, want missing base URL error")
 	}
@@ -118,7 +119,7 @@ func TestOpenAICompatibleProvidersFromConfigRejectsMissingConfiguredAPIKey(t *te
 		}},
 	}
 
-	_, err := OpenAICompatibleProvidersFromConfig(config, func(string) string { return "" }, nil)
+	_, err := OpenAICompatibleProvidersFromConfig(config, func(string) string { return "" }, nil, openaiapi.Limits{})
 	if err == nil {
 		t.Fatal("OpenAICompatibleProvidersFromConfig() error = nil, want missing API key error")
 	}

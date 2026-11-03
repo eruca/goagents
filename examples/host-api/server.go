@@ -18,6 +18,7 @@ import (
 
 	"github.com/eruca/goagents/artifactkit"
 	"github.com/eruca/goagents/goagent/agentcore"
+	"github.com/eruca/goagents/goagent/extensions/providers/openaiapi"
 	"github.com/eruca/goagents/goagent/policy"
 	"github.com/eruca/goagents/goagent/ports"
 	"github.com/eruca/goagents/goagent/prompt"
@@ -1954,7 +1955,7 @@ func loadLLMKitComposition(home string) ([]llmkit.Candidate, map[string]goagenta
 	if len(candidates) == 0 {
 		return nil, nil, nil, fmt.Errorf("llmkit config has no models")
 	}
-	providers, err := goagentadapter.OpenAICompatibleProvidersFromConfig(*config, os.Getenv, nil)
+	providers, err := goagentadapter.OpenAICompatibleProvidersFromConfig(*config, os.Getenv, nil, openaiapi.Limits{})
 	if err != nil {
 		return nil, nil, nil, err
 	}

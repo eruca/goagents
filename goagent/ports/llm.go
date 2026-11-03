@@ -17,6 +17,8 @@ type LLMClient interface {
 type ChatRequest struct {
 	Messages []ChatMessage
 	Tools    []ToolSpec
+	// MaxOutputTokens caps generated tokens for this call; zero leaves it to the provider.
+	MaxOutputTokens int
 }
 
 type ChatMessage struct {

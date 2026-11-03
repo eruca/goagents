@@ -28,9 +28,9 @@ func TestClientForwardsMaxOutputTokensToSelectedProvider(t *testing.T) {
 		Providers:       map[string]ProviderClient{"local-small": local},
 		ProfileProvider: fixedProfile(simpleProfile()),
 	})
-	resp, err := client.ChatWithMaxOutputTokens(context.Background(), ports.ChatRequest{}, 4096)
+	resp, err := client.Chat(context.Background(), ports.ChatRequest{MaxOutputTokens: 4096})
 	if err != nil {
-		t.Fatalf("ChatWithMaxOutputTokens() error = %v", err)
+		t.Fatalf("Chat() error = %v", err)
 	}
 	if resp.Content != "local" || len(local.maxOutputTokens) != 1 || local.maxOutputTokens[0] != 4096 {
 		t.Fatalf("response/max output tokens = %q/%+v, want local/[4096]", resp.Content, local.maxOutputTokens)
@@ -1478,12 +1478,8 @@ type optionsProviderClient struct {
 	maxOutputTokens []int
 }
 
-func (c *optionsProviderClient) Chat(context.Context, ports.ChatRequest) (*ports.ChatResponse, error) {
-	return c.response, nil
-}
-
-func (c *optionsProviderClient) ChatWithMaxOutputTokens(_ context.Context, _ ports.ChatRequest, maxOutputTokens int) (*ports.ChatResponse, error) {
-	c.maxOutputTokens = append(c.maxOutputTokens, maxOutputTokens)
+func (c *optionsProviderClient) Chat(_ context.Context, req ports.ChatRequest) (*ports.ChatResponse, error) {
+	c.maxOutputTokens = append(c.maxOutputTokens, req.MaxOutputTokens)
 	return c.response, nil
 }
 
