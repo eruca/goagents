@@ -1490,7 +1490,7 @@ func TestHostAPIRoutesLLMUsingHistoricalOutcomes(t *testing.T) {
 			RouteID:       fmt.Sprintf("route-history-%d", i),
 			TaskID:        fmt.Sprintf("history-%d", i),
 			Attempt:       1,
-			RecordedAt:    time.Date(2026, 5, 6, 8, i, 0, 0, time.UTC),
+			RecordedAt:    time.Now().Add(-time.Duration(10-i) * time.Minute),
 			TaskType:      "simple_local",
 			AccountAlias:  "local-dev",
 			ModelAlias:    "local-free",

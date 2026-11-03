@@ -108,7 +108,7 @@ if err != nil {
 _ = stats
 ```
 
-`model-stats.json` groups records by `task_type`, `account_alias`, `model_alias`, and `provider`. Each bucket includes route attempts, completed outcomes, pending outcomes, success/failure rates, average latency, average token counts, average estimated cents, and last seen time. Outcomes are matched to routes by `route_id` and `attempt`, so every fallback attempt is counted; average latency and cost only include outcomes that reported them. The file is derived data: keep `route-events.jsonl` and `outcomes.jsonl` as the append-only source of truth.
+`model-stats.json` groups records by `task_type`, `account_alias`, `model_alias`, and `provider`. Each bucket includes route attempts, completed outcomes, pending outcomes, success/failure rates, average latency, average token counts, average estimated cents, and last seen time. Outcomes are matched to routes by `route_id` and `attempt`, so every fallback attempt is counted; average latency and cost only include outcomes that reported them. `recent_outcomes` and `recent_failures` weight each outcome by its age, halving every `ModelStatsHalfLife` (7 days); reliability scoring uses these, so a model that failed weeks ago but works now is not held back by its history. The file is derived data: keep `route-events.jsonl` and `outcomes.jsonl` as the append-only source of truth.
 
 Hosts can also expose route-level observability by reading the same audit files:
 

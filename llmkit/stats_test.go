@@ -512,3 +512,47 @@ func TestModelStatsAverageCostAndLatencyOnlyOverReportedSamples(t *testing.T) {
 		t.Fatalf("enriched = %+v, want configured cost kept without cost or latency samples", enriched[0].Model)
 	}
 }
+
+func TestModelStatsWeightRecentOutcomesOverOldOnes(t *testing.T) {
+	home := t.TempDir()
+	recorder, err := NewJSONLRecorder(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	record := func(model string, n int, success bool, at time.Time) {
+		for i := range n {
+			if err := recorder.RecordOutcome(context.Background(), TaskOutcome{
+				RouteID: model + at.String() + string(rune('a'+i)), Attempt: 1, RecordedAt: at,
+				TaskType: "rewrite", AccountAlias: "acct", ModelAlias: model, Provider: "p", Success: success,
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	fourWeeksAgo := now.Add(-4 * ModelStatsHalfLife)
+	// recovered failed a lot four weeks ago and works now; degrading is the reverse.
+	record("recovered", 20, false, fourWeeksAgo)
+	record("recovered", 5, true, now.Add(-time.Hour))
+	record("degrading", 20, true, fourWeeksAgo)
+	record("degrading", 5, false, now.Add(-time.Hour))
+
+	stats, err := BuildModelStats(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := TaskProfile{TaskType: "rewrite"}
+	candidates := ApplyModelStats(*stats, profile, []Candidate{
+		{AccountAlias: "acct", Model: ModelCapability{Alias: "recovered", Provider: "p"}},
+		{AccountAlias: "acct", Model: ModelCapability{Alias: "degrading", Provider: "p"}},
+	})
+	recovered, degrading := reliabilityScore(candidates[0].Model), reliabilityScore(candidates[1].Model)
+	// Raw totals rank them the other way: 20/25 failures against 5/25.
+	if recovered <= degrading {
+		t.Fatalf("reliability recovered/degrading = %d/%d, want the recently healthy model ahead", recovered, degrading)
+	}
+	entry := stats.Models[modelStatsKey("rewrite", "acct", "recovered", "p")]
+	if entry.OutcomeCount != 25 || entry.RecentFailures > 1.3 || entry.RecentOutcomes < 6 {
+		t.Fatalf("recovered entry = %+v, want 25 raw outcomes with old failures decayed to 1/16", entry)
+	}
+}

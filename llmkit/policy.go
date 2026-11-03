@@ -267,9 +267,9 @@ const (
 // posterior mean): a model with no history scores the prior, a few failures do
 // not condemn a new model, and a long clean history beats no history.
 func reliabilityScore(model ModelCapability) int {
-	if model.RecentOutcomeCount > 0 {
-		failures := min(model.RecentFailureCount, model.RecentOutcomeCount)
-		rate := (float64(failures) + reliabilityPriorFailures) / (float64(model.RecentOutcomeCount) + reliabilityPriorOutcomes)
+	if model.RecentOutcomes > 0 {
+		failures := min(model.RecentFailures, model.RecentOutcomes)
+		rate := (failures + reliabilityPriorFailures) / (model.RecentOutcomes + reliabilityPriorOutcomes)
 		return -int(math.Round(rate * 100))
 	}
 	if model.RecentFailureRate > 0 {
