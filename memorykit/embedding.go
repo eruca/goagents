@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"reflect"
 	"strings"
 	"time"
@@ -127,13 +126,8 @@ func validateEmbeddingBatch(vectors [][]float32, count, dimensions int) error {
 		return fmt.Errorf("%w: invalid embedding batch result", ErrInvalidMemory)
 	}
 	for _, vector := range vectors {
-		if len(vector) != dimensions {
+		if len(vector) != dimensions || !validVector(vector) {
 			return fmt.Errorf("%w: invalid embedding batch result", ErrInvalidMemory)
-		}
-		for _, value := range vector {
-			if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
-				return fmt.Errorf("%w: invalid embedding batch result", ErrInvalidMemory)
-			}
 		}
 	}
 	return nil

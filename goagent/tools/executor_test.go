@@ -553,3 +553,10 @@ func TestExecutorSequentialToolWritesReachCallerMetadata(t *testing.T) {
 		t.Fatalf("metadata = %#v, want the tool's write visible to the run", metadata)
 	}
 }
+
+func TestToolErrorWhoseTextMentionsInputIsStillAnExecutionFailure(t *testing.T) {
+	err := classifyToolError(errors.New("upstream said: invalid tool input JSON"))
+	if !errors.Is(err, ErrToolExecutionFailed) || errors.Is(err, ErrToolInputInvalid) {
+		t.Fatalf("classifyToolError = %v, want execution failure, not invalid input", err)
+	}
+}

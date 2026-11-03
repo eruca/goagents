@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/eruca/goagents/goagent/policy"
@@ -1340,4 +1341,16 @@ func (s *recordingEventSink) hasStageEvent(eventType EventType, stage string) bo
 		}
 	}
 	return false
+}
+
+func TestNewAgentRejectsToolWithBrokenSchema(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(testAgentTool{
+		spec: tools.Spec{Name: "broken", Schema: ports.ToolSchema{JSONSchema: json.RawMessage(`{"type": 42}`)}},
+	})
+
+	_, err := NewAgent(WithLLM(&mockLLM{}), WithToolRegistry(registry))
+	if !errors.Is(err, ports.ErrToolSchemaInvalid) || !strings.Contains(err.Error(), `"broken"`) {
+		t.Fatalf("NewAgent error = %v, want ErrToolSchemaInvalid naming the tool", err)
+	}
 }

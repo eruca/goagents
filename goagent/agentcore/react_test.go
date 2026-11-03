@@ -414,8 +414,9 @@ func TestReActStillAbortsOnBrokenToolSchema(t *testing.T) {
 		{ToolCalls: []ports.ToolCall{{ID: "call_1", Name: "broken", Input: json.RawMessage(`{}`)}}},
 		{Content: "done"},
 	}}
-	registry := tools.NewRegistry()
-	registry.Register(testAgentTool{
+	// A configured tool's schema is checked by NewAgent; a request-scoped tool
+	// is only seen at run time.
+	broken := testAgentTool{
 		spec: tools.Spec{
 			Name:       "broken",
 			Permission: policy.PermissionRead,
@@ -425,8 +426,8 @@ func TestReActStillAbortsOnBrokenToolSchema(t *testing.T) {
 			t.Fatal("tool with broken schema ran")
 			return nil, nil
 		},
-	})
-	agent, err := NewAgent(WithLLM(llm), WithToolRegistry(registry))
+	}
+	agent, err := NewAgent(WithLLM(llm), WithToolProvider(staticToolProvider{tools: []tools.Tool{broken}}))
 	if err != nil {
 		t.Fatalf("NewAgent returned error: %v", err)
 	}

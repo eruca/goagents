@@ -106,7 +106,7 @@ func (s *Store) RejectCheckpoint(ctx context.Context, request runkit.ApprovalLea
 	defer tx.Rollback()
 	result, err := tx.ExecContext(ctx, `
 UPDATE approval_checkpoints
-SET status = 'rejected', updated_at = ?
+SET status = 'rejected', ciphertext = X'', updated_at = ?
 WHERE checkpoint_id = ? AND tenant_id = ? AND definition_hash = ? AND status = 'pending' AND expires_at > ?`,
 		now, request.CheckpointID, request.TenantID, request.DefinitionHash, now)
 	if err != nil {
@@ -141,7 +141,7 @@ func (s *Store) FailPendingCheckpoint(ctx context.Context, request runkit.Pendin
 	}
 	result, err := s.db.ExecContext(ctx, `
 UPDATE approval_checkpoints
-SET status = 'failed', failure_code = ?, lease_owner = '', lease_until = NULL,
+SET status = 'failed', ciphertext = X'', failure_code = ?, lease_owner = '', lease_until = NULL,
  updated_at = CASE WHEN status = 'pending' THEN ? ELSE updated_at END
 WHERE checkpoint_id = ? AND run_id = ? AND tenant_id = ? AND definition_hash = ?
  AND (status = 'pending' OR (status = 'failed' AND failure_code = ?))`,
@@ -173,7 +173,7 @@ func (s *Store) finishLease(ctx context.Context, completion runkit.CheckpointLea
 	}
 	result, err := s.db.ExecContext(ctx, `
 UPDATE approval_checkpoints
-SET status = ?, failure_code = ?, lease_owner = '', lease_until = NULL, updated_at = ?
+SET status = ?, ciphertext = X'', failure_code = ?, lease_owner = '', lease_until = NULL, updated_at = ?
 WHERE checkpoint_id = ? AND tenant_id = ? AND status = 'leased' AND lease_owner = ?`,
 		status, failureCode, requestNow(completion.Now), completion.CheckpointID, completion.TenantID, completion.LeaseOwner)
 	if err != nil {
@@ -192,7 +192,7 @@ WHERE checkpoint_id = ? AND tenant_id = ? AND status = 'leased' AND lease_owner 
 func (s *Store) ExpireCheckpoints(ctx context.Context, now time.Time) (int, error) {
 	result, err := s.db.ExecContext(ctx, `
 UPDATE approval_checkpoints
-SET status = 'expired', lease_owner = '', lease_until = NULL, updated_at = ?
+SET status = 'expired', ciphertext = X'', lease_owner = '', lease_until = NULL, updated_at = ?
 WHERE status IN ('pending', 'leased') AND expires_at <= ?`, requestNow(now), requestNow(now))
 	if err != nil {
 		return 0, err

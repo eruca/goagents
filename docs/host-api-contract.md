@@ -613,13 +613,16 @@ can use newly written outcomes.
 ## GET /workers/queued
 
 Returns process-local observability for the in-process queued worker loop.
+`worker_id` is the lease owner this process uses for queued workflows. It is
+generated per process, so several host processes can share one workflow
+database without renewing or releasing each other's leases.
 
 Response:
 
 ```json
 {
   "started": true,
-  "worker_id": "host-api-inprocess-worker",
+  "worker_id": "host-api:7f3c2a0e-5b1d-4c8e-9a6f-2d4b8e1c0a93",
   "claim_attempts": 3,
   "claimed": 1,
   "completed": 1,

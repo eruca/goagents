@@ -217,7 +217,7 @@ func TestStoreFailsOnlyExactPendingCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetCheckpoint first: %v", err)
 	}
-	if first.Status != runkit.CheckpointFailed || first.FailureCode != request.FailureCode || !first.UpdatedAt.Equal(now) {
+	if first.Status != runkit.CheckpointFailed || first.FailureCode != request.FailureCode || !first.UpdatedAt.Equal(now) || len(first.Ciphertext) != 0 {
 		t.Fatalf("failed checkpoint = %#v", first)
 	}
 	repeated := request

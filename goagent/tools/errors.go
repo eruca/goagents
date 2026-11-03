@@ -4,12 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
+
+	"github.com/eruca/goagents/goagent/ports"
 )
 
 var (
-	ErrToolInputInvalid    = errors.New("tool input invalid")
-	ErrToolSchemaInvalid   = errors.New("tool schema invalid")
+	ErrToolInputInvalid    = ports.ErrToolInputInvalid
+	ErrToolSchemaInvalid   = ports.ErrToolSchemaInvalid
 	ErrToolExecutionFailed = errors.New("tool execution failed")
 	ErrToolTimeout         = errors.New("tool timeout")
 )
@@ -24,16 +25,7 @@ func classifyToolError(err error) error {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return fmt.Errorf("%w: %w", ErrToolTimeout, err)
 	}
-	message := err.Error()
-	switch {
-	case strings.Contains(message, "invalid tool JSON schema"):
-		return fmt.Errorf("%w: %w", ErrToolSchemaInvalid, err)
-	case strings.Contains(message, "invalid tool input JSON"),
-		strings.Contains(message, "tool input failed JSON schema validation"):
-		return fmt.Errorf("%w: %w", ErrToolInputInvalid, err)
-	default:
-		return fmt.Errorf("%w: %w", ErrToolExecutionFailed, err)
-	}
+	return fmt.Errorf("%w: %w", ErrToolExecutionFailed, err)
 }
 
 func isToolInputInvalid(err error) bool {

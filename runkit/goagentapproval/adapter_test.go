@@ -78,7 +78,7 @@ func TestAdapterBindsCiphertextToCheckpointIdentity(t *testing.T) {
 	if err := adapter.SavePending(context.Background(), pending); err != nil {
 		t.Fatalf("SavePending: %v", err)
 	}
-	want := []byte(`{"checkpoint_id":"checkpoint-1","tenant_id":"tenant-1","definition_hash":"agent-v1"}`)
+	want := []byte(`{"checkpoint_id":"checkpoint-1","run_id":"run-1","tenant_id":"tenant-1","definition_hash":"agent-v1"}`)
 	if !bytes.Equal(cipher.encryptAAD, want) {
 		t.Fatalf("encrypt AAD = %q, want %q", cipher.encryptAAD, want)
 	}

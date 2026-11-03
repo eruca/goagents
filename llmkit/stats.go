@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -21,23 +22,32 @@ type ModelStats struct {
 
 // ModelStatsEntry summarizes one task/model/account/provider route bucket.
 type ModelStatsEntry struct {
-	TaskType          string     `json:"task_type,omitempty"`
-	AccountAlias      string     `json:"account_alias,omitempty"`
-	ModelAlias        string     `json:"model_alias,omitempty"`
-	Provider          string     `json:"provider,omitempty"`
-	RouteAttempts     int        `json:"route_attempts"`
-	OutcomeCount      int        `json:"outcome_count"`
-	PendingOutcomes   int        `json:"pending_outcomes"`
-	Successes         int        `json:"successes"`
-	Failures          int        `json:"failures"`
-	SuccessRate       float64    `json:"success_rate"`
-	FailureRate       float64    `json:"failure_rate"`
+	TaskType        string  `json:"task_type,omitempty"`
+	AccountAlias    string  `json:"account_alias,omitempty"`
+	ModelAlias      string  `json:"model_alias,omitempty"`
+	Provider        string  `json:"provider,omitempty"`
+	RouteAttempts   int     `json:"route_attempts"`
+	OutcomeCount    int     `json:"outcome_count"`
+	PendingOutcomes int     `json:"pending_outcomes"`
+	Successes       int     `json:"successes"`
+	Failures        int     `json:"failures"`
+	SuccessRate     float64 `json:"success_rate"`
+	FailureRate     float64 `json:"failure_rate"`
+	// RecentOutcomes and RecentFailures weight each outcome by its age,
+	// halving every ModelStatsHalfLife, so routing reacts to how a model
+	// behaves now rather than over its whole history.
+	RecentOutcomes    float64    `json:"recent_outcomes"`
+	RecentFailures    float64    `json:"recent_failures"`
 	AvgLatencyMillis  int        `json:"avg_latency_ms,omitempty"`
 	AvgInputTokens    int        `json:"avg_input_tokens,omitempty"`
 	AvgOutputTokens   int        `json:"avg_output_tokens,omitempty"`
 	AvgEstimatedCents int        `json:"avg_estimated_cents,omitempty"`
 	LastSeen          *time.Time `json:"last_seen,omitempty"`
 }
+
+// ModelStatsHalfLife is the age at which an outcome counts half as much as a
+// fresh one in RecentOutcomes and RecentFailures.
+const ModelStatsHalfLife = 7 * 24 * time.Hour
 
 // RefreshModelStats rebuilds model-stats.json from route-events.jsonl and
 // outcomes.jsonl under home.
@@ -55,6 +65,7 @@ func RefreshModelStats(home string) (*ModelStats, error) {
 // BuildModelStats reads audit JSONL files and aggregates route/outcome facts.
 func BuildModelStats(home string) (*ModelStats, error) {
 	builder := modelStatsBuilder{
+		now:     time.Now().UTC(),
 		entries: make(map[string]*modelStatsAccumulator),
 	}
 	if err := readJSONL(filepath.Join(home, routeEventsFile), func(line []byte) error {
@@ -125,8 +136,14 @@ func ApplyModelStats(stats ModelStats, profile TaskProfile, candidates []Candida
 		if strings.TrimSpace(entry.TaskType) != "" && entry.TaskType != profile.TaskType {
 			continue
 		}
-		enriched[i].Model.RecentOutcomeCount = entry.OutcomeCount
-		enriched[i].Model.RecentFailureCount = entry.Failures
+		enriched[i].Model.RecentOutcomes = entry.RecentOutcomes
+		enriched[i].Model.RecentFailures = entry.RecentFailures
+		if entry.RecentOutcomes == 0 && entry.OutcomeCount > 0 {
+			// Stats written without decayed counts: use the raw totals. Decay
+			// never reaches exactly zero, so zero means "not computed".
+			enriched[i].Model.RecentOutcomes = float64(entry.OutcomeCount)
+			enriched[i].Model.RecentFailures = float64(entry.Failures)
+		}
 		enriched[i].Model.RecentFailureRate = entry.FailureRate
 		// Without observed samples the configured values stay authoritative.
 		if entry.AvgLatencyMillis > 0 {
@@ -163,6 +180,7 @@ func WriteModelStats(home string, stats ModelStats) error {
 }
 
 type modelStatsBuilder struct {
+	now     time.Time
 	entries map[string]*modelStatsAccumulator
 }
 
@@ -187,10 +205,13 @@ func (b *modelStatsBuilder) addOutcome(outcome TaskOutcome) {
 	key := modelStatsKey(outcome.TaskType, outcome.AccountAlias, outcome.ModelAlias, outcome.Provider)
 	acc := b.entry(key, outcome.TaskType, outcome.AccountAlias, outcome.ModelAlias, outcome.Provider)
 	acc.entry.OutcomeCount++
+	weight := b.decayWeight(outcome.RecordedAt)
+	acc.entry.RecentOutcomes += weight
 	if outcome.Success {
 		acc.entry.Successes++
 	} else {
 		acc.entry.Failures++
+		acc.entry.RecentFailures += weight
 	}
 	// Outcomes that did not report latency or cost must not pull averages toward zero.
 	if outcome.LatencyMillis > 0 {
@@ -204,6 +225,15 @@ func (b *modelStatsBuilder) addOutcome(outcome TaskOutcome) {
 		acc.costSamples++
 	}
 	acc.observe(outcome.RecordedAt)
+}
+
+// decayWeight is 2^(-age/ModelStatsHalfLife). An outcome without a timestamp
+// or from the future counts fully.
+func (b *modelStatsBuilder) decayWeight(recorded time.Time) float64 {
+	if recorded.IsZero() || !recorded.Before(b.now) {
+		return 1
+	}
+	return math.Exp2(-float64(b.now.Sub(recorded)) / float64(ModelStatsHalfLife))
 }
 
 func (b *modelStatsBuilder) entry(key, taskType, accountAlias, modelAlias, provider string) *modelStatsAccumulator {
@@ -224,7 +254,7 @@ func (b *modelStatsBuilder) entry(key, taskType, accountAlias, modelAlias, provi
 
 func (b *modelStatsBuilder) stats() *ModelStats {
 	stats := &ModelStats{
-		GeneratedAt: time.Now().UTC(),
+		GeneratedAt: b.now,
 		Models:      make(map[string]ModelStatsEntry, len(b.entries)),
 	}
 	for key, acc := range b.entries {

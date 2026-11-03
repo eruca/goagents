@@ -3,8 +3,10 @@ package ports
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -77,6 +79,14 @@ type ToolSchema struct {
 	Validate   func(json.RawMessage) error
 }
 
+// ErrToolSchemaInvalid marks a tool whose own JSON Schema does not compile, a
+// host bug. ErrToolInputInvalid marks arguments that fail the schema, which the
+// model can correct.
+var (
+	ErrToolSchemaInvalid = errors.New("invalid tool JSON schema")
+	ErrToolInputInvalid  = errors.New("invalid tool input")
+)
+
 func (s ToolSchema) ValidateInput(input json.RawMessage) error {
 	if len(s.JSONSchema) > 0 {
 		if err := validateJSONSchema(s.JSONSchema, input); err != nil {
@@ -89,25 +99,57 @@ func (s ToolSchema) ValidateInput(input json.RawMessage) error {
 	return s.Validate(input)
 }
 
-func validateJSONSchema(schema json.RawMessage, input json.RawMessage) error {
-	doc, err := jsonschema.UnmarshalJSON(strings.NewReader(string(schema)))
-	if err != nil {
-		return fmt.Errorf("invalid tool JSON schema: %w", err)
+// Compile reports whether the JSON Schema compiles, so hosts can reject a bad
+// tool when they configure it rather than on its first call.
+func (s ToolSchema) Compile() error {
+	if len(s.JSONSchema) == 0 {
+		return nil
 	}
-	compiler := jsonschema.NewCompiler()
-	if err := compiler.AddResource("tool.schema.json", doc); err != nil {
-		return fmt.Errorf("invalid tool JSON schema: %w", err)
+	_, err := compileJSONSchema(s.JSONSchema)
+	return err
+}
+
+// compiledSchemas caches compiled schemas by source text. Tool schemas are few
+// and validated on every call; a schema that fails to compile is cached too.
+var compiledSchemas sync.Map // string -> compiledSchema
+
+type compiledSchema struct {
+	schema *jsonschema.Schema
+	err    error
+}
+
+func compileJSONSchema(source json.RawMessage) (*jsonschema.Schema, error) {
+	key := string(source)
+	if cached, ok := compiledSchemas.Load(key); ok {
+		entry := cached.(compiledSchema)
+		return entry.schema, entry.err
 	}
-	compiled, err := compiler.Compile("tool.schema.json")
+	entry := compiledSchema{}
+	doc, err := jsonschema.UnmarshalJSON(strings.NewReader(key))
+	if err == nil {
+		compiler := jsonschema.NewCompiler()
+		if err = compiler.AddResource("tool.schema.json", doc); err == nil {
+			entry.schema, err = compiler.Compile("tool.schema.json")
+		}
+	}
 	if err != nil {
-		return fmt.Errorf("invalid tool JSON schema: %w", err)
+		entry = compiledSchema{err: fmt.Errorf("%w: %w", ErrToolSchemaInvalid, err)}
+	}
+	compiledSchemas.Store(key, entry)
+	return entry.schema, entry.err
+}
+
+func validateJSONSchema(source json.RawMessage, input json.RawMessage) error {
+	compiled, err := compileJSONSchema(source)
+	if err != nil {
+		return err
 	}
 	instance, err := jsonschema.UnmarshalJSON(strings.NewReader(string(input)))
 	if err != nil {
-		return fmt.Errorf("invalid tool input JSON: %w", err)
+		return fmt.Errorf("%w: arguments are not valid JSON: %w", ErrToolInputInvalid, err)
 	}
 	if err := compiled.Validate(instance); err != nil {
-		return fmt.Errorf("tool input failed JSON schema validation: %w", err)
+		return fmt.Errorf("%w: %w", ErrToolInputInvalid, err)
 	}
 	return nil
 }

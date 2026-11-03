@@ -162,6 +162,7 @@ func TestEmbeddingWorkerValidatesWholeBatchBeforeWriting(t *testing.T) {
 		{name: "NaN in later item", response: [][]float32{{1, 0, 0}, {0, float32(math.NaN()), 0}}},
 		{name: "positive infinity in later item", response: [][]float32{{1, 0, 0}, {0, float32(math.Inf(1)), 0}}},
 		{name: "negative infinity in later item", response: [][]float32{{1, 0, 0}, {0, float32(math.Inf(-1)), 0}}},
+		{name: "zero vector in later item", response: [][]float32{{1, 0, 0}, {0, 0, 0}}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -311,4 +312,22 @@ func mustEmbeddingWorker(t *testing.T, store EmbeddingStore, embedder Embedder) 
 		t.Fatal(err)
 	}
 	return worker
+}
+
+func TestValidVectorRejectsZeroNormAndNonFinite(t *testing.T) {
+	for _, test := range []struct {
+		vector []float32
+		want   bool
+	}{
+		{[]float32{0.6, 0.8}, true},
+		{[]float32{1e-30, 0}, true}, // squares in float64, so tiny values still count
+		{[]float32{0, 0, 0}, false},
+		{nil, false},
+		{[]float32{1, float32(math.NaN())}, false},
+		{[]float32{float32(math.Inf(1)), 0}, false},
+	} {
+		if got := validVector(test.vector); got != test.want {
+			t.Errorf("validVector(%v) = %v, want %v", test.vector, got, test.want)
+		}
+	}
 }

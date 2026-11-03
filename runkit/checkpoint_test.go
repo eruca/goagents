@@ -66,7 +66,7 @@ func TestCheckpointApproveAndLeaseIsAtomic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetCheckpoint: %v", err)
 	}
-	if stored.Status != CheckpointConsumed || string(stored.Ciphertext) != "ciphertext" {
+	if stored.Status != CheckpointConsumed || len(stored.Ciphertext) != 0 {
 		t.Fatalf("stored = %#v", stored)
 	}
 }

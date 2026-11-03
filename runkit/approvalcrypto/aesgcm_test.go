@@ -3,6 +3,8 @@ package approvalcrypto
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 )
@@ -75,4 +77,47 @@ func (p testKeyProvider) Resolve(_ context.Context, keyID string) (KeyMaterial, 
 		return KeyMaterial{}, fmt.Errorf("unknown key")
 	}
 	return KeyMaterial{ID: keyID, Bytes: append([]byte(nil), key...)}, nil
+}
+
+func TestAESGCMCipherAuthenticatesEnvelopeHeader(t *testing.T) {
+	provider := testKeyProvider{activeID: "local-v1", keys: map[string][]byte{
+		"local-v1": bytes.Repeat([]byte{3}, 32),
+	}}
+	cipher, err := NewAESGCMCipher(provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aad := []byte("checkpoint")
+	ciphertext, err := cipher.Encrypt(context.Background(), []byte("secret"), aad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope ciphertextEnvelope
+	if err := json.Unmarshal(ciphertext, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	// A header rewritten to look like the version 1 format, which did not
+	// authenticate the header, must not decrypt.
+	envelope.Version = 1
+	downgraded, _ := json.Marshal(envelope)
+	if _, err := cipher.Decrypt(context.Background(), downgraded, aad); !errors.Is(err, ErrInvalidEnvelope) {
+		t.Fatalf("downgraded envelope error = %v, want ErrInvalidEnvelope", err)
+	}
+}
+
+func TestAESGCMCipherReportsReplacedKey(t *testing.T) {
+	keys := map[string][]byte{"local-v1": bytes.Repeat([]byte{4}, 32)}
+	cipher, err := NewAESGCMCipher(testKeyProvider{activeID: "local-v1", keys: keys})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciphertext, err := cipher.Encrypt(context.Background(), []byte("secret"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The keychain item was deleted and regenerated under the same id.
+	keys["local-v1"] = bytes.Repeat([]byte{5}, 32)
+	if _, err := cipher.Decrypt(context.Background(), ciphertext, nil); !errors.Is(err, ErrKeyMaterialChanged) {
+		t.Fatalf("Decrypt with replaced key error = %v, want ErrKeyMaterialChanged", err)
+	}
 }

@@ -40,22 +40,24 @@ const (
 // ModelCapability is the static and current-runtime capability surface needed
 // by deterministic routing. Task 4 will own route scoring and selection.
 type ModelCapability struct {
-	Alias               string             `json:"alias,omitempty"`
-	Provider            string             `json:"provider,omitempty"`
-	IsLocal             bool               `json:"is_local,omitempty"`
-	CapabilityLevel     CapabilityLevel    `json:"capability_level"`
-	SupportsTools       bool               `json:"supports_tools,omitempty"`
-	SupportsJSON        bool               `json:"supports_json,omitempty"`
-	ContextWindowClass  ContextWindowClass `json:"context_window_class"`
-	PriceClass          PriceClass         `json:"price_class"`
-	LatencyClass        LatencyClass       `json:"latency_class"`
-	EstimatedCents      int                `json:"estimated_cents,omitempty"`
-	MaxConcurrency      int                `json:"max_concurrency,omitempty"`
-	CurrentConcurrency  int                `json:"current_concurrency,omitempty"`
-	RecentOutcomeCount  int                `json:"recent_outcome_count,omitempty"`
-	RecentFailureCount  int                `json:"recent_failure_count,omitempty"`
-	RecentFailureRate   float64            `json:"recent_failure_rate,omitempty"`
-	RecentLatencyMillis int                `json:"recent_latency_ms,omitempty"`
+	Alias              string             `json:"alias,omitempty"`
+	Provider           string             `json:"provider,omitempty"`
+	IsLocal            bool               `json:"is_local,omitempty"`
+	CapabilityLevel    CapabilityLevel    `json:"capability_level"`
+	SupportsTools      bool               `json:"supports_tools,omitempty"`
+	SupportsJSON       bool               `json:"supports_json,omitempty"`
+	ContextWindowClass ContextWindowClass `json:"context_window_class"`
+	PriceClass         PriceClass         `json:"price_class"`
+	LatencyClass       LatencyClass       `json:"latency_class"`
+	EstimatedCents     int                `json:"estimated_cents,omitempty"`
+	MaxConcurrency     int                `json:"max_concurrency,omitempty"`
+	CurrentConcurrency int                `json:"current_concurrency,omitempty"`
+	// RecentOutcomes and RecentFailures are outcome counts, optionally
+	// weighted by age (see ModelStatsEntry), that drive reliability scoring.
+	RecentOutcomes      float64 `json:"recent_outcomes,omitempty"`
+	RecentFailures      float64 `json:"recent_failures,omitempty"`
+	RecentFailureRate   float64 `json:"recent_failure_rate,omitempty"`
+	RecentLatencyMillis int     `json:"recent_latency_ms,omitempty"`
 }
 
 // Matches reports whether the model can legally handle the profile. It only

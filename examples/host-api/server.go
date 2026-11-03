@@ -59,6 +59,9 @@ type Config struct {
 }
 
 type Server struct {
+	// workerID owns this process's queue leases. It is unique per process so
+	// several hosts sharing one database never mistake each other's leases.
+	workerID                string
 	artifacts               artifactkit.Store
 	runs                    runkit.Store
 	runCloser               io.Closer
@@ -201,7 +204,6 @@ const (
 )
 
 const (
-	queuedWorkerID                    = "host-api-inprocess-worker"
 	defaultQueuedLeaseDuration        = time.Minute
 	queuedLeaseDurationEnv            = "HOST_API_QUEUED_LEASE_DURATION"
 	defaultAgentApprovalSweepInterval = time.Minute
@@ -543,6 +545,7 @@ func NewServer(config Config) (*Server, error) {
 		llmHome:                 resolved.LLMKitHome,
 		models:                  models,
 		providers:               providers,
+		workerID:                "host-api:" + agentcore.NewRunID().String(),
 		workerCfg:               workerCfg,
 		workerWake:              make(chan struct{}, 1),
 		workerDone:              make(chan struct{}),
@@ -890,7 +893,7 @@ func (s *Server) StartQueuedWorker(ctx context.Context) {
 
 func (s *Server) StartQueuedWorkerWithContexts(intakeCtx context.Context, executionCtx context.Context) {
 	s.workerStart.Do(func() {
-		s.worker.markStarted(queuedWorkerID)
+		s.worker.markStarted(s.workerID)
 		go s.runQueuedWorkerLoop(intakeCtx, executionCtx)
 	})
 }
@@ -940,7 +943,7 @@ func (s *Server) runOneQueuedWorkflow(intakeCtx context.Context, executionCtx co
 	}
 	s.failExpiredQueuedWorkflows(intakeCtx)
 	s.worker.recordClaimAttempt()
-	claimed, err := s.queue.ClaimRunnable(intakeCtx, queuedWorkerID, s.queuedLeaseDuration())
+	claimed, err := s.queue.ClaimRunnable(intakeCtx, s.workerID, s.queuedLeaseDuration())
 	if err != nil {
 		if errors.Is(err, workflowkit.ErrNoRunnableWorkflow) {
 			s.worker.recordIdle()
@@ -1010,7 +1013,7 @@ func (s *Server) failExpiredQueuedWorkflows(ctx context.Context) {
 func (s *Server) releaseQueuedWorkflowLease(workflowID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), hostCleanupTimeout)
 	defer cancel()
-	if _, err := s.queue.ReleaseLease(ctx, workflowID, queuedWorkerID); err != nil {
+	if _, err := s.queue.ReleaseLease(ctx, workflowID, s.workerID); err != nil {
 		s.worker.recordError(fmt.Errorf("release lease for workflow %s: %w", workflowID, err))
 	}
 }
@@ -1028,7 +1031,7 @@ func (s *Server) startQueuedLeaseHeartbeat(ctx context.Context, workflowID strin
 			case <-heartbeatCtx.Done():
 				return
 			case <-ticker.C:
-				if _, err := s.queue.ExtendLease(heartbeatCtx, workflowID, queuedWorkerID, leaseDuration); err != nil {
+				if _, err := s.queue.ExtendLease(heartbeatCtx, workflowID, s.workerID, leaseDuration); err != nil {
 					if heartbeatCtx.Err() != nil {
 						return
 					}

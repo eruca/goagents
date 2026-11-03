@@ -226,10 +226,10 @@ func candidateExcluded(candidates []CandidateScore, alias string) bool {
 }
 
 func TestReliabilityScoreIsBoundedSmoothedFailureRate(t *testing.T) {
-	mature := ModelCapability{RecentOutcomeCount: 10000, RecentFailureCount: 100, RecentFailureRate: 0.01}
+	mature := ModelCapability{RecentOutcomes: 10000, RecentFailures: 100, RecentFailureRate: 0.01}
 	fresh := ModelCapability{}
-	flaky := ModelCapability{RecentOutcomeCount: 3, RecentFailureCount: 3, RecentFailureRate: 1}
-	broken := ModelCapability{RecentOutcomeCount: 1000, RecentFailureCount: 1000, RecentFailureRate: 1}
+	flaky := ModelCapability{RecentOutcomes: 3, RecentFailures: 3, RecentFailureRate: 1}
+	broken := ModelCapability{RecentOutcomes: 1000, RecentFailures: 1000, RecentFailureRate: 1}
 
 	if got := reliabilityScore(mature); got != -1 {
 		t.Fatalf("mature 1%% failure score = %d, want -1", got)

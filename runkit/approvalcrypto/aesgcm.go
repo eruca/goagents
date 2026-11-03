@@ -7,18 +7,27 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 )
 
-const envelopeVersion = 1
+// envelopeVersion 2 authenticates the envelope header (version, key id, and
+// key fingerprint) together with the caller's associated data.
+const envelopeVersion = 2
 
 var (
 	ErrInvalidKeyProvider = errors.New("invalid approval key provider")
 	ErrInvalidKeyMaterial = errors.New("invalid approval key material")
 	ErrInvalidEnvelope    = errors.New("invalid approval ciphertext envelope")
+	// ErrKeyMaterialChanged reports that the key stored under the envelope's
+	// key id is not the key that encrypted it, for example because a deleted
+	// keychain item was regenerated. The checkpoint cannot be recovered.
+	ErrKeyMaterialChanged = errors.New("approval key was replaced since the checkpoint was encrypted")
 )
 
 // KeyMaterial is a host-owned data encryption key. Bytes must contain exactly
@@ -64,12 +73,10 @@ func (c *AESGCMCipher) Encrypt(ctx context.Context, plaintext, aad []byte) ([]by
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, fmt.Errorf("generate approval nonce: %w", err)
 	}
-	envelope, err := json.Marshal(ciphertextEnvelope{
-		Version:    envelopeVersion,
-		KeyID:      key.ID,
-		Nonce:      nonce,
-		Ciphertext: aead.Seal(nil, nonce, plaintext, aad),
-	})
+	header := ciphertextEnvelope{Version: envelopeVersion, KeyID: key.ID, KeyFingerprint: keyFingerprint(key)}
+	header.Nonce = nonce
+	header.Ciphertext = aead.Seal(nil, nonce, plaintext, header.sealedAAD(aad))
+	envelope, err := json.Marshal(header)
 	if err != nil {
 		return nil, fmt.Errorf("encode approval ciphertext envelope: %w", err)
 	}
@@ -85,7 +92,8 @@ func (c *AESGCMCipher) Decrypt(ctx context.Context, encoded, aad []byte) ([]byte
 	if err := json.Unmarshal(encoded, &envelope); err != nil {
 		return nil, fmt.Errorf("%w: decode", ErrInvalidEnvelope)
 	}
-	if envelope.Version != envelopeVersion || strings.TrimSpace(envelope.KeyID) == "" || len(envelope.Nonce) == 0 || len(envelope.Ciphertext) == 0 {
+	if envelope.Version != envelopeVersion || strings.TrimSpace(envelope.KeyID) == "" || envelope.KeyFingerprint == "" ||
+		len(envelope.Nonce) == 0 || len(envelope.Ciphertext) == 0 {
 		return nil, ErrInvalidEnvelope
 	}
 	key, err := c.keys.Resolve(ctx, envelope.KeyID)
@@ -95,6 +103,9 @@ func (c *AESGCMCipher) Decrypt(ctx context.Context, encoded, aad []byte) ([]byte
 	if key.ID != envelope.KeyID {
 		return nil, ErrInvalidKeyMaterial
 	}
+	if keyFingerprint(key) != envelope.KeyFingerprint {
+		return nil, ErrKeyMaterialChanged
+	}
 	aead, err := newAEAD(key)
 	if err != nil {
 		return nil, err
@@ -102,7 +113,7 @@ func (c *AESGCMCipher) Decrypt(ctx context.Context, encoded, aad []byte) ([]byte
 	if len(envelope.Nonce) != aead.NonceSize() {
 		return nil, ErrInvalidEnvelope
 	}
-	plaintext, err := aead.Open(nil, envelope.Nonce, envelope.Ciphertext, aad)
+	plaintext, err := aead.Open(nil, envelope.Nonce, envelope.Ciphertext, envelope.sealedAAD(aad))
 	if err != nil {
 		return nil, fmt.Errorf("%w: authentication", ErrInvalidEnvelope)
 	}
@@ -110,10 +121,30 @@ func (c *AESGCMCipher) Decrypt(ctx context.Context, encoded, aad []byte) ([]byte
 }
 
 type ciphertextEnvelope struct {
-	Version    int    `json:"version"`
-	KeyID      string `json:"key_id"`
-	Nonce      []byte `json:"nonce"`
-	Ciphertext []byte `json:"ciphertext"`
+	Version        int    `json:"version"`
+	KeyID          string `json:"key_id"`
+	KeyFingerprint string `json:"key_fingerprint"`
+	Nonce          []byte `json:"nonce"`
+	Ciphertext     []byte `json:"ciphertext"`
+}
+
+// sealedAAD is the associated data GCM authenticates: the header fields,
+// length-prefixed so no two headers encode alike, followed by the caller's aad.
+func (e ciphertextEnvelope) sealedAAD(aad []byte) []byte {
+	out := []byte("goagents/approvalcrypto")
+	out = binary.AppendUvarint(out, uint64(e.Version))
+	for _, field := range []string{e.KeyID, e.KeyFingerprint} {
+		out = binary.AppendUvarint(out, uint64(len(field)))
+		out = append(out, field...)
+	}
+	return append(out, aad...)
+}
+
+// keyFingerprint identifies key material without revealing it, so Decrypt can
+// tell a replaced key from tampered ciphertext.
+func keyFingerprint(key KeyMaterial) string {
+	digest := sha256.Sum256(append([]byte("goagents/approvalcrypto key fingerprint\x00"), key.Bytes...))
+	return hex.EncodeToString(digest[:8])
 }
 
 func newAEAD(key KeyMaterial) (cipher.AEAD, error) {

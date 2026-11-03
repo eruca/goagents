@@ -174,3 +174,41 @@ func (vector *vectorScanner) Scan(src any) error {
 	*vector = append((*vector)[:0], decoded.Slice()...)
 	return nil
 }
+
+func TestVectorRecallSkipsStoredZeroNormEmbeddings(t *testing.T) {
+	store := openIsolatedStore(t)
+	now := time.Date(2026, 7, 21, 13, 0, 0, 0, time.UTC)
+	scope := memorykit.Scope{TenantID: conformanceTenantID, SubjectType: memorykit.SubjectProject, SubjectID: "project-zero-norm"}
+	good := queryCreateRequest("62000000-0000-4000-8000-000000000011", scope, memorykit.StatusActive, "embedding.good", "good content", now, 70)
+	zero := queryCreateRequest("62000000-0000-4000-8000-000000000012", scope, memorykit.StatusActive, "embedding.zero", "zero content", now, 70)
+	createQueryMemory(t, store, good)
+	createQueryMemory(t, store, zero)
+	if err := store.PutEmbedding(context.Background(), memorykit.PutEmbeddingRequest{
+		MemoryID: good.ID, Scope: scope, ProfileID: "test-3d", ContentHash: contentDigest(good.Content),
+		Dimensions: 3, Vector: []float32{1, 0, 0}, EmbeddedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	zeroPut := memorykit.PutEmbeddingRequest{
+		MemoryID: zero.ID, Scope: scope, ProfileID: "test-3d", ContentHash: contentDigest(zero.Content),
+		Dimensions: 3, Vector: []float32{0, 0, 0}, EmbeddedAt: now,
+	}
+	if err := store.PutEmbedding(context.Background(), zeroPut); !errors.Is(err, memorykit.ErrInvalidMemory) {
+		t.Fatalf("PutEmbedding(zero vector) error = %v, want ErrInvalidMemory", err)
+	}
+	// A row written before zero vectors were rejected.
+	if _, err := store.db.ExecContext(context.Background(), `
+		INSERT INTO memory_embeddings (memory_id, embedding_profile_id, dimension, content_hash, embedding, embedded_at)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		zero.ID, "test-3d", 3, contentDigest(zero.Content), pgvector.NewVector([]float32{0, 0, 0}), now); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.SearchCandidates(context.Background(), memorykit.CandidateQuery{
+		Scope: scope, QueryVector: []float32{1, 0, 0}, Now: now,
+		VectorLimit: 5, MinVectorSimilarity: 0.5, EmbeddingProfileID: "test-3d", EmbeddingDimensions: 3,
+	})
+	if err != nil || len(got.Vector) != 1 || got.Vector[0].Memory.ID != good.ID {
+		t.Fatalf("vector recall = %#v, %v; want only the good memory", got.Vector, err)
+	}
+}

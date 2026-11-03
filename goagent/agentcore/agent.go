@@ -3,6 +3,7 @@ package agentcore
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/eruca/goagents/goagent/policy"
 	"github.com/eruca/goagents/goagent/ports"
@@ -180,6 +181,13 @@ func NewAgent(options ...Option) (*Agent, error) {
 	}
 	if agent.policyEngine == nil {
 		agent.policyEngine = policy.NewEngine()
+	}
+	// A configured tool with a broken schema would abort every run that calls
+	// it; report it now instead.
+	for _, spec := range agent.toolRegistry.Specs() {
+		if err := spec.Schema.Compile(); err != nil {
+			return nil, fmt.Errorf("tool %q: %w", spec.Name, err)
+		}
 	}
 	return agent, nil
 }

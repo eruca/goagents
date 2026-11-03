@@ -26,7 +26,10 @@ const (
 	CheckpointExpired  CheckpointStatus = "expired"
 )
 
-// ApprovalCheckpoint stores opaque host-encrypted state. Runkit never decrypts Ciphertext.
+// ApprovalCheckpoint stores opaque host-encrypted state. Runkit never decrypts
+// Ciphertext, and stores drop it once the checkpoint reaches a terminal status
+// (consumed, rejected, failed, or expired): it holds the paused run's tool
+// arguments and is never decrypted again; the approval audit is kept.
 type ApprovalCheckpoint struct {
 	ID             string
 	RunID          string
@@ -189,6 +192,7 @@ func (s *MemoryCheckpointStore) RejectCheckpoint(ctx context.Context, request Ap
 		return ErrCheckpointNotClaimable
 	}
 	checkpoint.Status = CheckpointRejected
+	checkpoint.Ciphertext = nil
 	checkpoint.Approval = &ApprovalAudit{ApproverID: request.ApproverID, AuditRef: request.AuditRef, ReasonCode: request.ReasonCode, DecidedAt: now}
 	checkpoint.UpdatedAt = now
 	s.checkpoints[checkpoint.ID] = cloneApprovalCheckpoint(checkpoint)
@@ -226,6 +230,7 @@ func (s *MemoryCheckpointStore) FailPendingCheckpoint(ctx context.Context, reque
 		return ErrCheckpointNotClaimable
 	}
 	checkpoint.Status = CheckpointFailed
+	checkpoint.Ciphertext = nil
 	checkpoint.FailureCode = request.FailureCode
 	checkpoint.LeaseOwner = ""
 	checkpoint.LeaseUntil = time.Time{}
@@ -254,6 +259,7 @@ func (s *MemoryCheckpointStore) finishLease(ctx context.Context, completion Chec
 		return ErrCheckpointLeaseOwner
 	}
 	checkpoint.Status = status
+	checkpoint.Ciphertext = nil
 	if status == CheckpointFailed {
 		checkpoint.FailureCode = completion.FailureCode
 	} else {
@@ -277,6 +283,7 @@ func (s *MemoryCheckpointStore) ExpireCheckpoints(ctx context.Context, now time.
 	for id, checkpoint := range s.checkpoints {
 		if (checkpoint.Status == CheckpointPending || checkpoint.Status == CheckpointLeased) && !checkpoint.ExpiresAt.After(now) {
 			checkpoint.Status = CheckpointExpired
+			checkpoint.Ciphertext = nil
 			checkpoint.LeaseOwner = ""
 			checkpoint.LeaseUntil = time.Time{}
 			checkpoint.UpdatedAt = now
