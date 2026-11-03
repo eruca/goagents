@@ -73,6 +73,9 @@ fails instead of silently routing unauthenticated requests.
 
 The default policy applies hard filters first, then ranks eligible candidates by capability, price, locality, latency, recent reliability, and current provider health.
 
+- Reliability is minus the smoothed failure rate in percent, bounded to `[-100, 0]`. Observed outcomes are blended with a 5% prior worth 10 observations, so a model with no history scores -5, a long clean history beats no history, and ten straight failures read as a majority failure rate.
+- Latency uses observed average latency from model stats when present (at most 2s is fast, at most 10s is normal, slower is slow) and falls back to the configured `latency_class`.
+
 Simple tasks should be local-first when the profile allows it. For example, low failure-cost classification, short rewriting, formatting, or simple JSON extraction can prefer a free local model with fast latency and low operational cost.
 
 Hard or high failure-cost tasks should route to an advanced model. For example, tasks that need stronger reasoning, long context, tool use, strict JSON, or reviewer-visible correctness should be profiled with `complexity: hard`, `failure_cost: high`, or the relevant `needs_*` flags so local simple models are filtered out or outscored.
@@ -105,7 +108,7 @@ if err != nil {
 _ = stats
 ```
 
-`model-stats.json` groups records by `task_type`, `account_alias`, `model_alias`, and `provider`. Each bucket includes route attempts, completed outcomes, pending outcomes, success/failure rates, average latency, average token counts, average estimated cents, and last seen time. The file is derived data: keep `route-events.jsonl` and `outcomes.jsonl` as the append-only source of truth.
+`model-stats.json` groups records by `task_type`, `account_alias`, `model_alias`, and `provider`. Each bucket includes route attempts, completed outcomes, pending outcomes, success/failure rates, average latency, average token counts, average estimated cents, and last seen time. Outcomes are matched to routes by `route_id` and `attempt`, so every fallback attempt is counted; average latency and cost only include outcomes that reported them. The file is derived data: keep `route-events.jsonl` and `outcomes.jsonl` as the append-only source of truth.
 
 Hosts can also expose route-level observability by reading the same audit files:
 
@@ -162,13 +165,18 @@ This keeps newly written outcomes useful without waiting for a process restart.
 - failure streaks, counting only failures attributable to the provider; a
   cancelled, oversized, or over-budget request does not degrade it
 - degraded or unavailable providers
-- cooldown windows after repeated failures
+- cooldown windows after repeated failures; each failure past the threshold,
+  such as a failed recovery probe, doubles the cooldown up to
+  `HealthPolicy.MaxCooldownDuration` (default 32x `CooldownDuration`)
 
 Hosts can keep this in memory for a single process, or replace the interface
 with a durable/shared implementation later. The route policy treats quota
 exhaustion, active cooldown, unavailable providers, and full provider
 concurrency as hard filters. Degraded providers remain eligible but receive a
-lower score, so they are used only when better options are unavailable.
+lower score, so they are used only when better options are unavailable. After
+a cooldown expires, an unavailable provider is half-open: it is held back
+while a call to it is in flight, so one probe tests recovery instead of every
+waiting request.
 
 Typical adapter wiring:
 

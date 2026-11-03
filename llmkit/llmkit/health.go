@@ -34,9 +34,14 @@ type ProviderHealthSnapshot struct {
 	Entries     map[string]ProviderHealthEntry `json:"entries,omitempty"`
 }
 
+// HealthPolicy configures the circuit breaker. Reaching
+// FailureCooldownThreshold consecutive provider failures opens it for
+// CooldownDuration; each further failure, such as a failed recovery probe,
+// doubles the cooldown up to MaxCooldownDuration.
 type HealthPolicy struct {
 	FailureCooldownThreshold int
 	CooldownDuration         time.Duration
+	MaxCooldownDuration      time.Duration
 	Now                      func() time.Time
 }
 
@@ -58,6 +63,9 @@ func NewMemoryHealthStore(policy HealthPolicy) *MemoryHealthStore {
 	}
 	if policy.CooldownDuration <= 0 {
 		policy.CooldownDuration = time.Minute
+	}
+	if policy.MaxCooldownDuration < policy.CooldownDuration {
+		policy.MaxCooldownDuration = 32 * policy.CooldownDuration
 	}
 	return &MemoryHealthStore{
 		policy:  policy,
@@ -137,7 +145,7 @@ func (s *MemoryHealthStore) RecordOutcome(ctx context.Context, outcome TaskOutco
 		entry.FailureStreak++
 		if entry.FailureStreak >= s.policy.FailureCooldownThreshold {
 			entry.Availability = ProviderUnavailable
-			entry.CooldownUntil = now.Add(s.policy.CooldownDuration)
+			entry.CooldownUntil = now.Add(s.cooldown(entry.FailureStreak))
 		} else {
 			entry.Availability = ProviderDegraded
 		}
@@ -182,6 +190,14 @@ func (s *MemoryHealthStore) Set(entry ProviderHealthEntry) {
 	entry.Availability = normalizedAvailability(entry.Availability)
 	entry.UpdatedAt = s.now()
 	s.entries[ProviderHealthKey(entry.AccountAlias, entry.ModelAlias, entry.Provider)] = entry
+}
+
+func (s *MemoryHealthStore) cooldown(streak int) time.Duration {
+	cooldown := s.policy.CooldownDuration
+	for extra := streak - s.policy.FailureCooldownThreshold; extra > 0 && cooldown < s.policy.MaxCooldownDuration; extra-- {
+		cooldown *= 2
+	}
+	return min(cooldown, s.policy.MaxCooldownDuration)
 }
 
 func (s *MemoryHealthStore) now() time.Time {

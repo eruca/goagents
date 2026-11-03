@@ -218,3 +218,33 @@ func TestMemoryHealthStoreIgnoresCallerCausedFailures(t *testing.T) {
 		t.Fatalf("entry after provider failures = %+v, want unavailable", entry)
 	}
 }
+
+func TestMemoryHealthStoreBacksOffCooldownExponentially(t *testing.T) {
+	now := time.Date(2026, 5, 6, 4, 0, 0, 0, time.UTC)
+	store := NewMemoryHealthStore(HealthPolicy{
+		FailureCooldownThreshold: 2,
+		CooldownDuration:         time.Minute,
+		MaxCooldownDuration:      5 * time.Minute,
+		Now:                      func() time.Time { return now },
+	})
+	c := candidate("local-free", CapabilitySimple, PriceFree, LatencyNormalClass, true)
+	key := ProviderHealthKey(c.AccountAlias, c.Model.Alias, c.Model.Provider)
+	failed := TaskOutcome{AccountAlias: c.AccountAlias, ModelAlias: c.Model.Alias, Provider: c.Model.Provider, ErrorClass: ErrorClassTransient}
+
+	want := []time.Duration{0, time.Minute, 2 * time.Minute, 4 * time.Minute, 5 * time.Minute}
+	for i, cooldown := range want {
+		if err := store.RecordOutcome(context.Background(), failed); err != nil {
+			t.Fatalf("RecordOutcome returned error: %v", err)
+		}
+		entry := store.Snapshot().Entries[key]
+		if cooldown == 0 {
+			if !entry.CooldownUntil.IsZero() {
+				t.Fatalf("failure %d cooldown = %v, want none below threshold", i+1, entry.CooldownUntil)
+			}
+			continue
+		}
+		if !entry.CooldownUntil.Equal(now.Add(cooldown)) {
+			t.Fatalf("failure %d cooldown until = %v, want %v", i+1, entry.CooldownUntil, now.Add(cooldown))
+		}
+	}
+}

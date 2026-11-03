@@ -125,6 +125,7 @@ func ApplyModelStats(stats ModelStats, profile TaskProfile, candidates []Candida
 		if strings.TrimSpace(entry.TaskType) != "" && entry.TaskType != profile.TaskType {
 			continue
 		}
+		enriched[i].Model.RecentOutcomeCount = entry.OutcomeCount
 		enriched[i].Model.RecentFailureCount = entry.Failures
 		enriched[i].Model.RecentFailureRate = entry.FailureRate
 		// Without observed samples the configured values stay authoritative.

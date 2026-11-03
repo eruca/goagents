@@ -52,6 +52,7 @@ type ModelCapability struct {
 	EstimatedCents      int                `json:"estimated_cents,omitempty"`
 	MaxConcurrency      int                `json:"max_concurrency,omitempty"`
 	CurrentConcurrency  int                `json:"current_concurrency,omitempty"`
+	RecentOutcomeCount  int                `json:"recent_outcome_count,omitempty"`
 	RecentFailureCount  int                `json:"recent_failure_count,omitempty"`
 	RecentFailureRate   float64            `json:"recent_failure_rate,omitempty"`
 	RecentLatencyMillis int                `json:"recent_latency_ms,omitempty"`

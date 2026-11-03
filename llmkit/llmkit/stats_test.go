@@ -277,8 +277,9 @@ func TestApplyModelStatsMakesPolicyPreferReliableModelForHighFailureCostTask(t *
 	if decision.SelectedAlias != "cloud-balanced" {
 		t.Fatalf("SelectedAlias = %q, want cloud-balanced; decision=%+v", decision.SelectedAlias, decision)
 	}
-	if decision.ScoreBreakdown["reliability"] != 0 {
-		t.Fatalf("selected cloud reliability = %d, want 0", decision.ScoreBreakdown["reliability"])
+	// Ten clean outcomes are smoothed toward the 5% prior: (0+0.5)/(10+10).
+	if decision.ScoreBreakdown["reliability"] != -3 {
+		t.Fatalf("selected cloud reliability = %d, want -3", decision.ScoreBreakdown["reliability"])
 	}
 	localScore := findCandidateScore(t, decision.Candidates, "local-balanced")
 	if localScore.ScoreBreakdown["reliability"] >= 0 {

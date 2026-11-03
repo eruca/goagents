@@ -3,6 +3,7 @@ package llmkit
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -134,6 +135,11 @@ func (p RoutePolicy) unavailableReason(profile TaskProfile, candidate Candidate)
 	if candidate.ProviderAvailability == ProviderUnavailable && candidate.ProviderCooldownUntil.IsZero() {
 		return "provider is unavailable"
 	}
+	if candidate.ProviderAvailability == ProviderUnavailable && candidate.ProviderInFlight > 0 {
+		// Half-open: after cooldown one probe tests recovery; the rest wait
+		// for its outcome instead of all hitting a provider that may still be down.
+		return "provider recovery probe is in flight"
+	}
 	if candidate.ProviderQuotaExhausted || candidate.ProviderQuotaRemaining < 0 {
 		return "provider quota is exhausted"
 	}
@@ -202,10 +208,32 @@ func localScore(profile TaskProfile, model ModelCapability) int {
 	}
 }
 
+// Observed latency thresholds for effectiveLatencyClass.
+const (
+	fastLatencyMillis   = 2000
+	normalLatencyMillis = 10000
+)
+
+// effectiveLatencyClass prefers observed latency from model stats over the
+// configured class, which may be stale or optimistic.
+func effectiveLatencyClass(model ModelCapability) LatencyClass {
+	switch {
+	case model.RecentLatencyMillis <= 0:
+		return model.LatencyClass
+	case model.RecentLatencyMillis <= fastLatencyMillis:
+		return LatencyFastClass
+	case model.RecentLatencyMillis <= normalLatencyMillis:
+		return LatencyNormalClass
+	default:
+		return LatencySlowClass
+	}
+}
+
 func latencyScore(profile TaskProfile, model ModelCapability) int {
+	class := effectiveLatencyClass(model)
 	switch profile.Latency {
 	case LatencyUrgent:
-		switch model.LatencyClass {
+		switch class {
 		case LatencyFastClass:
 			return 20
 		case LatencyNormalClass:
@@ -214,7 +242,7 @@ func latencyScore(profile TaskProfile, model ModelCapability) int {
 			return 0
 		}
 	case LatencyNormal:
-		switch model.LatencyClass {
+		switch class {
 		case LatencyFastClass:
 			return 10
 		case LatencyNormalClass:
@@ -227,15 +255,28 @@ func latencyScore(profile TaskProfile, model ModelCapability) int {
 	}
 }
 
+// The reliability prior assumes a 5% failure rate, worth 10 observations:
+// weak enough that ten straight failures read as a majority failure rate.
+const (
+	reliabilityPriorFailures = 0.5
+	reliabilityPriorOutcomes = 10.0
+)
+
+// reliabilityScore is minus the smoothed failure rate in percent, so it stays
+// within [-100, 0]. Observed counts are blended with the prior (a Beta
+// posterior mean): a model with no history scores the prior, a few failures do
+// not condemn a new model, and a long clean history beats no history.
 func reliabilityScore(model ModelCapability) int {
-	score := 0
-	if model.RecentFailureCount > 0 {
-		score -= model.RecentFailureCount * 2
+	if model.RecentOutcomeCount > 0 {
+		failures := min(model.RecentFailureCount, model.RecentOutcomeCount)
+		rate := (float64(failures) + reliabilityPriorFailures) / (float64(model.RecentOutcomeCount) + reliabilityPriorOutcomes)
+		return -int(math.Round(rate * 100))
 	}
 	if model.RecentFailureRate > 0 {
-		score -= int(model.RecentFailureRate * 100)
+		// A rate supplied without counts is used as is.
+		return -int(math.Round(math.Min(model.RecentFailureRate, 1) * 100))
 	}
-	return score
+	return -int(math.Round(100 * reliabilityPriorFailures / reliabilityPriorOutcomes))
 }
 
 func healthScore(candidate Candidate) int {

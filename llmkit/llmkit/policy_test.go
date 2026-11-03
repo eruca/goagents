@@ -3,6 +3,7 @@ package llmkit
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRoutePolicySelectsLocalFreeModelForSimpleTaskWithoutLatencyRequirement(t *testing.T) {
@@ -222,4 +223,58 @@ func candidateExcluded(candidates []CandidateScore, alias string) bool {
 		}
 	}
 	return false
+}
+
+func TestReliabilityScoreIsBoundedSmoothedFailureRate(t *testing.T) {
+	mature := ModelCapability{RecentOutcomeCount: 10000, RecentFailureCount: 100, RecentFailureRate: 0.01}
+	fresh := ModelCapability{}
+	flaky := ModelCapability{RecentOutcomeCount: 3, RecentFailureCount: 3, RecentFailureRate: 1}
+	broken := ModelCapability{RecentOutcomeCount: 1000, RecentFailureCount: 1000, RecentFailureRate: 1}
+
+	if got := reliabilityScore(mature); got != -1 {
+		t.Fatalf("mature 1%% failure score = %d, want -1", got)
+	}
+	if got := reliabilityScore(fresh); got != -5 {
+		t.Fatalf("no-history score = %d, want prior -5", got)
+	}
+	if reliabilityScore(mature) <= reliabilityScore(fresh) {
+		t.Fatal("a model with a long clean history should beat one with no history")
+	}
+	if got := reliabilityScore(flaky); got >= reliabilityScore(fresh) || got < -100 {
+		t.Fatalf("3/3 failures score = %d, want worse than prior but bounded", got)
+	}
+	if got := reliabilityScore(broken); got < -100 {
+		t.Fatalf("always-failing score = %d, want at least -100", got)
+	}
+}
+
+func TestLatencyScoreUsesObservedLatencyOverConfiguredClass(t *testing.T) {
+	profile := DefaultTaskProfile()
+	profile.Latency = LatencyUrgent
+	configuredFast := ModelCapability{LatencyClass: LatencyFastClass}
+	observedSlow := ModelCapability{LatencyClass: LatencyFastClass, RecentLatencyMillis: 15000}
+	observedFast := ModelCapability{LatencyClass: LatencySlowClass, RecentLatencyMillis: 900}
+
+	if latencyScore(profile, configuredFast) != 20 {
+		t.Fatalf("configured fast score = %d, want 20", latencyScore(profile, configuredFast))
+	}
+	if latencyScore(profile, observedSlow) != 0 {
+		t.Fatalf("observed slow score = %d, want 0", latencyScore(profile, observedSlow))
+	}
+	if latencyScore(profile, observedFast) != 20 {
+		t.Fatalf("observed fast score = %d, want 20", latencyScore(profile, observedFast))
+	}
+}
+
+func TestRoutePolicyAllowsOneProbeAfterCooldown(t *testing.T) {
+	now := time.Date(2026, 5, 6, 3, 30, 0, 0, time.UTC)
+	probing := candidate("local-free", CapabilityBalanced, PriceFree, LatencyFastClass, true)
+	probing.ProviderAvailability = ProviderUnavailable
+	probing.ProviderCooldownUntil = now.Add(-time.Second)
+	probing.ProviderInFlight = 1
+
+	_, err := RoutePolicy{Now: func() time.Time { return now }}.Select(DefaultTaskProfile(), []Candidate{probing})
+	if err == nil {
+		t.Fatal("Select returned nil error, want candidate held back while its recovery probe is in flight")
+	}
 }
