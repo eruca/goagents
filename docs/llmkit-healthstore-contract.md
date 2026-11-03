@@ -75,6 +75,7 @@ storage.
 - `quota_remaining`
 - `quota_exhausted`
 - `failure_streak`
+- `last_failure_at`
 - `cooldown_until`
 - `updated_at`
 
@@ -117,6 +118,14 @@ provider, for example because the route recorder or the pre-dispatch hook
 failed. It decrements `in_flight` if it is greater than zero and changes
 nothing else. The adapter calls it with a short cleanup context detached from
 request cancellation.
+
+## Degraded Recovery
+
+A degraded entry (failures below the threshold) whose `last_failure_at` is at
+least `CooldownDuration` old is reported as available with no streak, and a
+later failure starts a new streak. Degraded providers rank below healthy ones,
+so without this they would rarely be chosen and never get the success that
+clears them. Shared stores should apply the same rule when they read an entry.
 
 ## RecordOutcome Semantics
 

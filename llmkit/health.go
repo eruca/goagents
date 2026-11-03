@@ -32,6 +32,7 @@ type ProviderHealthEntry struct {
 	QuotaRemaining int                  `json:"quota_remaining,omitempty"`
 	QuotaExhausted bool                 `json:"quota_exhausted,omitempty"`
 	FailureStreak  int                  `json:"failure_streak,omitempty"`
+	LastFailureAt  time.Time            `json:"last_failure_at,omitempty"`
 	CooldownUntil  time.Time            `json:"cooldown_until,omitempty"`
 	UpdatedAt      time.Time            `json:"updated_at,omitempty"`
 }
@@ -44,7 +45,9 @@ type ProviderHealthSnapshot struct {
 // HealthPolicy configures the circuit breaker. Reaching
 // FailureCooldownThreshold consecutive provider failures opens it for
 // CooldownDuration; each further failure, such as a failed recovery probe,
-// doubles the cooldown up to MaxCooldownDuration.
+// doubles the cooldown up to MaxCooldownDuration. A degraded provider whose
+// last failure is CooldownDuration old is available again: being ranked below
+// healthy providers, it might otherwise never get the success that clears it.
 type HealthPolicy struct {
 	FailureCooldownThreshold int
 	CooldownDuration         time.Duration
@@ -131,6 +134,7 @@ func (s *MemoryHealthStore) Acquire(ctx context.Context, candidate Candidate) er
 	key := ProviderHealthKey(candidate.AccountAlias, candidate.Model.Alias, candidate.Model.Provider)
 	entry := ensureEntryIdentity(s.entries[key], candidate.AccountAlias, candidate.Model.Alias, candidate.Model.Provider)
 	entry.Availability = normalizedAvailability(entry.Availability)
+	entry = s.settle(entry, now)
 	if reason := s.admissionBlock(entry, candidate, now); reason != "" {
 		return fmt.Errorf("%w: %s", ErrProviderBusy, reason)
 	}
@@ -206,6 +210,7 @@ func (s *MemoryHealthStore) RecordOutcome(ctx context.Context, outcome TaskOutco
 		entry.InFlight--
 	}
 	now := s.now()
+	entry = s.settle(entry, now)
 	if !outcome.Success && !CountsTowardProviderHealth(outcome.ErrorClass) {
 		entry.UpdatedAt = now
 		s.entries[key] = entry
@@ -217,6 +222,7 @@ func (s *MemoryHealthStore) RecordOutcome(ctx context.Context, outcome TaskOutco
 		entry.CooldownUntil = time.Time{}
 	} else {
 		entry.FailureStreak++
+		entry.LastFailureAt = now
 		if entry.FailureStreak >= s.policy.FailureCooldownThreshold {
 			entry.Availability = ProviderUnavailable
 			entry.CooldownUntil = now.Add(s.cooldown(entry.FailureStreak))
@@ -248,12 +254,13 @@ func (s *MemoryHealthStore) Snapshot() ProviderHealthSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	now := s.now()
 	entries := make(map[string]ProviderHealthEntry, len(s.entries))
 	for key, entry := range s.entries {
-		entries[key] = entry
+		entries[key] = s.settle(entry, now)
 	}
 	return ProviderHealthSnapshot{
-		GeneratedAt: s.now(),
+		GeneratedAt: now,
 		Entries:     entries,
 	}
 }
@@ -265,6 +272,17 @@ func (s *MemoryHealthStore) Set(entry ProviderHealthEntry) {
 	entry.Availability = normalizedAvailability(entry.Availability)
 	entry.UpdatedAt = s.now()
 	s.entries[ProviderHealthKey(entry.AccountAlias, entry.ModelAlias, entry.Provider)] = entry
+}
+
+// settle forgets a failure streak that ended CooldownDuration ago without
+// opening the circuit, so failures far apart are not counted as consecutive.
+func (s *MemoryHealthStore) settle(entry ProviderHealthEntry, now time.Time) ProviderHealthEntry {
+	if entry.Availability == ProviderDegraded && !entry.LastFailureAt.IsZero() &&
+		now.Sub(entry.LastFailureAt) >= s.policy.CooldownDuration {
+		entry.Availability = ProviderAvailable
+		entry.FailureStreak = 0
+	}
+	return entry
 }
 
 func (s *MemoryHealthStore) cooldown(streak int) time.Duration {

@@ -336,3 +336,39 @@ func TestMemoryHealthStoreHalfOpenAdmitsExactlyOneProbe(t *testing.T) {
 		t.Fatalf("half-open admitted/busy = %d/%d, want exactly one probe", admitted, busy)
 	}
 }
+
+func TestMemoryHealthStoreDegradedProviderRecoversAfterQuietPeriod(t *testing.T) {
+	now := time.Date(2026, 5, 6, 4, 0, 0, 0, time.UTC)
+	store := NewMemoryHealthStore(HealthPolicy{
+		FailureCooldownThreshold: 3,
+		CooldownDuration:         time.Minute,
+		Now:                      func() time.Time { return now },
+	})
+	c := candidate("local", CapabilitySimple, PriceFree, LatencyNormalClass, true)
+	key := ProviderHealthKey(c.AccountAlias, c.Model.Alias, c.Model.Provider)
+	fail := func() {
+		t.Helper()
+		if err := store.Acquire(context.Background(), c); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.RecordOutcome(context.Background(), TaskOutcome{AccountAlias: c.AccountAlias, ModelAlias: c.Model.Alias, Provider: c.Model.Provider, ErrorClass: ErrorClassTimeout}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	fail()
+	fail()
+	if entry := store.Snapshot().Entries[key]; entry.Availability != ProviderDegraded || entry.FailureStreak != 2 {
+		t.Fatalf("entry after two failures = %+v, want degraded with streak 2", entry)
+	}
+	now = now.Add(time.Minute)
+	if entry := store.Snapshot().Entries[key]; entry.Availability != ProviderAvailable || entry.FailureStreak != 0 {
+		t.Fatalf("entry after a quiet minute = %+v, want available with no streak", entry)
+	}
+	// A failure long after the earlier ones starts a new streak instead of
+	// opening the circuit.
+	fail()
+	if entry := store.Snapshot().Entries[key]; entry.Availability != ProviderDegraded || entry.FailureStreak != 1 || !entry.CooldownUntil.IsZero() {
+		t.Fatalf("entry after a later failure = %+v, want degraded with a new streak of 1", entry)
+	}
+}
