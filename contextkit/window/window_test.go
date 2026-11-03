@@ -2,184 +2,233 @@ package window
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/eruca/goagents/contextkit"
 )
 
-func TestStandardCompressionPreservesSystemAndRecentMessages(t *testing.T) {
+func ids(messages []contextkit.Message) string {
+	out := make([]string, 0, len(messages))
+	for _, msg := range messages {
+		if msg.ID == "" {
+			out = append(out, string(msg.Role)+":"+msg.Content)
+			continue
+		}
+		out = append(out, msg.ID)
+	}
+	return strings.Join(out, ",")
+}
+
+func TestStandardCompressionKeepsNewestTurnsThatFitBudget(t *testing.T) {
 	t.Parallel()
 
 	c := New(Config{
-		Budget:       contextkit.Budget{MaxChars: 70},
+		Budget:       contextkit.Budget{MaxChars: 60},
 		Profile:      contextkit.ProfileStandard,
-		MinRecent:    2,
 		MaxToolChars: 20,
 	})
-	req := contextkit.Request{
+	got, err := c.Compress(context.Background(), contextkit.Request{
 		Messages: []contextkit.Message{
-			{ID: "sys", Role: contextkit.RoleSystem, Content: "system instructions"},
-			{ID: "old-user", Role: contextkit.RoleUser, Content: strings.Repeat("old ", 20)},
-			{ID: "old-assistant", Role: contextkit.RoleAssistant, Content: strings.Repeat("answer ", 20)},
-			{ID: "recent-user", Role: contextkit.RoleUser, Content: "current question"},
-			{ID: "recent-tool", Role: contextkit.RoleTool, ToolName: "ocr_document", ToolCallID: "call-1", Status: "success", Ref: "ocr:1", Content: strings.Repeat("tool-output-", 8)},
+			{ID: "sys", Role: contextkit.RoleSystem, Content: "be brief"},
+			{ID: "u1", Role: contextkit.RoleUser, Content: strings.Repeat("old ", 10)},
+			{ID: "a1", Role: contextkit.RoleAssistant, Content: strings.Repeat("answer ", 10)},
+			{ID: "u2", Role: contextkit.RoleUser, Content: "second"},
+			{ID: "a2", Role: contextkit.RoleAssistant, Content: "ok"},
+			{ID: "u3", Role: contextkit.RoleUser, Content: "third"},
+			{ID: "a3", Role: contextkit.RoleAssistant, Content: "done"},
 		},
-	}
-
-	got, err := c.Compress(context.Background(), req)
+	})
 	if err != nil {
 		t.Fatalf("Compress() error = %v", err)
 	}
-
-	if got.Profile != contextkit.ProfileStandard {
-		t.Fatalf("unexpected profile: %s", got.Profile)
+	if got.Dropped != 2 || got.OverBudget {
+		t.Fatalf("dropped/over budget = %d/%v, want 2/false", got.Dropped, got.OverBudget)
 	}
-	if len(got.Messages) < 3 {
-		t.Fatalf("expected system, summary, and recent messages, got=%#v", got.Messages)
+	if want := "sys,system:" + got.Summary + ",u2,a2,u3,a3"; ids(got.Messages) != want {
+		t.Fatalf("messages = %s, want %s", ids(got.Messages), want)
 	}
-	if got.Messages[0].Role != contextkit.RoleSystem {
-		t.Fatalf("system message should be first: %#v", got.Messages)
+	if summary := got.Messages[1]; summary.Role != contextkit.RoleSystem || summary.Metadata["contextkit.kind"] != "window_summary" {
+		t.Fatalf("summary message = %#v, want system window summary", summary)
 	}
-	if got.Messages[1].Role != contextkit.RoleAssistant || !strings.Contains(got.Messages[1].Content, "compressed earlier context") {
-		t.Fatalf("expected summary placeholder, got=%#v", got.Messages[1])
+	if !strings.Contains(got.Summary, "2 messages omitted") || !strings.Contains(got.Summary, "u1, a1") {
+		t.Fatalf("summary = %q, want count and dropped ids", got.Summary)
 	}
-	if got.Dropped != 2 {
-		t.Fatalf("unexpected dropped count: %d", got.Dropped)
-	}
-	if len(got.Collapses) != 0 {
-		t.Fatalf("standard mode should not emit collapse metadata: %#v", got.Collapses)
-	}
-	if !strings.Contains(got.Messages[len(got.Messages)-1].Content, "[truncated") {
-		t.Fatalf("recent tool message should be budgeted: %#v", got.Messages[len(got.Messages)-1])
-	}
-	if !strings.Contains(got.Messages[len(got.Messages)-1].Content, "tool=ocr_document") {
-		t.Fatalf("recent tool message should be projected: %#v", got.Messages[len(got.Messages)-1])
+	if len(got.Collapses) != 0 || got.AutoCompact != nil {
+		t.Fatalf("standard mode emitted collapse %#v / compact %#v", got.Collapses, got.AutoCompact)
 	}
 }
 
-func TestDeepCompressionEmitsCollapseAndAutoCompactMetadata(t *testing.T) {
+func TestCompressionNeverSeparatesToolRepliesFromTheirTurn(t *testing.T) {
 	t.Parallel()
 
-	c := New(Config{
-		Budget:       contextkit.Budget{MaxChars: 50},
-		Profile:      contextkit.ProfileDeep,
-		MinRecent:    1,
-		MaxToolChars: 15,
-	})
-	req := contextkit.Request{
+	c := New(Config{Budget: contextkit.Budget{MaxChars: 40}, Profile: contextkit.ProfileStandard, MinRecent: 2})
+	got, err := c.Compress(context.Background(), contextkit.Request{
 		Messages: []contextkit.Message{
-			{ID: "sys", Role: contextkit.RoleSystem, Content: "system instructions"},
-			{ID: "m1", Role: contextkit.RoleUser, Content: strings.Repeat("alpha ", 10)},
-			{ID: "m2", Role: contextkit.RoleAssistant, Content: strings.Repeat("beta ", 10)},
-			{ID: "m3", Role: contextkit.RoleTool, Content: strings.Repeat("gamma ", 10)},
+			{ID: "u1", Role: contextkit.RoleUser, Content: strings.Repeat("old ", 10)},
+			{ID: "u2", Role: contextkit.RoleUser, Content: "look it up"},
+			{ID: "a2", Role: contextkit.RoleAssistant, Content: "calling"},
+			{ID: "t2", Role: contextkit.RoleTool, ToolCallID: "call-1", Content: "result"},
+			{ID: "a3", Role: contextkit.RoleAssistant, Content: "found"},
 		},
-	}
-
-	got, err := c.Compress(context.Background(), req)
+	})
 	if err != nil {
 		t.Fatalf("Compress() error = %v", err)
 	}
+	// MinRecent alone would start the window at t2; it must extend to u2.
+	if want := "system:" + got.Summary + ",u2,a2,t2,a3"; ids(got.Messages) != want {
+		t.Fatalf("messages = %s, want %s", ids(got.Messages), want)
+	}
+}
 
-	if got.Profile != contextkit.ProfileDeep {
-		t.Fatalf("unexpected profile: %s", got.Profile)
+func TestCompressionWithoutBudgetKeepsEverything(t *testing.T) {
+	t.Parallel()
+
+	c := New(Config{Profile: contextkit.ProfileDeep})
+	messages := []contextkit.Message{
+		{ID: "u1", Role: contextkit.RoleUser, Content: strings.Repeat("old ", 100)},
+		{ID: "a1", Role: contextkit.RoleAssistant, Content: "answer"},
+		{ID: "u2", Role: contextkit.RoleUser, Content: "recent"},
 	}
-	if len(got.Collapses) != 1 {
-		t.Fatalf("expected one collapse, got=%#v", got.Collapses)
+	got, err := c.Compress(context.Background(), contextkit.Request{Messages: messages})
+	if err != nil {
+		t.Fatalf("Compress() error = %v", err)
 	}
-	if got.Collapses[0].ID == "" || len(got.Collapses[0].OriginalIDs) != 2 {
-		t.Fatalf("unexpected collapse metadata: %#v", got.Collapses[0])
+	if got.Dropped != 0 || ids(got.Messages) != "u1,a1,u2" || len(got.Collapses) != 0 {
+		t.Fatalf("result = %#v, want messages unchanged", got)
 	}
-	if len(got.Collapses[0].Originals) != 2 {
-		t.Fatalf("collapse should keep reversible originals: %#v", got.Collapses[0])
+}
+
+func TestCompressionKeepsOversizedNewestTurnAndReportsIt(t *testing.T) {
+	t.Parallel()
+
+	c := New(Config{Budget: contextkit.Budget{MaxChars: 10}, Profile: contextkit.ProfileStandard})
+	got, err := c.Compress(context.Background(), contextkit.Request{
+		Messages: []contextkit.Message{
+			{ID: "u1", Role: contextkit.RoleUser, Content: "old"},
+			{ID: "u2", Role: contextkit.RoleUser, Content: strings.Repeat("big ", 10)},
+			{ID: "a2", Role: contextkit.RoleAssistant, Content: "ok"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Compress() error = %v", err)
 	}
-	if got.AutoCompact == nil {
-		t.Fatalf("expected auto compact metadata")
+	if !got.OverBudget || got.Dropped != 1 || !strings.HasSuffix(ids(got.Messages), ",u2,a2") {
+		t.Fatalf("result = %#v, want newest turn kept over budget", got)
 	}
-	if !strings.Contains(got.AutoCompact.Summary, "deep compact") {
-		t.Fatalf("unexpected auto compact summary: %#v", got.AutoCompact)
+}
+
+func TestRequestBudgetOverridesConfig(t *testing.T) {
+	t.Parallel()
+
+	c := New(Config{Budget: contextkit.Budget{MaxChars: 1000}, Profile: contextkit.ProfileStandard})
+	got, err := c.Compress(context.Background(), contextkit.Request{
+		Budget: contextkit.Budget{MaxChars: 5},
+		Messages: []contextkit.Message{
+			{ID: "u1", Role: contextkit.RoleUser, Content: "first question"},
+			{ID: "u2", Role: contextkit.RoleUser, Content: "next"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Compress() error = %v", err)
+	}
+	if got.Dropped != 1 {
+		t.Fatalf("dropped = %d, want 1 under request budget", got.Dropped)
 	}
 }
 
 type fakeSummarizer struct {
-	calls int
-	got   contextkit.SummarizeRequest
+	requests []contextkit.SummarizeRequest
 }
 
-func (f *fakeSummarizer) Summarize(ctx context.Context, req contextkit.SummarizeRequest) (*contextkit.SummarizeResult, error) {
-	f.calls++
-	f.got = req
-	return &contextkit.SummarizeResult{Summary: "primary request: keep the medical policy facts"}, nil
+func (f *fakeSummarizer) Summarize(_ context.Context, req contextkit.SummarizeRequest) (*contextkit.SummarizeResult, error) {
+	f.requests = append(f.requests, req)
+	return &contextkit.SummarizeResult{Summary: "facts #" + string(rune('0'+len(f.requests)))}, nil
 }
 
-func TestDeepCompressionUsesSummarizerForAutoCompactProjection(t *testing.T) {
+func TestDeepCompressionSummarizesIncrementally(t *testing.T) {
 	t.Parallel()
 
 	summarizer := &fakeSummarizer{}
 	c := New(Config{
-		Budget:       contextkit.Budget{MaxChars: 80},
-		Profile:      contextkit.ProfileDeep,
-		MinRecent:    1,
-		MaxToolChars: 20,
-		Summarizer:   summarizer,
+		Budget:     contextkit.Budget{MaxChars: 40},
+		Profile:    contextkit.ProfileDeep,
+		Summarizer: summarizer,
 	})
-	req := contextkit.Request{
+	first, err := c.Compress(context.Background(), contextkit.Request{
 		Messages: []contextkit.Message{
-			{ID: "sys", Role: contextkit.RoleSystem, Content: "system instructions"},
-			{ID: "m1", Role: contextkit.RoleUser, Content: "old question"},
-			{ID: "m2", Role: contextkit.RoleAssistant, Content: "old answer"},
-			{ID: "m3", Role: contextkit.RoleUser, Content: "current question"},
+			{ID: "sys", Role: contextkit.RoleSystem, Content: "system"},
+			{ID: "u1", Role: contextkit.RoleUser, Content: strings.Repeat("alpha ", 5)},
+			{ID: "a1", Role: contextkit.RoleAssistant, Content: strings.Repeat("beta ", 5)},
+			{ID: "u2", Role: contextkit.RoleUser, Content: "current"},
 		},
-	}
-
-	got, err := c.Compress(context.Background(), req)
+	})
 	if err != nil {
-		t.Fatalf("Compress() error = %v", err)
+		t.Fatalf("first Compress() error = %v", err)
+	}
+	if len(summarizer.requests) != 1 || summarizer.requests[0].Previous != "" || ids(summarizer.requests[0].Collapsed) != "u1,a1" {
+		t.Fatalf("first summarize requests = %#v", summarizer.requests)
+	}
+	if first.AutoCompact == nil || first.AutoCompact.Summary != "facts #1" || len(first.Collapses) != 1 {
+		t.Fatalf("first result = %#v, want auto compact and collapse", first)
+	}
+	if first.Messages[1].Content != "summary of earlier context:\nfacts #1" {
+		t.Fatalf("first summary message = %#v", first.Messages[1])
 	}
 
-	if summarizer.calls != 1 {
-		t.Fatalf("expected summarizer call, got %d", summarizer.calls)
+	// The caller keeps the projection, JSON-round-tripped like a stored
+	// transcript, and appends the next turn.
+	var stored []contextkit.Message
+	encoded, _ := json.Marshal(first.Messages)
+	if err := json.Unmarshal(encoded, &stored); err != nil {
+		t.Fatal(err)
 	}
-	if len(summarizer.got.Collapsed) != 2 || len(summarizer.got.Recent) != 1 {
-		t.Fatalf("unexpected summarize request: %#v", summarizer.got)
+	stored = append(stored,
+		contextkit.Message{ID: "a2", Role: contextkit.RoleAssistant, Content: strings.Repeat("gamma ", 5)},
+		contextkit.Message{ID: "u3", Role: contextkit.RoleUser, Content: "newest"},
+	)
+	second, err := c.Compress(context.Background(), contextkit.Request{Messages: stored})
+	if err != nil {
+		t.Fatalf("second Compress() error = %v", err)
 	}
-	if got.AutoCompact == nil || got.AutoCompact.Summary != "primary request: keep the medical policy facts" {
-		t.Fatalf("unexpected auto compact: %#v", got.AutoCompact)
+	if len(summarizer.requests) != 2 {
+		t.Fatalf("summarizer calls = %d, want 2", len(summarizer.requests))
 	}
-	if got.Messages[1].Content != "auto compacted earlier context:\nprimary request: keep the medical policy facts" {
-		t.Fatalf("summarized projection not used: %#v", got.Messages)
+	if got := summarizer.requests[1]; got.Previous != "summary of earlier context:\nfacts #1" || ids(got.Collapsed) != "u2,a2" {
+		t.Fatalf("second summarize request = %#v, want previous summary plus only new messages", got)
+	}
+	if want := "sys,system:summary of earlier context:\nfacts #2,u3"; ids(second.Messages) != want {
+		t.Fatalf("second messages = %s, want %s", ids(second.Messages), want)
+	}
+	if !strings.Contains(second.Summary, "facts #2") || second.Messages[1].Metadata["contextkit.dropped_total"] != 4 {
+		t.Fatalf("second summary = %#v, want dropped_total 4", second.Messages[1])
+	}
+
+	restored := contextkit.RestoreProjection(second.Messages, append(first.Collapses, second.Collapses...))
+	if got := ids(restored); got != "sys,u1,a1,u2,a2,u3" {
+		t.Fatalf("restored = %s, want full history", got)
 	}
 }
 
-func TestRestoreProjectionExpandsCollapseSummaries(t *testing.T) {
+func TestDeepCompressionWithoutSummarizerStillRecordsCollapse(t *testing.T) {
 	t.Parallel()
 
-	c := New(Config{
-		Profile:   contextkit.ProfileDeep,
-		MinRecent: 1,
-	})
-	req := contextkit.Request{
+	c := New(Config{Budget: contextkit.Budget{MaxChars: 10}, Profile: contextkit.ProfileDeep})
+	got, err := c.Compress(context.Background(), contextkit.Request{
 		Messages: []contextkit.Message{
-			{ID: "sys", Role: contextkit.RoleSystem, Content: "system"},
-			{ID: "m1", Role: contextkit.RoleUser, Content: "old"},
-			{ID: "m2", Role: contextkit.RoleAssistant, Content: "answer"},
-			{ID: "m3", Role: contextkit.RoleUser, Content: "recent"},
+			{ID: "u1", Role: contextkit.RoleUser, Content: strings.Repeat("old ", 10)},
+			{ID: "u2", Role: contextkit.RoleUser, Content: "new"},
 		},
-	}
-
-	got, err := c.Compress(context.Background(), req)
+	})
 	if err != nil {
 		t.Fatalf("Compress() error = %v", err)
 	}
-
-	restored := contextkit.RestoreProjection(got.Messages, got.Collapses)
-	if len(restored) != 4 {
-		t.Fatalf("unexpected restored len: got=%d messages=%#v", len(restored), restored)
+	if got.AutoCompact != nil || len(got.Collapses) != 1 || ids(got.Collapses[0].Originals) != "u1" {
+		t.Fatalf("result = %#v, want collapse without auto compact", got)
 	}
-	for i, want := range []string{"sys", "m1", "m2", "m3"} {
-		if restored[i].ID != want {
-			t.Fatalf("unexpected restored message at %d: got=%q want=%q", i, restored[i].ID, want)
-		}
+	if got.Messages[0].Metadata["contextkit.collapse_id"] != got.Collapses[0].ID {
+		t.Fatalf("summary metadata = %#v, want collapse id", got.Messages[0].Metadata)
 	}
 }
 

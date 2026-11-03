@@ -33,7 +33,8 @@ compresses context, while the flag opts into the deeper, more invasive layers.
 
 1. Tool observation projection: tool messages become structured observations
    containing tool name, status, result reference, and bounded result preview.
-2. Message window pruning: system messages and recent conversation are retained.
+2. Message window pruning: system messages and the newest whole turns that fit
+   the budget are retained; everything older becomes one system summary message.
 3. Projection: the returned message slice is a model-facing view, not a mutation
    of the caller's original session.
 
@@ -45,8 +46,8 @@ compresses context, while the flag opts into the deeper, more invasive layers.
    stronger compact summary and places that summary in the model projection.
 
 No LLM dependency is required. Hosts can provide a deterministic summarizer, an
-LLM summarizer, or no summarizer. Without a summarizer, deep mode still returns
-collapse and compact metadata using deterministic summaries.
+LLM summarizer, or no summarizer. Without a summarizer, deep mode still records
+the collapse with a deterministic placeholder summary.
 
 ## Window Compressor
 
@@ -66,6 +67,19 @@ if err != nil {
 
 modelMessages := result.Messages
 ```
+
+The window is chosen from the newest message backwards. It always holds the
+last `MinRecent` messages (default 1), starts at a user message so a tool reply
+never loses its call, and extends over earlier whole turns while system
+messages plus the kept turns fit `MaxChars`. The summary message is not
+counted. Without a budget nothing is dropped. When the newest turn alone is too
+large it is kept anyway and `Result.OverBudget` is set.
+
+Compression is incremental: keep `result.Messages` as the session transcript
+and append new messages to it. The next `Compress` recognizes its own summary,
+summarizes only the newly dropped messages together with it, and carries the
+total dropped count forward. Passing the full raw history each time works too,
+but re-summarizes everything.
 
 If `Profile` is omitted from `window.Config`, the compressor reads
 `CONTEXT_DEEP_COMPRESSION`.
@@ -90,12 +104,14 @@ compressor := window.New(window.Config{
 })
 ```
 
-The summarizer receives collapsed messages, recent messages, budget, and
-metadata. The returned summary replaces the generic collapse placeholder in the
-model-facing projection:
+The summarizer receives the previous summary (`Previous`, empty on the first
+compression), the newly collapsed messages, recent messages, budget, and
+metadata. It should fold the collapsed messages into the previous summary. The
+returned summary replaces the generic placeholder in the model-facing
+projection:
 
 ```text
-auto compacted earlier context:
+summary of earlier context:
 Primary request: ...
 Current state: ...
 Pending tasks: ...
@@ -113,7 +129,10 @@ restored := contextkit.RestoreProjection(result.Messages, result.Collapses)
 ```
 
 This expands collapse summary messages back to their original messages when the
-projection contains `contextkit.collapse_id` metadata.
+projection contains `contextkit.collapse_id` metadata. Pass every collapse
+recorded across incremental compressions: each collapse keeps the previous
+summary as one of its originals, so the expansion recurses back to the full
+history.
 
 ## Tool Result Budget
 

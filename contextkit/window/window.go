@@ -11,14 +11,34 @@ import (
 	"github.com/eruca/goagents/contextkit/toolprojection"
 )
 
+const (
+	kindKey             = "contextkit.kind"
+	collapseIDKey       = "contextkit.collapse_id"
+	droppedTotalKey     = "contextkit.dropped_total"
+	kindWindowSummary   = "window_summary"
+	kindCollapseSummary = "collapse_summary"
+)
+
 type Config struct {
-	Budget       contextkit.Budget
-	Profile      contextkit.Profile
+	Budget contextkit.Budget
+	// Profile defaults to contextkit.ProfileFromEnv.
+	Profile contextkit.Profile
+	// MinRecent is the number of trailing messages always kept, even over
+	// budget; at least 1. The kept window then extends back to the start of
+	// its turn.
 	MinRecent    int
 	MaxToolChars int
 	Summarizer   contextkit.Summarizer
 }
 
+// Compressor keeps the newest whole turns that fit the budget and replaces
+// everything older with one summary message. The budget covers system
+// messages and the kept conversation; the summary is not counted, and a
+// Summarizer receives the budget to size it.
+//
+// Compress is incremental: feed it its previous output plus the new messages
+// and only the newly dropped messages are summarized, together with the
+// previous summary, instead of the whole history again.
 type Compressor struct {
 	cfg Config
 }
@@ -28,95 +48,145 @@ func New(cfg Config) *Compressor {
 		cfg.Profile = contextkit.ProfileFromEnv()
 	}
 	if cfg.MinRecent <= 0 {
-		cfg.MinRecent = 4
+		cfg.MinRecent = 1
 	}
 	return &Compressor{cfg: cfg}
 }
 
 func (c *Compressor) Compress(ctx context.Context, req contextkit.Request) (*contextkit.Result, error) {
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	profile := c.cfg.Profile
 	if profile == "" {
 		profile = contextkit.ProfileStandard
 	}
+	budget := effectiveBudget(req.Budget, c.cfg.Budget)
 
 	messages := budgetToolMessages(req.Messages, c.cfg.MaxToolChars)
-	system, nonSystem := splitSystem(messages)
-	recent, dropped := keepRecent(nonSystem, c.cfg.MinRecent)
+	system, previous, conversation := split(messages)
+	available := budget.MaxChars - charLen(system)
+	cut := windowStart(conversation, c.cfg.MinRecent, budget.MaxChars > 0, available)
+	dropped, recent := conversation[:cut], conversation[cut:]
 
-	budget := effectiveBudget(req.Budget, c.cfg.Budget)
+	result := &contextkit.Result{
+		Profile: profile,
+		Levels:  contextkit.LevelsForProfile(profile),
+		Dropped: len(dropped),
+	}
 	out := append([]contextkit.Message(nil), system...)
-	summary := ""
-	var collapse *contextkit.Collapse
-	if len(dropped) > 0 {
-		summary = summarizeDropped(dropped)
-		if profile == contextkit.ProfileDeep {
-			if compacted, err := c.compactDropped(ctx, dropped, recent, budget, req.Metadata); err != nil {
-				return nil, err
-			} else if compacted != nil && compacted.Summary != "" {
-				summary = "auto compacted earlier context:\n" + compacted.Summary
-			}
-			built := buildCollapse(dropped, summary)
-			collapse = &built
+	switch {
+	case len(dropped) > 0:
+		summary, err := c.summarize(ctx, profile, previous, dropped, recent, budget, req.Metadata, result)
+		if err != nil {
+			return nil, err
 		}
-		metadata := map[string]any{
-			"contextkit.kind": "window_summary",
-		}
-		if collapse != nil {
-			metadata["contextkit.kind"] = "collapse_summary"
-			metadata["contextkit.collapse_id"] = collapse.ID
-		}
-		out = append(out, contextkit.Message{
-			Role:     contextkit.RoleAssistant,
-			Content:  summary,
-			Metadata: metadata,
-		})
+		out = append(out, summary)
+		result.Summary = summary.Content
+	case len(previous) > 0:
+		out = append(out, previous...)
+		result.Summary = previous[len(previous)-1].Content
 	}
 	out = append(out, recent...)
 
-	result := &contextkit.Result{
-		Messages: out,
-		Profile:  profile,
-		Levels:   contextkit.LevelsForProfile(profile),
-		Summary:  summary,
-		Dropped:  len(dropped),
-	}
-
-	if profile == contextkit.ProfileDeep && collapse != nil {
-		result.Collapses = []contextkit.Collapse{*collapse}
-		if c.cfg.Summarizer != nil {
-			result.AutoCompact = &contextkit.Compact{
-				Summary: strings.TrimPrefix(summary, "auto compacted earlier context:\n"),
-			}
-		} else if exceedsBudget(out, budget) {
-			result.AutoCompact = &contextkit.Compact{
-				Summary: fmt.Sprintf("deep compact: preserved %d messages, collapsed %d earlier messages", len(out), len(dropped)),
-			}
-		} else {
-			result.AutoCompact = &contextkit.Compact{
-				Summary: fmt.Sprintf("deep compact: collapse %s available for recovery", collapse.ID),
-			}
-		}
-	}
-
+	result.Messages = out
+	result.OverBudget = budget.MaxChars > 0 && charLen(system)+charLen(recent) > budget.MaxChars
 	return result, nil
 }
 
-func (c *Compressor) compactDropped(ctx context.Context, dropped []contextkit.Message, recent []contextkit.Message, budget contextkit.Budget, metadata map[string]any) (*contextkit.SummarizeResult, error) {
-	if c.cfg.Summarizer == nil {
-		return nil, nil
+// summarize builds the summary message that replaces the previous summary and
+// the newly dropped messages. Deep mode also records a reversible collapse.
+func (c *Compressor) summarize(ctx context.Context, profile contextkit.Profile, previous, dropped, recent []contextkit.Message, budget contextkit.Budget, metadata map[string]any, result *contextkit.Result) (contextkit.Message, error) {
+	total := len(dropped)
+	for _, msg := range previous {
+		total += droppedTotal(msg)
 	}
-	return c.cfg.Summarizer.Summarize(ctx, contextkit.SummarizeRequest{
-		Collapsed: cloneMessages(dropped),
-		Recent:    cloneMessages(recent),
-		Budget:    budget,
-		Metadata:  cloneMetadata(metadata),
-	})
+	summary := contextkit.Message{
+		Role:     contextkit.RoleSystem,
+		Content:  placeholderSummary(total, dropped),
+		Metadata: map[string]any{kindKey: kindWindowSummary, droppedTotalKey: total},
+	}
+	if profile != contextkit.ProfileDeep {
+		return summary, nil
+	}
+
+	if c.cfg.Summarizer != nil {
+		compacted, err := c.cfg.Summarizer.Summarize(ctx, contextkit.SummarizeRequest{
+			Previous:  joinContents(previous),
+			Collapsed: cloneMessages(dropped),
+			Recent:    cloneMessages(recent),
+			Budget:    budget,
+			Metadata:  cloneMetadata(metadata),
+		})
+		if err != nil {
+			return contextkit.Message{}, err
+		}
+		if compacted != nil && compacted.Summary != "" {
+			summary.Content = "summary of earlier context:\n" + compacted.Summary
+			result.AutoCompact = &contextkit.Compact{Summary: compacted.Summary, Metadata: cloneMetadata(compacted.Metadata)}
+		}
+	}
+	// The previous summary is an original too, so restoring this collapse
+	// yields it back and an earlier collapse can then expand it in turn.
+	collapse := buildCollapse(append(cloneMessages(previous), dropped...), summary)
+	summary.Metadata[kindKey] = kindCollapseSummary
+	summary.Metadata[collapseIDKey] = collapse.ID
+	collapse.Summary = cloneMessage(summary)
+	result.Collapses = []contextkit.Collapse{collapse}
+	return summary, nil
+}
+
+// windowStart returns the index of the first kept conversation message. The
+// kept window always holds the last minRecent messages, starts on a turn
+// boundary so no tool reply loses its call, and, under a budget, extends back
+// over earlier whole turns while they fit. Without a budget nothing is dropped.
+func windowStart(messages []contextkit.Message, minRecent int, bounded bool, available int) int {
+	if !bounded {
+		return 0
+	}
+	boundaries := turnBoundaries(messages)
+	limit := max(len(messages)-minRecent, 0)
+	cut := 0
+	for _, b := range boundaries {
+		if b <= limit {
+			cut = b
+		}
+	}
+	suffix := charLen(messages[cut:])
+	for i := len(boundaries) - 1; i >= 0; i-- {
+		b := boundaries[i]
+		if b >= cut {
+			continue
+		}
+		suffix += charLen(messages[b:cut])
+		if suffix > available {
+			break
+		}
+		cut = b
+	}
+	return cut
+}
+
+// turnBoundaries lists the indexes a kept window may start at: each user
+// message, or each non-tool message when the conversation has no user turns.
+// Index 0 is always a boundary.
+func turnBoundaries(messages []contextkit.Message) []int {
+	hasUser := false
+	for _, msg := range messages {
+		if msg.Role == contextkit.RoleUser {
+			hasUser = true
+			break
+		}
+	}
+	boundaries := []int{0}
+	for i := 1; i < len(messages); i++ {
+		role := messages[i].Role
+		if role == contextkit.RoleUser || (!hasUser && role != contextkit.RoleTool) {
+			boundaries = append(boundaries, i)
+		}
+	}
+	return boundaries
 }
 
 func budgetToolMessages(messages []contextkit.Message, maxToolChars int) []contextkit.Message {
@@ -131,56 +201,79 @@ func budgetToolMessages(messages []contextkit.Message, maxToolChars int) []conte
 	return out
 }
 
-func splitSystem(messages []contextkit.Message) ([]contextkit.Message, []contextkit.Message) {
-	system := make([]contextkit.Message, 0)
-	rest := make([]contextkit.Message, 0, len(messages))
+// split separates real system messages and summaries left by an earlier
+// Compress from the conversation.
+func split(messages []contextkit.Message) (system, previous, conversation []contextkit.Message) {
 	for _, msg := range messages {
-		if msg.Role == contextkit.RoleSystem {
+		switch {
+		case isSummary(msg):
+			previous = append(previous, msg)
+		case msg.Role == contextkit.RoleSystem:
 			system = append(system, msg)
-			continue
+		default:
+			conversation = append(conversation, msg)
 		}
-		rest = append(rest, msg)
 	}
-	return system, rest
+	return system, previous, conversation
 }
 
-func keepRecent(messages []contextkit.Message, minRecent int) ([]contextkit.Message, []contextkit.Message) {
-	if len(messages) <= minRecent {
-		return append([]contextkit.Message(nil), messages...), nil
-	}
-	cut := len(messages) - minRecent
-	return append([]contextkit.Message(nil), messages[cut:]...), append([]contextkit.Message(nil), messages[:cut]...)
+func isSummary(msg contextkit.Message) bool {
+	kind, _ := msg.Metadata[kindKey].(string)
+	return kind == kindWindowSummary || kind == kindCollapseSummary
 }
 
-func summarizeDropped(messages []contextkit.Message) string {
-	var roles []string
-	ids := make([]string, 0, len(messages))
-	for _, msg := range messages {
-		roles = append(roles, string(msg.Role))
+// droppedTotal reads the count a summary carries, also after a JSON round
+// trip has turned it into a float64.
+func droppedTotal(msg contextkit.Message) int {
+	switch n := msg.Metadata[droppedTotalKey].(type) {
+	case int:
+		return n
+	case float64:
+		return int(n)
+	default:
+		return 0
+	}
+}
+
+func placeholderSummary(total int, dropped []contextkit.Message) string {
+	ids := make([]string, 0, len(dropped))
+	for _, msg := range dropped {
 		if msg.ID != "" {
 			ids = append(ids, msg.ID)
 		}
 	}
-	if len(ids) > 0 {
-		return fmt.Sprintf("compressed earlier context: %d messages (%s), ids: %s", len(messages), strings.Join(roles, ", "), strings.Join(ids, ", "))
+	if len(ids) == 0 {
+		return fmt.Sprintf("compressed earlier context: %d messages omitted", total)
 	}
-	return fmt.Sprintf("compressed earlier context: %d messages (%s)", len(messages), strings.Join(roles, ", "))
+	return fmt.Sprintf("compressed earlier context: %d messages omitted, latest ids: %s", total, strings.Join(ids, ", "))
 }
 
-func buildCollapse(messages []contextkit.Message, summary string) contextkit.Collapse {
+func joinContents(messages []contextkit.Message) string {
+	contents := make([]string, 0, len(messages))
+	for _, msg := range messages {
+		contents = append(contents, msg.Content)
+	}
+	return strings.Join(contents, "\n")
+}
+
+func buildCollapse(messages []contextkit.Message, summary contextkit.Message) contextkit.Collapse {
 	ids := make([]string, 0, len(messages))
 	for i, msg := range messages {
-		if msg.ID != "" {
+		switch {
+		case msg.ID != "":
 			ids = append(ids, msg.ID)
-			continue
+		case isSummary(msg):
+			id, _ := msg.Metadata[collapseIDKey].(string)
+			ids = append(ids, "summary:"+id)
+		default:
+			ids = append(ids, fmt.Sprintf("index:%d", i))
 		}
-		ids = append(ids, fmt.Sprintf("index:%d", i))
 	}
 	return contextkit.Collapse{
 		ID:          collapseID(ids),
 		StartIndex:  0,
 		EndIndex:    len(messages) - 1,
-		Summary:     contextkit.Message{Role: contextkit.RoleAssistant, Content: summary},
+		Summary:     summary,
 		OriginalIDs: ids,
 		Originals:   cloneMessages(messages),
 	}
@@ -192,15 +285,12 @@ func collapseID(ids []string) string {
 	return "collapse-" + hex.EncodeToString(h.Sum(nil))[:12]
 }
 
-func exceedsBudget(messages []contextkit.Message, budget contextkit.Budget) bool {
-	if budget.MaxChars <= 0 {
-		return false
-	}
+func charLen(messages []contextkit.Message) int {
 	total := 0
 	for _, msg := range messages {
 		total += msg.CharLen()
 	}
-	return total > budget.MaxChars
+	return total
 }
 
 func effectiveBudget(requestBudget, configBudget contextkit.Budget) contextkit.Budget {
