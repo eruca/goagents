@@ -599,6 +599,67 @@ func TestClientReturnsTypedPostCallError(t *testing.T) {
 	}
 }
 
+type busyHealthStore struct {
+	llmkit.HealthStore
+	busyAlias string
+}
+
+func (s *busyHealthStore) Acquire(ctx context.Context, candidate llmkit.Candidate) error {
+	if candidate.Model.Alias == s.busyAlias {
+		return fmt.Errorf("%w: provider concurrency is full", llmkit.ErrProviderBusy)
+	}
+	return s.HealthStore.Acquire(ctx, candidate)
+}
+
+func TestClientMovesPastBusyProviderWithoutSpendingAnAttempt(t *testing.T) {
+	local := &fakeProviderClient{response: &ports.ChatResponse{Content: "local"}}
+	cloud := &fakeProviderClient{response: &ports.ChatResponse{Content: "cloud"}}
+	recorder := &fakeRecorder{}
+	client := NewClient(Config{
+		Candidates: testCandidates(),
+		Providers: map[string]ProviderClient{
+			"local-small":    local,
+			"cloud-advanced": cloud,
+		},
+		ProfileProvider: fixedProfile(simpleProfile()),
+		RouteMetadataProvider: fixedRouteMetadata(RouteMetadata{
+			RouteID: "route-busy",
+			TaskID:  "task-busy",
+			Attempt: 1,
+		}),
+		Recorder:       recorder,
+		HealthStore:    &busyHealthStore{HealthStore: llmkit.NewMemoryHealthStore(llmkit.HealthPolicy{}), busyAlias: "local-small"},
+		FallbackPolicy: FallbackPolicy{MaxAttempts: 1, FailClosed: true},
+	})
+
+	resp, err := client.Chat(context.Background(), ports.ChatRequest{})
+	if err != nil || resp.Content != "cloud" {
+		t.Fatalf("Chat() = %+v, %v; want cloud after busy local", resp, err)
+	}
+	if len(local.requests) != 0 || len(cloud.requests) != 1 {
+		t.Fatalf("provider calls local=%d cloud=%d, want cloud only", len(local.requests), len(cloud.requests))
+	}
+	if len(recorder.routes) != 1 || recorder.routes[0].ModelAlias != "cloud-advanced" || recorder.routes[0].Attempt != 1 {
+		t.Fatalf("route traces = %+v, want one cloud trace at attempt 1", recorder.routes)
+	}
+}
+
+func TestClientReportsProviderBusyWhenNoCandidateAdmits(t *testing.T) {
+	local := &fakeProviderClient{response: &ports.ChatResponse{Content: "local"}}
+	client := NewClient(Config{
+		Candidates:      testCandidates()[:1],
+		Providers:       map[string]ProviderClient{"local-small": local},
+		ProfileProvider: fixedProfile(simpleProfile()),
+		HealthStore:     &busyHealthStore{HealthStore: llmkit.NewMemoryHealthStore(llmkit.HealthPolicy{}), busyAlias: "local-small"},
+	})
+
+	_, err := client.Chat(context.Background(), ports.ChatRequest{})
+	assertRuntimeError(t, err, ErrorStagePreCall, llmkit.ErrorClassProviderBusy, false)
+	if !errors.Is(err, llmkit.ErrProviderBusy) || len(local.requests) != 0 {
+		t.Fatalf("Chat() error = %v, local calls = %d; want busy error and no call", err, len(local.requests))
+	}
+}
+
 func TestFailClosedFallsBackOnlyForExplicitPreDispatchClass(t *testing.T) {
 	local := &fakeProviderClient{err: preDispatchProviderError{err: errors.New("dial rejected before dispatch")}}
 	cloud := &fakeProviderClient{response: &ports.ChatResponse{Content: "cloud fallback"}}
@@ -753,8 +814,8 @@ func TestClientRunsPreDispatchHookWithoutRecorderBeforeHealthAndProvider(t *test
 	if strings.Contains(string(encoded), sensitiveMessage) {
 		t.Fatalf("pre-dispatch request leaked ChatRequest content: %s", encoded)
 	}
-	if gotEvents := strings.Join(events, ","); gotEvents != "digest,hook,health_begin,provider,health_outcome" {
-		t.Fatalf("call order = %q, want digest,hook,health_begin,provider,health_outcome", gotEvents)
+	if gotEvents := strings.Join(events, ","); gotEvents != "health_acquire,digest,hook,provider,health_outcome" {
+		t.Fatalf("call order = %q, want health_acquire,digest,hook,provider,health_outcome", gotEvents)
 	}
 }
 
@@ -816,11 +877,9 @@ func TestClientPreDispatchHookFailureStopsBeforeHealthProviderAndFallback(t *tes
 	if len(local.requests) != 0 || len(cloud.requests) != 0 {
 		t.Fatalf("provider calls local=%d cloud=%d, want zero", len(local.requests), len(cloud.requests))
 	}
-	if len(health.Snapshot().Entries) != 0 {
-		t.Fatalf("health entries = %+v, want none", health.Snapshot().Entries)
-	}
-	if gotEvents := strings.Join(events, ","); gotEvents != "digest,hook" {
-		t.Fatalf("call order = %q, want digest,hook", gotEvents)
+	assertNoHealthEffect(t, health)
+	if gotEvents := strings.Join(events, ","); gotEvents != "health_acquire,digest,hook,health_release" {
+		t.Fatalf("call order = %q, want health_acquire,digest,hook,health_release", gotEvents)
 	}
 }
 
@@ -862,9 +921,7 @@ func TestClientPreDispatchHookRequiresProviderRequestDigester(t *testing.T) {
 	if metadataCalls != 0 || hookCalls != 0 || len(local.requests) != 0 {
 		t.Fatalf("metadata/hook/provider calls = %d/%d/%d, want zero", metadataCalls, hookCalls, len(local.requests))
 	}
-	if len(health.Snapshot().Entries) != 0 {
-		t.Fatalf("health entries = %+v, want none", health.Snapshot().Entries)
-	}
+	assertNoHealthEffect(t, health)
 }
 
 func TestClientPreDispatchHookRejectsInvalidHostMetadata(t *testing.T) {
@@ -922,9 +979,7 @@ func TestClientPreDispatchHookRejectsInvalidHostMetadata(t *testing.T) {
 			if hookCalls != 0 || len(local.requests) != 0 {
 				t.Fatalf("hook/provider calls = %d/%d, want zero", hookCalls, len(local.requests))
 			}
-			if len(health.Snapshot().Entries) != 0 {
-				t.Fatalf("health entries = %+v, want none", health.Snapshot().Entries)
-			}
+			assertNoHealthEffect(t, health)
 		})
 	}
 }
@@ -965,9 +1020,7 @@ func TestClientPreDispatchHookRejectsMissingProviderRequestDigest(t *testing.T) 
 	if hookCalls != 0 || len(local.requests) != 0 {
 		t.Fatalf("hook/provider calls = %d/%d, want zero", hookCalls, len(local.requests))
 	}
-	if len(health.Snapshot().Entries) != 0 {
-		t.Fatalf("health entries = %+v, want none", health.Snapshot().Entries)
-	}
+	assertNoHealthEffect(t, health)
 }
 
 func TestClientPreDispatchHookUsesHostCallIndexesAcrossFallback(t *testing.T) {
@@ -1138,9 +1191,7 @@ func TestClientPreDispatchDigestFailureStopsBeforeHookHealthAndProvider(t *testi
 	if metadataCalls != 0 || hookCalls != 0 || len(local.requests) != 0 {
 		t.Fatalf("metadata/hook/provider calls = %d/%d/%d, want zero", metadataCalls, hookCalls, len(local.requests))
 	}
-	if len(health.Snapshot().Entries) != 0 {
-		t.Fatalf("health entries = %+v, want none", health.Snapshot().Entries)
-	}
+	assertNoHealthEffect(t, health)
 }
 
 func TestClientRoutesHardProfileToSelectedProviderAndRecordsTrace(t *testing.T) {
@@ -1562,9 +1613,25 @@ type eventHealthStore struct {
 	events *[]string
 }
 
-func (s *eventHealthStore) Begin(ctx context.Context, candidate llmkit.Candidate) error {
-	*s.events = append(*s.events, "health_begin")
-	return s.HealthStore.Begin(ctx, candidate)
+func (s *eventHealthStore) Acquire(ctx context.Context, candidate llmkit.Candidate) error {
+	*s.events = append(*s.events, "health_acquire")
+	return s.HealthStore.Acquire(ctx, candidate)
+}
+
+func (s *eventHealthStore) Release(ctx context.Context, candidate llmkit.Candidate) error {
+	*s.events = append(*s.events, "health_release")
+	return s.HealthStore.Release(ctx, candidate)
+}
+
+// assertNoHealthEffect checks that every slot acquired was given back and no
+// outcome was recorded.
+func assertNoHealthEffect(t *testing.T, health llmkit.HealthStore) {
+	t.Helper()
+	for key, entry := range health.Snapshot().Entries {
+		if entry.InFlight != 0 || entry.FailureStreak != 0 || entry.Availability != llmkit.ProviderAvailable {
+			t.Fatalf("health entry %s = %+v, want released slot and no outcome", key, entry)
+		}
+	}
 }
 
 func (s *eventHealthStore) RecordOutcome(ctx context.Context, outcome llmkit.TaskOutcome) error {

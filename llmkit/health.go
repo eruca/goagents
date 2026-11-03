@@ -2,10 +2,17 @@ package llmkit
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
 )
+
+// ErrProviderBusy is wrapped by HealthStore.Acquire when a provider cannot
+// take another call right now. It is not a provider failure: callers move on
+// to another candidate and record no outcome.
+var ErrProviderBusy = errors.New("provider cannot take another call now")
 
 type ProviderAvailability string
 
@@ -46,7 +53,15 @@ type HealthPolicy struct {
 }
 
 type HealthStore interface {
-	Begin(context.Context, Candidate) error
+	// Acquire atomically admits one call to the candidate's provider. It
+	// returns an error wrapping ErrProviderBusy while the circuit is open,
+	// while a recovery probe is in flight (half-open admits exactly one call),
+	// when quota is exhausted, or when the provider's or the account's
+	// concurrency limit is reached. Each successful Acquire is closed by
+	// exactly one RecordOutcome or Release.
+	Acquire(context.Context, Candidate) error
+	// Release closes an Acquire whose call never reached the provider.
+	Release(context.Context, Candidate) error
 	RecordOutcome(context.Context, TaskOutcome) error
 	Snapshot() ProviderHealthSnapshot
 }
@@ -82,7 +97,12 @@ func ApplyProviderHealth(snapshot ProviderHealthSnapshot, candidates []Candidate
 	if len(snapshot.Entries) == 0 {
 		return enriched
 	}
+	accountInFlight := map[string]int{}
+	for _, entry := range snapshot.Entries {
+		accountInFlight[entry.AccountAlias] += entry.InFlight
+	}
 	for i := range enriched {
+		enriched[i].AccountCurrentConcurrency = accountInFlight[strings.TrimSpace(enriched[i].AccountAlias)]
 		key := ProviderHealthKey(enriched[i].AccountAlias, enriched[i].Model.Alias, enriched[i].Model.Provider)
 		entry, ok := snapshot.Entries[key]
 		if !ok {
@@ -90,6 +110,7 @@ func ApplyProviderHealth(snapshot ProviderHealthSnapshot, candidates []Candidate
 		}
 		enriched[i].ProviderAvailability = normalizedAvailability(entry.Availability)
 		enriched[i].ProviderInFlight = entry.InFlight
+		enriched[i].Model.CurrentConcurrency = entry.InFlight
 		enriched[i].ProviderMaxConcurrency = entry.MaxConcurrency
 		enriched[i].ProviderQuotaRemaining = entry.QuotaRemaining
 		enriched[i].ProviderQuotaExhausted = entry.QuotaExhausted
@@ -99,18 +120,71 @@ func ApplyProviderHealth(snapshot ProviderHealthSnapshot, candidates []Candidate
 	return enriched
 }
 
-func (s *MemoryHealthStore) Begin(ctx context.Context, candidate Candidate) error {
+func (s *MemoryHealthStore) Acquire(ctx context.Context, candidate Candidate) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	now := s.now()
 	key := ProviderHealthKey(candidate.AccountAlias, candidate.Model.Alias, candidate.Model.Provider)
-	entry := s.entries[key]
-	entry = ensureEntryIdentity(entry, candidate.AccountAlias, candidate.Model.Alias, candidate.Model.Provider)
+	entry := ensureEntryIdentity(s.entries[key], candidate.AccountAlias, candidate.Model.Alias, candidate.Model.Provider)
 	entry.Availability = normalizedAvailability(entry.Availability)
+	if reason := s.admissionBlock(entry, candidate, now); reason != "" {
+		return fmt.Errorf("%w: %s", ErrProviderBusy, reason)
+	}
 	entry.InFlight++
+	entry.UpdatedAt = now
+	s.entries[key] = entry
+	return nil
+}
+
+func (s *MemoryHealthStore) admissionBlock(entry ProviderHealthEntry, candidate Candidate, now time.Time) string {
+	switch {
+	case !entry.CooldownUntil.IsZero() && now.Before(entry.CooldownUntil):
+		return "provider is in cooldown"
+	case entry.Availability == ProviderUnavailable && entry.CooldownUntil.IsZero():
+		return "provider is unavailable"
+	case entry.Availability == ProviderUnavailable && entry.InFlight > 0:
+		return "provider recovery probe is in flight"
+	case entry.QuotaExhausted || entry.QuotaRemaining < 0:
+		return "provider quota is exhausted"
+	}
+	limit := entry.MaxConcurrency
+	if limit <= 0 {
+		limit = candidate.Model.MaxConcurrency
+	}
+	if limit > 0 && entry.InFlight >= limit {
+		return "provider concurrency is full"
+	}
+	if candidate.AccountMaxConcurrency > 0 {
+		account := strings.TrimSpace(candidate.AccountAlias)
+		inFlight := 0
+		for _, other := range s.entries {
+			if other.AccountAlias == account {
+				inFlight += other.InFlight
+			}
+		}
+		if inFlight >= candidate.AccountMaxConcurrency {
+			return "account concurrency is full"
+		}
+	}
+	return ""
+}
+
+func (s *MemoryHealthStore) Release(_ context.Context, candidate Candidate) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key := ProviderHealthKey(candidate.AccountAlias, candidate.Model.Alias, candidate.Model.Provider)
+	entry, ok := s.entries[key]
+	if !ok {
+		return nil
+	}
+	if entry.InFlight > 0 {
+		entry.InFlight--
+	}
 	entry.UpdatedAt = s.now()
 	s.entries[key] = entry
 	return nil
@@ -162,7 +236,8 @@ func (s *MemoryHealthStore) RecordOutcome(ctx context.Context, outcome TaskOutco
 func CountsTowardProviderHealth(class ErrorClass) bool {
 	switch class {
 	case ErrorClassCanceled, ErrorClassRequestTooLarge, ErrorClassBudgetExceeded,
-		ErrorClassPolicyBlocked, ErrorClassCapabilityMismatch, ErrorClassPostCall:
+		ErrorClassPolicyBlocked, ErrorClassCapabilityMismatch, ErrorClassPostCall,
+		ErrorClassProviderBusy:
 		return false
 	default:
 		return true

@@ -2,7 +2,10 @@ package llmkit
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -113,13 +116,13 @@ func TestMemoryHealthStoreTracksInFlightAndOutcomeCooldown(t *testing.T) {
 	})
 	c := candidate("local-free", CapabilitySimple, PriceFree, LatencyNormalClass, true)
 
-	if err := store.Begin(context.Background(), c); err != nil {
-		t.Fatalf("Begin returned error: %v", err)
+	if err := store.Acquire(context.Background(), c); err != nil {
+		t.Fatalf("Acquire returned error: %v", err)
 	}
 	snapshot := store.Snapshot()
 	entry := snapshot.Entries[ProviderHealthKey(c.AccountAlias, c.Model.Alias, c.Model.Provider)]
 	if entry.InFlight != 1 {
-		t.Fatalf("in flight after Begin = %d, want 1", entry.InFlight)
+		t.Fatalf("in flight after Acquire = %d, want 1", entry.InFlight)
 	}
 
 	failed := TaskOutcome{
@@ -165,8 +168,8 @@ func TestMemoryHealthStoreHonorsContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if err := store.Begin(ctx, candidate("local", CapabilitySimple, PriceFree, LatencyNormalClass, true)); err != context.Canceled {
-		t.Fatalf("Begin cancelled error = %v, want context.Canceled", err)
+	if err := store.Acquire(ctx, candidate("local", CapabilitySimple, PriceFree, LatencyNormalClass, true)); err != context.Canceled {
+		t.Fatalf("Acquire cancelled error = %v, want context.Canceled", err)
 	}
 	if err := store.RecordOutcome(ctx, TaskOutcome{AccountAlias: "a", ModelAlias: "m", Provider: "p"}); err != context.Canceled {
 		t.Fatalf("RecordOutcome cancelled error = %v, want context.Canceled", err)
@@ -196,8 +199,8 @@ func TestMemoryHealthStoreIgnoresCallerCausedFailures(t *testing.T) {
 	}
 
 	for _, class := range []ErrorClass{ErrorClassCanceled, ErrorClassRequestTooLarge, ErrorClassBudgetExceeded, ErrorClassCanceled} {
-		if err := store.Begin(context.Background(), c); err != nil {
-			t.Fatalf("Begin returned error: %v", err)
+		if err := store.Acquire(context.Background(), c); err != nil {
+			t.Fatalf("Acquire returned error: %v", err)
 		}
 		if err := store.RecordOutcome(context.Background(), outcome(class)); err != nil {
 			t.Fatalf("RecordOutcome(%s) returned error: %v", class, err)
@@ -246,5 +249,90 @@ func TestMemoryHealthStoreBacksOffCooldownExponentially(t *testing.T) {
 		if !entry.CooldownUntil.Equal(now.Add(cooldown)) {
 			t.Fatalf("failure %d cooldown until = %v, want %v", i+1, entry.CooldownUntil, now.Add(cooldown))
 		}
+	}
+}
+
+func concurrentAcquires(store HealthStore, c Candidate, callers int) (admitted, busy int32) {
+	var admittedCount, busyCount atomic.Int32
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			switch err := store.Acquire(context.Background(), c); {
+			case err == nil:
+				admittedCount.Add(1)
+			case errors.Is(err, ErrProviderBusy):
+				busyCount.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	return admittedCount.Load(), busyCount.Load()
+}
+
+func TestMemoryHealthStoreAcquireEnforcesConfiguredConcurrency(t *testing.T) {
+	store := NewMemoryHealthStore(HealthPolicy{})
+	c := candidate("local", CapabilitySimple, PriceFree, LatencyNormalClass, true)
+	c.Model.MaxConcurrency = 2
+
+	if admitted, busy := concurrentAcquires(store, c, 20); admitted != 2 || busy != 18 {
+		t.Fatalf("admitted/busy = %d/%d, want 2/18", admitted, busy)
+	}
+	if err := store.Release(context.Background(), c); err != nil {
+		t.Fatalf("Release returned error: %v", err)
+	}
+	if err := store.Acquire(context.Background(), c); err != nil {
+		t.Fatalf("Acquire after Release = %v, want admitted", err)
+	}
+}
+
+func TestMemoryHealthStoreAcquireEnforcesAccountConcurrency(t *testing.T) {
+	store := NewMemoryHealthStore(HealthPolicy{})
+	first := withAccount(candidate("model-a", CapabilitySimple, PriceFree, LatencyNormalClass, true), "shared")
+	second := withAccount(candidate("model-b", CapabilitySimple, PriceFree, LatencyNormalClass, true), "shared")
+	first.AccountMaxConcurrency, second.AccountMaxConcurrency = 1, 1
+
+	if err := store.Acquire(context.Background(), first); err != nil {
+		t.Fatalf("Acquire(first) = %v", err)
+	}
+	if err := store.Acquire(context.Background(), second); !errors.Is(err, ErrProviderBusy) || !strings.Contains(err.Error(), "account concurrency") {
+		t.Fatalf("Acquire(second) = %v, want account concurrency rejection", err)
+	}
+}
+
+func TestMemoryHealthStoreHalfOpenAdmitsExactlyOneProbe(t *testing.T) {
+	now := time.Date(2026, 5, 6, 4, 0, 0, 0, time.UTC)
+	var mu sync.Mutex
+	store := NewMemoryHealthStore(HealthPolicy{
+		FailureCooldownThreshold: 1,
+		CooldownDuration:         time.Minute,
+		Now: func() time.Time {
+			mu.Lock()
+			defer mu.Unlock()
+			return now
+		},
+	})
+	c := candidate("local", CapabilitySimple, PriceFree, LatencyNormalClass, true)
+	c.Model.MaxConcurrency = 0
+	failed := TaskOutcome{AccountAlias: c.AccountAlias, ModelAlias: c.Model.Alias, Provider: c.Model.Provider, ErrorClass: ErrorClassTimeout}
+	if err := store.Acquire(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordOutcome(context.Background(), failed); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Acquire(context.Background(), c); !errors.Is(err, ErrProviderBusy) || !strings.Contains(err.Error(), "cooldown") {
+		t.Fatalf("Acquire during cooldown = %v, want cooldown rejection", err)
+	}
+	mu.Lock()
+	now = now.Add(2 * time.Minute)
+	mu.Unlock()
+	if admitted, busy := concurrentAcquires(store, c, 20); admitted != 1 || busy != 19 {
+		t.Fatalf("half-open admitted/busy = %d/%d, want exactly one probe", admitted, busy)
 	}
 }

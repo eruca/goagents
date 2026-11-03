@@ -80,7 +80,10 @@ const (
 	ErrorClassUsageMissing       ErrorClass = "usage_missing"
 	ErrorClassRedirectBlocked    ErrorClass = "redirect_blocked"
 	ErrorClassInvalidResponse    ErrorClass = "invalid_response"
-	ErrorClassUnknown            ErrorClass = "unknown"
+	// ErrorClassProviderBusy marks a candidate HealthStore.Acquire turned
+	// away; no call was made.
+	ErrorClassProviderBusy ErrorClass = "provider_busy"
+	ErrorClassUnknown      ErrorClass = "unknown"
 )
 
 // TaskOutcome is the allowlisted audit record for the result of an LLM task.

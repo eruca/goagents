@@ -171,12 +171,12 @@ This keeps newly written outcomes useful without waiting for a process restart.
 
 Hosts can keep this in memory for a single process, or replace the interface
 with a durable/shared implementation later. The route policy treats quota
-exhaustion, active cooldown, unavailable providers, and full provider
-concurrency as hard filters. Degraded providers remain eligible but receive a
-lower score, so they are used only when better options are unavailable. After
-a cooldown expires, an unavailable provider is half-open: it is held back
-while a call to it is in flight, so one probe tests recovery instead of every
-waiting request.
+exhaustion, active cooldown, unavailable providers, and full provider or
+account concurrency (including `max_concurrency` from config) as hard filters.
+Degraded providers remain eligible but receive a lower score, so they are used
+only when better options are unavailable. After a cooldown expires, an
+unavailable provider is half-open: exactly one probe call tests recovery while
+the others wait for its outcome.
 
 Typical adapter wiring:
 
@@ -195,9 +195,12 @@ client := goagentadapter.NewClient(goagentadapter.Config{
 })
 ```
 
-The adapter applies `HealthStore.Snapshot()` before each routing decision,
-calls `Begin` before invoking the selected provider, and calls `RecordOutcome`
-after success or failure. This keeps simple tasks local-first when local is
+The adapter applies `HealthStore.Snapshot()` before each routing decision.
+Because the snapshot can be stale under concurrency, it then calls `Acquire`,
+which checks the same limits atomically and takes the slot; a candidate that
+turns out busy is skipped without spending a fallback attempt. After the call
+the adapter records the outcome, or `Release`s the slot if the provider was
+never called. This keeps simple tasks local-first when local is
 healthy, while allowing fallback to cloud when the local provider is busy,
 quota-exhausted, or cooling down after failures.
 

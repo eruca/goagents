@@ -206,7 +206,7 @@ func (c *Client) route(ctx context.Context, req ports.ChatRequest, onDelta func(
 	routeMetadataLoaded := false
 	lastProviderCallIndex := 0
 	maxAttempts := c.attemptLimit(len(candidates))
-	for attemptOffset := 0; len(candidates) > 0; attemptOffset++ {
+	for attemptOffset := 0; len(candidates) > 0; {
 		if maxAttempts > 0 && attemptOffset >= maxAttempts {
 			break
 		}
@@ -217,89 +217,39 @@ func (c *Client) route(ctx context.Context, req ports.ChatRequest, onDelta func(
 				failures,
 			)
 		}
-
-		var trace llmkit.RouteTrace
-		if c.recorder != nil || c.preDispatchHook != nil {
-			if !routeMetadataLoaded {
-				routeMetadata, err = c.loadRouteMetadata(ctx, req)
-				if err != nil {
-					return nil, newRuntimeError(ErrorStagePreCall, llmkit.ErrorClassConfiguration, false, err)
-				}
-				routeMetadataLoaded = true
-			}
-			trace = c.routeTrace(profile, decision, routeMetadata, attemptOffset)
-			if c.recorder != nil {
-				if err := c.recorder.RecordRoute(ctx, trace); err != nil {
-					return nil, newRuntimeError(ErrorStagePreCall, c.errorClassifier(err), false, err)
-				}
-			}
-		}
-
 		provider, ok := c.providers[decision.SelectedAlias]
 		if !ok || provider == nil {
 			err := fmt.Errorf("missing provider client for selected model alias %q", decision.SelectedAlias)
 			return nil, newRuntimeError(ErrorStageConfig, llmkit.ErrorClassConfiguration, false, err)
-		} else {
-			streaming, streams := provider.(ports.StreamingLLMClient)
-			streams = streams && onDelta != nil
-			if c.preDispatchHook != nil {
-				// claim 未明确成功前不能开始 health、调用 Provider 或进入 fallback。
-				providerCallIndex, err := c.runPreDispatchHook(ctx, req, provider, streams, trace, lastProviderCallIndex)
-				if err != nil {
-					return nil, err
-				}
-				lastProviderCallIndex = providerCallIndex
-			}
-			if c.healthStore != nil {
-				if err := c.healthStore.Begin(ctx, decision.Selected); err != nil {
+		}
+		if c.healthStore != nil {
+			if err := c.healthStore.Acquire(ctx, decision.Selected); err != nil {
+				if !errors.Is(err, llmkit.ErrProviderBusy) {
 					return nil, newRuntimeError(ErrorStagePreCall, c.errorClassifier(err), false, err)
 				}
-			}
-			callStarted := time.Now()
-			delivered := false
-			var resp *ports.ChatResponse
-			var providerErr error
-			if streams {
-				resp, providerErr = streaming.ChatStream(ctx, req, func(delta ports.ChatDelta) error {
-					delivered = true
-					return onDelta(delta)
-				})
-			} else {
-				resp, providerErr = provider.Chat(ctx, req)
-			}
-			latency := time.Since(callStarted)
-			if requestErr := ctx.Err(); requestErr != nil {
-				// 取消优先于晚到 Provider 结果，完整响应不得继续向上返回。
-				resp = nil
-				providerErr = requestErr
-			}
-			if providerErr == nil {
-				if err := c.recordOutcomeAfterCall(ctx, profile, decision, trace, latency, resp, nil); err != nil {
-					return nil, newRuntimeError(ErrorStagePostCall, llmkit.ErrorClassPostCall, true, err)
-				}
-				if onDelta != nil && !streams && resp.Content != "" {
-					if err := onDelta(ports.ChatDelta{Content: resp.Content}); err != nil {
-						return nil, err
-					}
-				}
-				return resp, nil
-			}
-			if err := c.recordOutcomeAfterCall(ctx, profile, decision, trace, latency, nil, providerErr); err != nil {
-				return nil, newRuntimeError(ErrorStagePostCall, llmkit.ErrorClassPostCall, true, err)
-			}
-			runtimeErr := newRuntimeError(
-				ErrorStageProvider,
-				c.errorClassifier(providerErr),
-				providerWasDispatched(providerErr),
-				providerErr,
-			)
-			failures = append(failures, runtimeErr)
-			if ctx.Err() != nil || delivered || !c.allowsFallback(runtimeErr) {
-				return nil, joinRouteErrors(runtimeErr, failures[:len(failures)-1])
+				// Another request took the last slot or the probe since the
+				// snapshot: nothing was sent, so try the next candidate without
+				// spending an attempt.
+				failures = append(failures, newRuntimeError(ErrorStagePreCall, llmkit.ErrorClassProviderBusy, false, err))
+				candidates = removeSelectedCandidate(candidates, decision.Selected)
+				continue
 			}
 		}
 
+		resp, delivered, err := c.attempt(ctx, req, onDelta, profile, decision, provider, attemptOffset, &routeMetadata, &routeMetadataLoaded, &lastProviderCallIndex)
+		if err == nil {
+			return resp, nil
+		}
+		var runtimeErr *RuntimeError
+		if !errors.As(err, &runtimeErr) || runtimeErr.Stage != ErrorStageProvider {
+			return nil, err
+		}
+		failures = append(failures, runtimeErr)
+		if ctx.Err() != nil || delivered || !c.allowsFallback(runtimeErr) {
+			return nil, joinRouteErrors(runtimeErr, failures[:len(failures)-1])
+		}
 		candidates = removeSelectedCandidate(candidates, decision.Selected)
+		attemptOffset++
 	}
 
 	if len(failures) > 0 {
@@ -311,6 +261,89 @@ func (c *Client) route(ctx context.Context, req ports.ChatRequest, onDelta func(
 		llmkit.ErrorClassPolicyBlocked,
 		false,
 		fmt.Errorf("all provider candidates failed"),
+	)
+}
+
+// attempt makes one admitted provider call. It owns the health slot
+// acquired for it: the slot is closed by the outcome once the provider was
+// called, or released if the attempt stops before that.
+func (c *Client) attempt(ctx context.Context, req ports.ChatRequest, onDelta func(ports.ChatDelta) error, profile llmkit.TaskProfile, decision llmkit.RouteDecision, provider ProviderClient, attemptOffset int, routeMetadata *RouteMetadata, routeMetadataLoaded *bool, lastProviderCallIndex *int) (*ports.ChatResponse, bool, error) {
+	called := false
+	defer func() {
+		if !called && c.healthStore != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), providerOutcomeCleanupTimeout)
+			defer cancel()
+			_ = c.healthStore.Release(cleanupCtx, decision.Selected)
+		}
+	}()
+
+	var trace llmkit.RouteTrace
+	if c.recorder != nil || c.preDispatchHook != nil {
+		if !*routeMetadataLoaded {
+			metadata, err := c.loadRouteMetadata(ctx, req)
+			if err != nil {
+				return nil, false, newRuntimeError(ErrorStagePreCall, llmkit.ErrorClassConfiguration, false, err)
+			}
+			*routeMetadata = metadata
+			*routeMetadataLoaded = true
+		}
+		trace = c.routeTrace(profile, decision, *routeMetadata, attemptOffset)
+		if c.recorder != nil {
+			if err := c.recorder.RecordRoute(ctx, trace); err != nil {
+				return nil, false, newRuntimeError(ErrorStagePreCall, c.errorClassifier(err), false, err)
+			}
+		}
+	}
+
+	streaming, streams := provider.(ports.StreamingLLMClient)
+	streams = streams && onDelta != nil
+	if c.preDispatchHook != nil {
+		// claim 未明确成功前不能调用 Provider 或进入 fallback。
+		providerCallIndex, err := c.runPreDispatchHook(ctx, req, provider, streams, trace, *lastProviderCallIndex)
+		if err != nil {
+			return nil, false, err
+		}
+		*lastProviderCallIndex = providerCallIndex
+	}
+
+	called = true
+	callStarted := time.Now()
+	delivered := false
+	var resp *ports.ChatResponse
+	var providerErr error
+	if streams {
+		resp, providerErr = streaming.ChatStream(ctx, req, func(delta ports.ChatDelta) error {
+			delivered = true
+			return onDelta(delta)
+		})
+	} else {
+		resp, providerErr = provider.Chat(ctx, req)
+	}
+	latency := time.Since(callStarted)
+	if requestErr := ctx.Err(); requestErr != nil {
+		// 取消优先于晚到 Provider 结果，完整响应不得继续向上返回。
+		resp = nil
+		providerErr = requestErr
+	}
+	if providerErr == nil {
+		if err := c.recordOutcomeAfterCall(ctx, profile, decision, trace, latency, resp, nil); err != nil {
+			return nil, delivered, newRuntimeError(ErrorStagePostCall, llmkit.ErrorClassPostCall, true, err)
+		}
+		if onDelta != nil && !streams && resp.Content != "" {
+			if err := onDelta(ports.ChatDelta{Content: resp.Content}); err != nil {
+				return nil, true, err
+			}
+		}
+		return resp, delivered, nil
+	}
+	if err := c.recordOutcomeAfterCall(ctx, profile, decision, trace, latency, nil, providerErr); err != nil {
+		return nil, delivered, newRuntimeError(ErrorStagePostCall, llmkit.ErrorClassPostCall, true, err)
+	}
+	return nil, delivered, newRuntimeError(
+		ErrorStageProvider,
+		c.errorClassifier(providerErr),
+		providerWasDispatched(providerErr),
+		providerErr,
 	)
 }
 
