@@ -906,7 +906,7 @@ func testHostAPIQueuedWorkerSingleExecutionSlot(t *testing.T, starts int) {
 
 	select {
 	case <-step.started:
-	case <-time.After(2 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("queued worker did not start the first workflow")
 	}
 	select {
@@ -933,7 +933,7 @@ func testHostAPIQueuedWorkerSingleExecutionSlot(t *testing.T, starts int) {
 	}
 
 	cancel()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for runtime.NumGoroutine() > baselineGoroutines+5 && time.Now().Before(deadline) {
 		runtime.Gosched()
 	}
@@ -966,14 +966,16 @@ func savePendingWorkflow(t *testing.T, store workflowkit.Store, workflowID strin
 }
 
 func TestHostAPIQueuedWorkerExtendsLeaseWhileWorkflowRuns(t *testing.T) {
-	t.Setenv("HOST_API_QUEUED_LEASE_DURATION", "40ms")
+	// Heartbeats run every lease/2, so the lease must leave room for a delayed
+	// tick on a loaded -race run; a missed renewal loses the lease for good.
+	t.Setenv("HOST_API_QUEUED_LEASE_DURATION", "200ms")
 
 	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
 	if err != nil {
 		t.Fatalf("NewServer returned error: %v", err)
 	}
 	server.executor = workflowkit.NewExecutor(server.workflows, []workflowkit.Step{
-		slowApprovalStep{delay: 500 * time.Millisecond},
+		slowApprovalStep{delay: 800 * time.Millisecond},
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -2044,9 +2046,14 @@ func selectedTaskType(t *testing.T, routes llmRoutesResponse) string {
 	return selectedRoute(t, routes).TaskType
 }
 
+// testWaitTimeout bounds polling waits for background work. Waits return as
+// soon as their condition holds, so the bound only matters on failure and is
+// generous enough for a loaded -race run.
+const testWaitTimeout = 10 * time.Second
+
 func waitForWorkflowStatus(t *testing.T, handler http.Handler, id string, want workflowkit.Status) workflowResponse {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	var last workflowResponse
 	for time.Now().Before(deadline) {
 		last = doJSON[workflowResponse](t, handler, http.MethodGet, "/workflows/"+id, nil)
@@ -2061,7 +2068,7 @@ func waitForWorkflowStatus(t *testing.T, handler http.Handler, id string, want w
 
 func waitForWorkflowLeaseCleared(t *testing.T, store workflowkit.Store, id string) workflowkit.WorkflowRun {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for time.Now().Before(deadline) {
 		run, err := store.Get(context.Background(), id)
 		if err != nil {
@@ -2116,7 +2123,7 @@ func workflowResponseIDs(workflows []workflowResponse) []string {
 
 func waitForQueuedWorkerStatus(t *testing.T, handler http.Handler, accept func(queuedWorkerStatusResponse) bool) queuedWorkerStatusResponse {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	var last queuedWorkerStatusResponse
 	for time.Now().Before(deadline) {
 		last = doJSON[queuedWorkerStatusResponse](t, handler, http.MethodGet, "/workers/queued", nil)
@@ -2265,7 +2272,7 @@ func waitForQueuedWorkerSignal(t *testing.T, signal <-chan struct{}, name string
 	t.Helper()
 	select {
 	case <-signal:
-	case <-time.After(2 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatalf("timed out waiting for %s", name)
 	}
 }
@@ -2291,7 +2298,7 @@ func (s slowApprovalStep) Run(ctx context.Context, run workflowkit.WorkflowRun) 
 
 func waitForWorkflowLeasePresent(t *testing.T, store workflowkit.Store, id string) workflowkit.WorkflowRun {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for time.Now().Before(deadline) {
 		run, err := store.Get(context.Background(), id)
 		if err != nil {
@@ -2312,7 +2319,7 @@ func waitForWorkflowLeasePresent(t *testing.T, store workflowkit.Store, id strin
 
 func waitForWorkflowLeaseExtendedAfter(t *testing.T, store workflowkit.Store, id string, previous time.Time) workflowkit.WorkflowRun {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for time.Now().Before(deadline) {
 		run, err := store.Get(context.Background(), id)
 		if err != nil {
