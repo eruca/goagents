@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -48,7 +49,7 @@ func TestHandleSuccess(t *testing.T) {
 	p := &fakeProvider{name: "paddle", delay: 5 * time.Millisecond}
 	d, err := NewDispatcher[[]byte, string]([]ocrs.ProviderConfig[[]byte, string]{
 		{Provider: p, Workers: 1},
-	}, Config{QueueSize: 8})
+	})
 	if err != nil {
 		t.Fatalf("NewDispatcher() error = %v", err)
 	}
@@ -67,7 +68,7 @@ func TestWorkersOneMeansSerialExecution(t *testing.T) {
 	p := &fakeProvider{name: "paddle", delay: 40 * time.Millisecond}
 	d, err := NewDispatcher[[]byte, string]([]ocrs.ProviderConfig[[]byte, string]{
 		{Provider: p, Workers: 1},
-	}, Config{QueueSize: 16, PollInterval: 5 * time.Millisecond})
+	})
 	if err != nil {
 		t.Fatalf("NewDispatcher() error = %v", err)
 	}
@@ -95,7 +96,7 @@ func TestWorkersOneMeansSerialExecution(t *testing.T) {
 func TestNewDispatcherNoProvider(t *testing.T) {
 	t.Parallel()
 
-	_, err := NewDispatcher[[]byte, string](nil, Config{})
+	_, err := NewDispatcher[[]byte, string](nil)
 	if err != ErrNoEndpoint {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -106,7 +107,7 @@ func TestNewDispatcherNilProvider(t *testing.T) {
 
 	_, err := NewDispatcher[[]byte, string]([]ocrs.ProviderConfig[[]byte, string]{
 		{Provider: nil, Workers: 1},
-	}, Config{})
+	})
 	if err == nil {
 		t.Fatalf("expected error for nil provider")
 	}
@@ -116,7 +117,7 @@ func TestCloseWhileHandleIsEnqueueingDoesNotPanicOrHang(t *testing.T) {
 	p := &fakeProvider{name: "paddle", delay: 20 * time.Millisecond}
 	d, err := NewDispatcher[[]byte, string]([]ocrs.ProviderConfig[[]byte, string]{
 		{Provider: p, Workers: 1},
-	}, Config{QueueSize: 1, PollInterval: time.Millisecond})
+	})
 	if err != nil {
 		t.Fatalf("NewDispatcher() error = %v", err)
 	}
@@ -145,5 +146,95 @@ func TestCloseWhileHandleIsEnqueueingDoesNotPanicOrHang(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("Handle calls did not return after Close")
+	}
+}
+
+type gatedProvider struct {
+	name    string
+	active  atomic.Int32
+	release chan struct{}
+}
+
+func (g *gatedProvider) Family() string { return "fake" }
+func (g *gatedProvider) Name() string   { return g.name }
+
+func (g *gatedProvider) Handle(ctx context.Context, data []byte) (string, error) {
+	g.active.Add(1)
+	defer g.active.Add(-1)
+	select {
+	case <-g.release:
+		return g.name, nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+func TestBusyProviderNeverHoldsCallsWhileAnotherIsIdle(t *testing.T) {
+	slow := &gatedProvider{name: "slow", release: make(chan struct{})}
+	fast := &fakeProvider{name: "fast"}
+	d, err := NewDispatcher([]ocrs.ProviderConfig[[]byte, string]{
+		{Provider: slow, Workers: 1},
+		{Provider: fast, Workers: 1},
+	})
+	if err != nil {
+		t.Fatalf("NewDispatcher() error = %v", err)
+	}
+	defer d.Close()
+	defer close(slow.release)
+
+	// Keep calling until the slow provider holds one call.
+	deadline := time.Now().Add(5 * time.Second)
+	for slow.active.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("slow provider never took a call")
+		}
+		go func() { _, _ = d.Handle(context.Background(), []byte("occupy")) }()
+		time.Sleep(time.Millisecond)
+	}
+
+	for i := range 10 {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		got, err := d.Handle(ctx, []byte("doc"))
+		cancel()
+		if err != nil || got != "fast:doc" {
+			t.Fatalf("call %d = %q, %v; want served by the idle fast provider", i, got, err)
+		}
+	}
+}
+
+func TestLoadFollowsProviderCapacity(t *testing.T) {
+	wide := &fakeProvider{name: "wide", delay: 10 * time.Millisecond}
+	narrow := &fakeProvider{name: "narrow", delay: 10 * time.Millisecond}
+	d, err := NewDispatcher([]ocrs.ProviderConfig[[]byte, string]{
+		{Provider: wide, Workers: 4},
+		{Provider: narrow, Workers: 1},
+	})
+	if err != nil {
+		t.Fatalf("NewDispatcher() error = %v", err)
+	}
+	defer d.Close()
+
+	var wideCalls, narrowCalls atomic.Int32
+	var wg sync.WaitGroup
+	for range 40 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got, err := d.Handle(context.Background(), []byte("doc"))
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if got == "wide:doc" {
+				wideCalls.Add(1)
+			} else {
+				narrowCalls.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	// Four workers against one: round-robin would split 20/20.
+	if wideCalls.Load() < 2*narrowCalls.Load() {
+		t.Fatalf("wide/narrow calls = %d/%d, want load to follow worker count", wideCalls.Load(), narrowCalls.Load())
 	}
 }
