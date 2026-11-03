@@ -514,6 +514,55 @@ func TestAgentEmitsMemoryEvents(t *testing.T) {
 	}
 }
 
+func TestAgentMemorySaveOmitsToolTranscript(t *testing.T) {
+	memory := &mockMemoryProvider{}
+	llm := &mockLLM{responses: []*ports.ChatResponse{
+		{Content: "checking", ToolCalls: []ports.ToolCall{{ID: "call_1", Name: "lookup", Input: json.RawMessage(`{}`)}}},
+		{Content: "agent answer"},
+	}}
+	registry := tools.NewRegistry()
+	registry.Register(testAgentTool{
+		spec: tools.Spec{Name: "lookup", Permission: policy.PermissionRead},
+		run: func(ctx context.Context, input json.RawMessage, env tools.Env) (*tools.Result, error) {
+			return &tools.Result{ForLLM: "observation"}, nil
+		},
+	})
+	agent, err := NewAgent(WithLLM(llm), WithToolRegistry(registry), WithMemoryProvider(memory))
+	if err != nil {
+		t.Fatalf("NewAgent returned error: %v", err)
+	}
+
+	if _, err := agent.Run(context.Background(), RunRequest{SessionID: "session_1", Input: "hello"}); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	want := []ports.MemoryMessage{{Role: "user", Content: "hello"}, {Role: "assistant", Content: "agent answer"}}
+	if fmt.Sprint(memory.saved) != fmt.Sprint(want) {
+		t.Fatalf("saved = %#v, want %#v", memory.saved, want)
+	}
+}
+
+func TestAgentMemoryLoadSkipsStoredToolMessages(t *testing.T) {
+	memory := &mockMemoryProvider{loaded: []ports.MemoryMessage{
+		{Role: "user", Content: "earlier"},
+		{Role: "tool", Content: "orphaned observation"},
+		{Role: "assistant", Content: "earlier answer"},
+	}}
+	llm := &mockLLM{responses: []*ports.ChatResponse{{Content: "agent answer"}}}
+	agent, err := NewAgent(WithLLM(llm), WithMemoryProvider(memory))
+	if err != nil {
+		t.Fatalf("NewAgent returned error: %v", err)
+	}
+
+	if _, err := agent.Run(context.Background(), RunRequest{SessionID: "session_1", Input: "hello"}); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	for _, message := range llm.requests[0].Messages {
+		if message.Role == "tool" {
+			t.Fatalf("orphaned tool message sent to LLM: %#v", message)
+		}
+	}
+}
+
 func TestAgentEmitsToolEvents(t *testing.T) {
 	sink := &recordingEventSink{}
 	llm := &mockLLM{responses: []*ports.ChatResponse{
@@ -1010,34 +1059,6 @@ func TestAgentPassesPerCallMaxOutputTokensToLLM(t *testing.T) {
 	if len(llm.maxOutputTokens) != 1 || llm.maxOutputTokens[0] != 4096 {
 		t.Fatalf("LLM max output tokens = %+v, want [4096]", llm.maxOutputTokens)
 	}
-}
-
-func TestAgentFailsClosedWhenLLMDoesNotSupportChatOptions(t *testing.T) {
-	llm := &legacyOnlyLLM{}
-	agent, err := NewAgent(
-		WithLLM(llm),
-		WithMaxOutputTokens(4096),
-	)
-	if err != nil {
-		t.Fatalf("NewAgent returned error: %v", err)
-	}
-
-	_, err = agent.Run(context.Background(), RunRequest{Input: "hello"})
-	if !errors.Is(err, ErrMaxOutputTokensUnsupported) {
-		t.Fatalf("Run error = %v, want ErrMaxOutputTokensUnsupported", err)
-	}
-	if llm.calls != 0 {
-		t.Fatalf("legacy LLM calls = %d, want zero", llm.calls)
-	}
-}
-
-type legacyOnlyLLM struct {
-	calls int
-}
-
-func (l *legacyOnlyLLM) Chat(context.Context, ports.ChatRequest) (*ports.ChatResponse, error) {
-	l.calls++
-	return &ports.ChatResponse{Content: "unexpected"}, nil
 }
 
 func TestAgentRunDetailedReturnsExecutionSummaryOnBudgetExceeded(t *testing.T) {

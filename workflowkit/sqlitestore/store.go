@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/eruca/goagents/workflowkit"
@@ -21,24 +22,37 @@ type runQueryExecer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-const SchemaVersion = 2
+const SchemaVersion = 3
+
+// runColumns is the column list every query reads and writes, in scanRun order.
+const runColumns = `id, status, input_ref, output_ref, agent_run_id, audit_ref, error,
+	approval_ref, waiting_reason, current_step, completed_steps_json,
+	step_attempts_json, step_records_json, step_retries, next_attempt_at, metadata_json,
+	lease_owner, lease_until, created_at, updated_at`
 
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", dsn(path))
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(`PRAGMA busy_timeout = 5000`); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
 	store := &Store{db: db}
 	if err := store.migrate(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	return store, nil
+}
+
+// dsn sets per-connection options: wait on locks held by other processes
+// instead of failing, and take the write lock when a transaction begins so
+// read-then-write transactions cannot deadlock on lock upgrade.
+func dsn(path string) string {
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	return path + separator + "_pragma=busy_timeout(5000)&_txlock=immediate"
 }
 
 func (s *Store) Close() error {
@@ -62,12 +76,8 @@ func saveRun(ctx context.Context, db runQueryExecer, run workflowkit.WorkflowRun
 		return err
 	}
 	_, err = db.ExecContext(ctx, `
-INSERT INTO workflow_runs (
-	id, status, input_ref, output_ref, agent_run_id, audit_ref, error,
-	approval_ref, waiting_reason, current_step, completed_steps_json,
-	step_attempts_json, step_records_json, metadata_json, lease_owner, lease_until,
-	created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO workflow_runs (`+runColumns+`)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	status=excluded.status,
 	input_ref=excluded.input_ref,
@@ -81,6 +91,8 @@ ON CONFLICT(id) DO UPDATE SET
 	completed_steps_json=excluded.completed_steps_json,
 	step_attempts_json=excluded.step_attempts_json,
 	step_records_json=excluded.step_records_json,
+	step_retries=excluded.step_retries,
+	next_attempt_at=excluded.next_attempt_at,
 	metadata_json=excluded.metadata_json,
 	lease_owner=excluded.lease_owner,
 	lease_until=excluded.lease_until,
@@ -88,9 +100,24 @@ ON CONFLICT(id) DO UPDATE SET
 	updated_at=excluded.updated_at
 `, row.ID, row.Status, row.InputRef, row.OutputRef, row.AgentRunID, row.AuditRef, row.Error,
 		row.ApprovalRef, row.WaitingReason, row.CurrentStep, row.CompletedStepsJSON,
-		row.StepAttemptsJSON, row.StepRecordsJSON, row.MetadataJSON, row.LeaseOwner, row.LeaseUntil,
-		row.CreatedAt, row.UpdatedAt)
+		row.StepAttemptsJSON, row.StepRecordsJSON, row.StepRetries, dbTime(row.NextAttemptAt), row.MetadataJSON,
+		row.LeaseOwner, dbTime(row.LeaseUntil), dbTime(row.CreatedAt), dbTime(row.UpdatedAt))
 	return err
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanRun(scanner rowScanner) (workflowkit.WorkflowRun, error) {
+	row := runRow{}
+	if err := scanner.Scan(&row.ID, &row.Status, &row.InputRef, &row.OutputRef, &row.AgentRunID, &row.AuditRef, &row.Error,
+		&row.ApprovalRef, &row.WaitingReason, &row.CurrentStep, &row.CompletedStepsJSON,
+		&row.StepAttemptsJSON, &row.StepRecordsJSON, &row.StepRetries, scanTime(&row.NextAttemptAt), &row.MetadataJSON,
+		&row.LeaseOwner, scanTime(&row.LeaseUntil), scanTime(&row.CreatedAt), scanTime(&row.UpdatedAt)); err != nil {
+		return workflowkit.WorkflowRun{}, err
+	}
+	return decodeRun(row)
 }
 
 func (s *Store) Get(ctx context.Context, id string) (workflowkit.WorkflowRun, error) {
@@ -98,25 +125,11 @@ func (s *Store) Get(ctx context.Context, id string) (workflowkit.WorkflowRun, er
 }
 
 func getRun(ctx context.Context, db runQueryExecer, id string) (workflowkit.WorkflowRun, error) {
-	row := runRow{}
-	err := db.QueryRowContext(ctx, `
-SELECT id, status, input_ref, output_ref, agent_run_id, audit_ref, error,
-	approval_ref, waiting_reason, current_step, completed_steps_json,
-	step_attempts_json, step_records_json, metadata_json, lease_owner, lease_until,
-	created_at, updated_at
-FROM workflow_runs
-WHERE id = ?
-`, id).Scan(&row.ID, &row.Status, &row.InputRef, &row.OutputRef, &row.AgentRunID, &row.AuditRef, &row.Error,
-		&row.ApprovalRef, &row.WaitingReason, &row.CurrentStep, &row.CompletedStepsJSON,
-		&row.StepAttemptsJSON, &row.StepRecordsJSON, &row.MetadataJSON, &row.LeaseOwner, &row.LeaseUntil,
-		&row.CreatedAt, &row.UpdatedAt)
+	run, err := scanRun(db.QueryRowContext(ctx, `SELECT `+runColumns+` FROM workflow_runs WHERE id = ?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return workflowkit.WorkflowRun{}, workflowkit.ErrRunNotFound
 	}
-	if err != nil {
-		return workflowkit.WorkflowRun{}, err
-	}
-	return decodeRun(row)
+	return run, err
 }
 
 func (s *Store) Update(ctx context.Context, id string, mutate func(workflowkit.WorkflowRun) (workflowkit.WorkflowRun, error)) (workflowkit.WorkflowRun, error) {
@@ -162,28 +175,11 @@ func (s *Store) ListWorkflows(ctx context.Context, query workflowkit.WorkflowQue
 		order = "DESC"
 	}
 
-	var rows *sql.Rows
-	var err error
-	if query.Status == "" {
-		rows, err = s.db.QueryContext(ctx, fmt.Sprintf(`
-SELECT id, status, input_ref, output_ref, agent_run_id, audit_ref, error,
-	approval_ref, waiting_reason, current_step, completed_steps_json,
-	step_attempts_json, step_records_json, metadata_json, lease_owner, lease_until,
-	created_at, updated_at
-FROM workflow_runs
-ORDER BY created_at %s, id %s
-`, order, order))
-	} else {
-		rows, err = s.db.QueryContext(ctx, fmt.Sprintf(`
-SELECT id, status, input_ref, output_ref, agent_run_id, audit_ref, error,
-	approval_ref, waiting_reason, current_step, completed_steps_json,
-	step_attempts_json, step_records_json, metadata_json, lease_owner, lease_until,
-	created_at, updated_at
-FROM workflow_runs
-WHERE status = ?
-ORDER BY created_at %s, id %s
-`, order, order), string(query.Status))
+	where, args := "", []any{}
+	if query.Status != "" {
+		where, args = "WHERE status = ?", append(args, string(query.Status))
 	}
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`SELECT `+runColumns+` FROM workflow_runs %s ORDER BY created_at %s, id %s`, where, order, order), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -191,14 +187,7 @@ ORDER BY created_at %s, id %s
 
 	runs := []workflowkit.WorkflowRun{}
 	for rows.Next() {
-		row := runRow{}
-		if err := rows.Scan(&row.ID, &row.Status, &row.InputRef, &row.OutputRef, &row.AgentRunID, &row.AuditRef, &row.Error,
-			&row.ApprovalRef, &row.WaitingReason, &row.CurrentStep, &row.CompletedStepsJSON,
-			&row.StepAttemptsJSON, &row.StepRecordsJSON, &row.MetadataJSON, &row.LeaseOwner, &row.LeaseUntil,
-			&row.CreatedAt, &row.UpdatedAt); err != nil {
-			return nil, err
-		}
-		run, err := decodeRun(row)
+		run, err := scanRun(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -249,10 +238,11 @@ func (s *Store) ClaimRunnable(ctx context.Context, workerID string, lease time.D
 SELECT id
 FROM workflow_runs
 WHERE status = ?
+  AND next_attempt_at <= ?
   AND (lease_owner = '' OR lease_until <= ?)
 ORDER BY created_at ASC, id ASC
 LIMIT 1
-`, string(workflowkit.StatusPending), now).Scan(&id)
+`, string(workflowkit.StatusPending), dbTime(now), dbTime(now)).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return workflowkit.WorkflowRun{}, workflowkit.ErrNoRunnableWorkflow
 	}
@@ -266,7 +256,7 @@ SET lease_owner = ?, lease_until = ?, updated_at = ?
 WHERE id = ?
   AND status = ?
   AND (lease_owner = '' OR lease_until <= ?)
-`, workerID, leaseUntil, now, id, string(workflowkit.StatusPending), now)
+`, workerID, dbTime(leaseUntil), dbTime(now), id, string(workflowkit.StatusPending), dbTime(now))
 	if err != nil {
 		return workflowkit.WorkflowRun{}, err
 	}
@@ -301,7 +291,7 @@ SET lease_until = ?, updated_at = ?
 WHERE id = ?
   AND lease_owner = ?
   AND lease_until > ?
-`, leaseUntil, now, id, workerID, now)
+`, dbTime(leaseUntil), dbTime(now), id, workerID, dbTime(now))
 	if err != nil {
 		return workflowkit.WorkflowRun{}, err
 	}
@@ -328,10 +318,10 @@ func (s *Store) ReleaseLease(ctx context.Context, id string, workerID string) (w
 	now := time.Now().UTC()
 	result, err := s.db.ExecContext(ctx, `
 UPDATE workflow_runs
-SET lease_owner = '', lease_until = ?, updated_at = ?
+SET lease_owner = '', lease_until = 0, updated_at = ?
 WHERE id = ?
   AND lease_owner = ?
-`, time.Time{}, now, id, workerID)
+`, dbTime(now), id, workerID)
 	if err != nil {
 		return workflowkit.WorkflowRun{}, err
 	}
@@ -346,6 +336,62 @@ WHERE id = ?
 		return workflowkit.WorkflowRun{}, workflowkit.ErrWorkflowLeaseNotOwned
 	}
 	return s.Get(ctx, id)
+}
+
+func (s *Store) FailExpiredRunning(ctx context.Context, reason string) ([]workflowkit.WorkflowRun, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	now := time.Now().UTC()
+	rows, err := tx.QueryContext(ctx, `
+SELECT id
+FROM workflow_runs
+WHERE status = ?
+  AND lease_owner != ''
+  AND lease_until <= ?
+ORDER BY id ASC
+`, string(workflowkit.StatusRunning), dbTime(now))
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	failed := make([]workflowkit.WorkflowRun, 0, len(ids))
+	for _, id := range ids {
+		if _, err := tx.ExecContext(ctx, `
+UPDATE workflow_runs
+SET status = ?, error = ?, lease_owner = '', lease_until = 0, updated_at = ?
+WHERE id = ?
+`, string(workflowkit.StatusFailed), reason, dbTime(now), id); err != nil {
+			return nil, err
+		}
+		run, err := getRun(ctx, tx, id)
+		if err != nil {
+			return nil, err
+		}
+		failed = append(failed, run)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return failed, nil
 }
 
 func (s *Store) migrate(ctx context.Context) error {
@@ -377,18 +423,32 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
 	step_attempts_json TEXT NOT NULL DEFAULT '{}',
 	step_records_json TEXT NOT NULL DEFAULT '[]',
 	metadata_json TEXT NOT NULL DEFAULT '{}',
+	step_retries INTEGER NOT NULL DEFAULT 0,
+	next_attempt_at INTEGER NOT NULL DEFAULT 0,
 	lease_owner TEXT NOT NULL DEFAULT '',
-	lease_until TIMESTAMP NOT NULL DEFAULT '0001-01-01T00:00:00Z',
-	created_at TIMESTAMP NOT NULL,
-	updated_at TIMESTAMP NOT NULL
+	lease_until INTEGER NOT NULL DEFAULT 0,
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL
 )`, SchemaVersion)
 	if err != nil {
 		return err
 	}
-	if err := s.addColumnIfMissing(ctx, "lease_owner", "TEXT NOT NULL DEFAULT ''"); err != nil {
+	for _, column := range []struct{ name, definition string }{
+		{"lease_owner", "TEXT NOT NULL DEFAULT ''"},
+		{"lease_until", "INTEGER NOT NULL DEFAULT 0"},
+		{"step_retries", "INTEGER NOT NULL DEFAULT 0"},
+		{"next_attempt_at", "INTEGER NOT NULL DEFAULT 0"},
+	} {
+		if err := s.addColumnIfMissing(ctx, column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	if err := convertTextTimes(ctx, s.db, "workflow_runs", "lease_until", "created_at", "updated_at"); err != nil {
 		return err
 	}
-	return s.addColumnIfMissing(ctx, "lease_until", "TIMESTAMP NOT NULL DEFAULT '0001-01-01T00:00:00Z'")
+	// The worker claims the oldest pending run on every poll.
+	_, err = s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS workflow_runs_status_created ON workflow_runs (status, created_at, id)`)
+	return err
 }
 
 func (s *Store) addColumnIfMissing(ctx context.Context, name string, definition string) error {
@@ -432,6 +492,8 @@ type runRow struct {
 	CompletedStepsJSON string
 	StepAttemptsJSON   string
 	StepRecordsJSON    string
+	StepRetries        int
+	NextAttemptAt      time.Time
 	MetadataJSON       string
 	LeaseOwner         string
 	LeaseUntil         time.Time
@@ -470,6 +532,8 @@ func encodeRun(run workflowkit.WorkflowRun) (runRow, error) {
 		CompletedStepsJSON: completedSteps,
 		StepAttemptsJSON:   stepAttempts,
 		StepRecordsJSON:    stepRecords,
+		StepRetries:        run.StepRetries,
+		NextAttemptAt:      run.NextAttemptAt,
 		MetadataJSON:       metadata,
 		LeaseOwner:         run.LeaseOwner,
 		LeaseUntil:         run.LeaseUntil,
@@ -509,6 +573,8 @@ func decodeRun(row runRow) (workflowkit.WorkflowRun, error) {
 		CompletedSteps: completedSteps,
 		StepAttempts:   stepAttempts,
 		StepRecords:    stepRecords,
+		StepRetries:    row.StepRetries,
+		NextAttemptAt:  row.NextAttemptAt,
 		Metadata:       metadata,
 		LeaseOwner:     row.LeaseOwner,
 		LeaseUntil:     row.LeaseUntil,

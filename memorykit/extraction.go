@@ -26,7 +26,9 @@ type ExtractionRequest struct {
 	Scope                            Scope
 	Source                           Source
 	SourceAgentID, ExtractorID, Text string
-	Now                              time.Time
+	// Now is the extraction job's creation time, not the wall clock. It is
+	// stable across retries, so drafts that default to it replay idempotently.
+	Now time.Time
 }
 
 type CandidateExtractor interface {
@@ -174,7 +176,7 @@ func (w *ExtractionWorker) RunOnce(ctx context.Context) (bool, error) {
 	}
 	drafts, err := w.extractor.Extract(ctx, ExtractionRequest{
 		Scope: job.Scope, Source: job.Source, SourceAgentID: job.SourceAgentID,
-		ExtractorID: job.ExtractorID, Text: text, Now: claimNow,
+		ExtractorID: job.ExtractorID, Text: text, Now: job.CreatedAt,
 	})
 	if err = contextError(ctx, err); err != nil {
 		return true, w.fail(ctx, job, "candidate_extract_failed", err, claimNow)
@@ -183,22 +185,22 @@ func (w *ExtractionWorker) RunOnce(ctx context.Context) (bool, error) {
 		return true, w.fail(ctx, job, "candidate_validate_failed",
 			fmt.Errorf("%w: extracted candidate count exceeds limit", ErrInvalidMemory), claimNow)
 	}
-	jobNamespace, err := uuid.Parse(job.ID)
-	if err != nil {
-		return true, w.fail(ctx, job, "candidate_validate_failed", ErrInvalidMemory, claimNow)
-	}
-
-	for index, draft := range drafts {
+	written := make(map[string]struct{}, len(drafts))
+	for _, draft := range drafts {
 		if err := ValidateCandidateDraft(draft, w.limits); err != nil {
 			return true, w.fail(ctx, job, "candidate_validate_failed", err, claimNow)
 		}
 		if err := contextError(ctx, w.validateContent.ValidateMemoryContent(ctx, draft.Content)); err != nil {
 			return true, w.fail(ctx, job, "candidate_validate_failed", err, claimNow)
 		}
-		candidateID := uuid.NewSHA1(jobNamespace, []byte(fmt.Sprintf("candidate:%d", index))).String()
-		if err := ValidateMemoryID(candidateID); err != nil {
+		candidateID, err := ExtractionCandidateID(job.ID, draft)
+		if err != nil {
 			return true, w.fail(ctx, job, "candidate_validate_failed", err, claimNow)
 		}
+		if _, duplicate := written[candidateID]; duplicate {
+			continue
+		}
+		written[candidateID] = struct{}{}
 		request := CreateRequest{
 			ID: candidateID, Scope: job.Scope, Kind: draft.Kind, Key: draft.Key,
 			Status: StatusCandidate, Content: draft.Content,
@@ -206,7 +208,7 @@ func (w *ExtractionWorker) RunOnce(ctx context.Context) (bool, error) {
 			Importance: draft.Importance, Confidence: draft.Confidence,
 			SourceAgentID: job.SourceAgentID, Actor: "extractor:" + job.ExtractorID,
 			Reason:         "model-derived candidate",
-			IdempotencyKey: fmt.Sprintf("extraction:%s:%d", job.ID, index),
+			IdempotencyKey: "extraction:" + candidateID,
 			Sources:        []Source{job.Source}, Now: claimNow,
 		}
 		if err := ValidateCreateRequest(request, w.limits); err != nil {
@@ -217,6 +219,11 @@ func (w *ExtractionWorker) RunOnce(ctx context.Context) (bool, error) {
 			return true, w.failAt(ctx, job, "candidate_write_failed", leaseErr, writeNow)
 		}
 		created, err := w.memories.Create(ctx, request)
+		if errors.Is(err, ErrConflict) {
+			// An earlier attempt already captured this exact content, with
+			// different scores or validity from a non-deterministic extractor.
+			continue
+		}
 		if err = contextError(ctx, err); err != nil {
 			return true, w.fail(ctx, job, "candidate_write_failed", err, writeNow)
 		}
@@ -234,6 +241,22 @@ func (w *ExtractionWorker) RunOnce(ctx context.Context) (bool, error) {
 		return true, w.fail(ctx, job, "candidate_write_failed", err, completeNow)
 	}
 	return true, nil
+}
+
+// ExtractionCandidateID derives a candidate's ID from its job and content, so
+// a retry that extracts the same draft, in any position, replays the same
+// create instead of colliding with a different draft.
+func ExtractionCandidateID(jobID string, draft CandidateDraft) (string, error) {
+	namespace, err := uuid.Parse(jobID)
+	if err != nil {
+		return "", fmt.Errorf("%w: invalid extraction job ID", ErrInvalidMemory)
+	}
+	identity := string(draft.Kind) + "\x00" + draft.Key + "\x00" + draft.Content
+	id := uuid.NewSHA1(namespace, []byte(identity)).String()
+	if err := ValidateMemoryID(id); err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
 func (w *ExtractionWorker) fail(

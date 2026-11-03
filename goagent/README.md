@@ -4,17 +4,14 @@ This framework is a small Go library for building ReAct-style agents with typed 
 
 ## Quickstart
 
-Run the full local verification suite:
+Run the tests and the basic example from the repository root:
 
 ```bash
-make verify
+go test -race ./goagent/...
+go run ./goagent/examples/basic
 ```
 
-Run the basic example:
-
-```bash
-go run ./examples/basic
-```
+`scripts/verify-all.sh` runs every goagent example as a smoke test.
 
 ## Learning Path
 
@@ -26,7 +23,7 @@ go run ./examples/basic
 - `examples/prompt` shows compact prompt assembly order.
 - `examples/openai-compatible` shows a real-provider run against an OpenAI-compatible service.
 - `examples/events` shows runtime observability with `WithEventSink`.
-- `examples/stream` shows in-process lifecycle updates with `Agent.Stream`.
+- `examples/stream` shows in-process lifecycle updates and streamed model output with `Agent.Stream`.
 - `examples/stream-sse` shows a host-owned SSE adapter around `Agent.Stream`.
 - `examples/audit-log` shows a host-owned JSONL audit adapter around `Agent.Stream`.
 - `examples/approval` shows host-controlled tool approval with stream events.
@@ -74,6 +71,8 @@ Common framework-owned abort reasons are classifiable with `errors.Is`:
 - `tools.ErrToolExecutionFailed`
 - `tools.ErrToolTimeout`
 
+`tools.ErrToolNotFound` and `tools.ErrToolInputInvalid` are returned by direct `tools.Executor` use; inside an `Agent` run those model mistakes become recoverable observations instead.
+
 Provider-specific failures remain host-owned errors.
 
 ## Implementing A Module
@@ -106,12 +105,11 @@ The core depends only on `ports.LLMClient`. Real model clients live outside `age
 
 `extensions/providers/openaiapi` implements `ports.LLMClient` for OpenAI-compatible Chat Completions services. It maps framework messages, tool specs, tool call IDs, and tool outputs to the compatible request/response shape while keeping provider-specific code out of the core.
 
-`openaiapi.New` preserves the v0.1.0 behavior for existing consumers. Use
-`openaiapi.NewWithLimits` to opt into explicit request-byte, response-byte, and
-maximum-output-token bounds. Pair it with `agentcore.WithMaxOutputTokens` (or
-`ChatWithMaxOutputTokens` at the lower-level API) so the Provider receives the
-per-call generation limit. Zero-valued limits are disabled; the library does
-not hard-code application-specific budgets.
+`openaiapi.Config.Limits` bounds request bytes, response bytes, and the
+maximum output tokens a call may ask for. `ports.ChatRequest.MaxOutputTokens`
+sets the per-call generation limit; `agentcore.WithMaxOutputTokens` fills it for
+every model call of an agent. Zero values disable a bound; the library does not
+hard-code application-specific budgets.
 
 See `examples/openai-compatible` for a real-provider example. The example requires `OPENAI_COMPAT_BASE_URL` and `OPENAI_COMPAT_MODEL`; `OPENAI_COMPAT_API_KEY` is optional. Without the required values it prints a skip message and exits successfully.
 
@@ -163,6 +161,8 @@ result, err := stream.Wait()
 `Stream` uses `RunDetailed` semantics for terminal results. On abort, `Wait` returns the partial result and error. Existing sinks configured with `WithEventSink` still receive runtime events.
 Call `stream.DiscardEvents()` if the host stops reading `Events`; this releases the event relay without canceling the Agent run or the configured event sink.
 
+When the LLM implements `ports.StreamingLLMClient`, the stream also carries model output as it is generated: events with a non-nil `Delta` hold a `ModelDelta` whose `Iteration` identifies the model call. Deltas go only to the stream, never to the configured event sink, so durable audit storage does not record every token. `Run` and `RunDetailed` always use `Chat`. `extensions/providers/openaiapi` streams over server-sent events.
+
 The stream is in-process and transport-neutral; HTTP, SSE, WebSocket, and durable audit storage belong in the host application.
 
 ## Prompt Assembly
@@ -176,7 +176,7 @@ Prompt blocks are model-facing instructions. They are not tools, memory, policy,
 - Non-empty block content is joined with newlines.
 - The compiled prompt is sent as the first `system` message when non-empty.
 - Memory messages load before current user input.
-- Tool observations are appended before the next LLM turn unless the tool result is `Silent`.
+- Tool observations are appended before the next LLM turn; a `Silent` result is replaced by a contentless acknowledgement so every tool call keeps its reply.
 
 Do not put secrets or raw sensitive data into prompt blocks unless the host intentionally wants that data in model context.
 
@@ -351,7 +351,7 @@ Tool results keep model-visible and user-visible output separate:
 - `ForUser` is available for UI surfaces.
 - `Ref` can point to a host-owned artifact such as a stored query result, OCR output, or generated file.
 - `Metadata` can carry small structured facts about the result, such as counts or MIME type.
-- `Silent` suppresses observation messages.
+- `Silent` replaces the observation content with a short acknowledgement; the tool message itself is kept because providers require a reply to every tool call.
 - `IsError` marks recoverable tool errors so the agent can ask the LLM to correct tool arguments.
 
 ## Writing Tools
@@ -364,7 +364,8 @@ A tool is a host-owned typed action. Keep each tool focused on one operation and
 - `Schema.Validate` can add host-specific validation after JSON Schema validation succeeds.
 - `Timeout` bounds tool and middleware execution.
 - Return `ForLLM` for compact model observations, `ForUser` for host/UI output, and `Ref` when the full result lives in host storage.
-- Use `Silent` when a successful tool result should not be appended to model context.
+- Use `Silent` when a successful tool result's content should not be appended to model context.
 - Use `IsError` for recoverable domain errors the model can correct; return a Go error for executor failures that should abort the run.
+- Calls to an unregistered tool, or with arguments that fail `Schema` validation, never reach policy, approval, or execution. The agent answers them with a recoverable error observation and emits `tool.rejected`, so the model can correct itself on the next turn. A tool whose own JSON Schema is invalid still aborts the run with `tools.ErrToolSchemaInvalid`.
 
 See `examples/tools` for a minimal tool-authoring example.

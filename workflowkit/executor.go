@@ -22,6 +22,19 @@ type StepResult struct {
 	Metadata      map[string]any
 }
 
+// Executor runs workflow steps in order and persists progress after each one.
+// Every write is guarded: it only applies while the stored run is still
+// running under the executor's lease owner, so a cancelled, failed, or
+// reclaimed run returns ErrRunPreempted instead of being overwritten.
+//
+// With a RetryPolicy, a run claimed from a queue does not hold its worker
+// during a backoff: Run returns it in StatusPending with NextAttemptAt set,
+// the worker releases its lease as usual, and ClaimRunnable hands it out
+// again once the retry is due.
+//
+// If ctx is cancelled, the executor stops without recording a terminal state;
+// the caller owns finalization. Queued runs left running this way are failed
+// by QueueRecoveryStore.FailExpiredRunning once their lease expires.
 type Executor struct {
 	store       Store
 	steps       []Step
@@ -59,43 +72,53 @@ func (e *Executor) Run(ctx context.Context, run WorkflowRun) (WorkflowRun, error
 	if run.Status != StatusPending {
 		return run, InvalidTransitionError{From: run.Status, To: StatusRunning, Op: "run"}
 	}
-	run.Status = StatusRunning
-	if err := e.save(ctx, run); err != nil {
-		return run, err
+	started, err := e.start(ctx, run)
+	if err != nil {
+		return started, err
 	}
-	return e.runFrom(ctx, run)
+	return e.runFrom(ctx, started)
+}
+
+// start moves a pending run to running. A stored run must still be pending
+// and held by the same lease owner, so two workers cannot both start it.
+func (e *Executor) start(ctx context.Context, run WorkflowRun) (WorkflowRun, error) {
+	run.Status = StatusRunning
+	run.NextAttemptAt = time.Time{}
+	if e.store == nil {
+		return run, nil
+	}
+	observed := run
+	started, err := e.store.Update(ctx, run.ID, func(current WorkflowRun) (WorkflowRun, error) {
+		observed = current
+		if current.Status != StatusPending {
+			return current, InvalidTransitionError{From: current.Status, To: StatusRunning, Op: "run"}
+		}
+		if current.LeaseOwner != run.LeaseOwner {
+			return current, runPreemptedError(current)
+		}
+		run.LeaseOwner = current.LeaseOwner
+		run.LeaseUntil = current.LeaseUntil
+		run.CreatedAt = current.CreatedAt
+		return run, nil
+	})
+	if errors.Is(err, ErrRunNotFound) {
+		if err := e.store.Save(ctx, run); err != nil {
+			return run, err
+		}
+		return run, nil
+	}
+	if err != nil {
+		return observed, err
+	}
+	return started, nil
 }
 
 func (e *Executor) Continue(ctx context.Context, id string) (WorkflowRun, error) {
-	if e.store == nil {
-		return WorkflowRun{}, ErrRunNotFound
-	}
-	run, err := e.store.Get(ctx, id)
-	if err != nil {
-		return WorkflowRun{}, err
-	}
-	if run.Status != StatusWaitingApproval {
-		return run, InvalidTransitionError{From: run.Status, To: StatusRunning, Op: "continue"}
-	}
-	run.Status = StatusRunning
-	if err := e.save(ctx, run); err != nil {
-		return run, err
-	}
-	return e.runFrom(ctx, run)
+	return e.resumeWaiting(ctx, id, "continue", func(*WorkflowRun) {})
 }
 
 func (e *Executor) Approve(ctx context.Context, id string, approval Approval) (WorkflowRun, error) {
-	if e.store == nil {
-		return WorkflowRun{}, ErrRunNotFound
-	}
-	current, err := e.store.Get(ctx, id)
-	if err != nil {
-		return WorkflowRun{}, err
-	}
-	if current.Status != StatusWaitingApproval {
-		return current, InvalidTransitionError{From: current.Status, To: StatusRunning, Op: "approve"}
-	}
-	updated, err := e.store.Update(ctx, id, func(run WorkflowRun) (WorkflowRun, error) {
+	return e.resumeWaiting(ctx, id, "approve", func(run *WorkflowRun) {
 		if approval.AuditRef != "" {
 			run.AuditRef = approval.AuditRef
 		}
@@ -107,29 +130,49 @@ func (e *Executor) Approve(ctx context.Context, id string, approval Approval) (W
 				run.Metadata[key] = value
 			}
 		}
-		return run, nil
 	})
-	if err != nil {
-		return updated, err
-	}
-	return e.Continue(ctx, id)
 }
 
+// resumeWaiting checks and leaves waiting_approval in one store update, so
+// concurrent approvals cannot both run the remaining steps.
+func (e *Executor) resumeWaiting(ctx context.Context, id string, op string, apply func(*WorkflowRun)) (WorkflowRun, error) {
+	if e.store == nil {
+		return WorkflowRun{}, ErrRunNotFound
+	}
+	var observed WorkflowRun
+	run, err := e.store.Update(ctx, id, func(current WorkflowRun) (WorkflowRun, error) {
+		observed = current
+		if current.Status != StatusWaitingApproval {
+			return current, InvalidTransitionError{From: current.Status, To: StatusRunning, Op: op}
+		}
+		apply(&current)
+		current.Status = StatusRunning
+		return current, nil
+	})
+	if err != nil {
+		return observed, err
+	}
+	return e.runFrom(ctx, run)
+}
+
+// Cancel marks a non-terminal run cancelled. An executor still running it
+// stops at its next state write instead of overwriting the cancellation.
 func (e *Executor) Cancel(ctx context.Context, id string, reason string) (WorkflowRun, error) {
 	if e.store == nil {
 		return WorkflowRun{}, ErrRunNotFound
 	}
-	run, err := e.store.Get(ctx, id)
+	var observed WorkflowRun
+	run, err := e.store.Update(ctx, id, func(current WorkflowRun) (WorkflowRun, error) {
+		observed = current
+		if isTerminal(current.Status) {
+			return current, InvalidTransitionError{From: current.Status, To: StatusCancelled, Op: "cancel"}
+		}
+		current.Status = StatusCancelled
+		current.Error = reason
+		return current, nil
+	})
 	if err != nil {
-		return WorkflowRun{}, err
-	}
-	if isTerminal(run.Status) {
-		return run, InvalidTransitionError{From: run.Status, To: StatusCancelled, Op: "cancel"}
-	}
-	run.Status = StatusCancelled
-	run.Error = reason
-	if err := e.save(ctx, run); err != nil {
-		return run, err
+		return observed, err
 	}
 	return run, nil
 }
@@ -143,14 +186,24 @@ func (e *Executor) runFrom(ctx context.Context, run WorkflowRun) (WorkflowRun, e
 		if err := e.save(ctx, run); err != nil {
 			return run, err
 		}
-		result, err := e.runStepWithRetry(ctx, step, &run)
+		result, yielded, err := e.runStepWithRetry(ctx, step, &run)
+		if yielded {
+			return run, nil
+		}
 		if err != nil {
+			if errors.Is(err, ErrRunPreempted) {
+				return run, err
+			}
 			// Failed steps may still return diagnostic references such as an
 			// AgentRunID. Preserve them before persisting the terminal failure.
 			applyStepResult(&run, result)
 			run.Status = StatusFailed
 			run.Error = err.Error()
-			_ = e.save(ctx, run)
+			// After cancellation the caller owns finalization, so a save
+			// rejected by the cancelled context is expected and not reported.
+			if saveErr := e.save(ctx, run); saveErr != nil && ctx.Err() == nil {
+				return run, errors.Join(err, saveErr)
+			}
 			return run, err
 		}
 		applyStepResult(&run, result)
@@ -172,15 +225,16 @@ func (e *Executor) runFrom(ctx context.Context, run WorkflowRun) (WorkflowRun, e
 	return run, nil
 }
 
-func (e *Executor) runStepWithRetry(ctx context.Context, step Step, run *WorkflowRun) (StepResult, error) {
-	maxAttempts := e.retryPolicy.MaxAttempts
-	if maxAttempts <= 0 {
-		maxAttempts = 1
-	}
-	var lastErr error
-	var lastResult StepResult
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
+// runStepWithRetry runs step until it succeeds, fails permanently, or uses up
+// the retry budget. Before a backed-off retry, a run claimed from a queue (it
+// has a lease owner) yields instead of sleeping: it goes back to pending with
+// NextAttemptAt set and yielded is true, so the worker can release its lease
+// and serve other runs until the retry is due. Unleased runs wait in-process.
+func (e *Executor) runStepWithRetry(ctx context.Context, step Step, run *WorkflowRun) (result StepResult, yielded bool, err error) {
+	maxAttempts := max(e.retryPolicy.MaxAttempts, 1)
+	for {
 		recordStepAttempt(run, step.Name())
+		run.NextAttemptAt = time.Time{}
 		record := StepRecord{
 			Name:      step.Name(),
 			Status:    StatusRunning,
@@ -188,7 +242,7 @@ func (e *Executor) runStepWithRetry(ctx context.Context, step Step, run *Workflo
 			StartedAt: time.Now(),
 		}
 		if err := e.save(ctx, *run); err != nil {
-			return StepResult{}, err
+			return StepResult{}, false, err
 		}
 		result, err := step.Run(ctx, cloneRun(*run))
 		if err == nil {
@@ -197,38 +251,49 @@ func (e *Executor) runStepWithRetry(ctx context.Context, step Step, run *Workflo
 		if err == nil {
 			finishStepRecord(&record, result, "")
 			run.StepRecords = append(run.StepRecords, record)
+			run.StepRetries = 0
 			if err := e.save(ctx, *run); err != nil {
-				return StepResult{}, err
+				return StepResult{}, false, err
 			}
-			return result, nil
+			return result, false, nil
 		}
-		lastErr = err
 		failedResult := result
 		failedResult.Status = StatusFailed
 		failedResult.Error = err.Error()
-		lastResult = failedResult
 		finishStepRecord(&record, failedResult, err.Error())
 		run.StepRecords = append(run.StepRecords, record)
+
+		retryable := IsTransient(err) && !errors.Is(err, ErrInvalidStatus) && run.StepRetries+1 < maxAttempts
+		if !retryable {
+			run.StepRetries = 0
+			if err := e.save(ctx, *run); err != nil {
+				return StepResult{}, false, err
+			}
+			return failedResult, false, err
+		}
+		run.StepRetries++
+		delay := e.retryPolicy.Backoff(run.StepRetries)
+		if run.LeaseOwner != "" && delay > 0 {
+			run.Status = StatusPending
+			run.NextAttemptAt = time.Now().Add(delay)
+			if err := e.save(ctx, *run); err != nil {
+				return StepResult{}, false, err
+			}
+			return StepResult{}, true, nil
+		}
 		if err := e.save(ctx, *run); err != nil {
-			return StepResult{}, err
+			return StepResult{}, false, err
 		}
-		if errors.Is(err, ErrInvalidStatus) {
-			return failedResult, err
-		}
-		if !IsTransient(err) || attempt == maxAttempts {
-			return failedResult, err
-		}
-		if e.retryPolicy.Delay > 0 {
-			timer := time.NewTimer(e.retryPolicy.Delay)
+		if delay > 0 {
+			timer := time.NewTimer(delay)
 			select {
 			case <-ctx.Done():
 				timer.Stop()
-				return StepResult{}, ctx.Err()
+				return StepResult{}, false, ctx.Err()
 			case <-timer.C:
 			}
 		}
 	}
-	return lastResult, lastErr
 }
 
 func finishStepRecord(record *StepRecord, result StepResult, err string) {
@@ -261,11 +326,23 @@ func validateStepResult(result StepResult) error {
 	return nil
 }
 
+// save writes executor progress only while the stored run is still running
+// under the same lease owner. Lease fields are kept from the store because
+// heartbeats extend them independently of the executor's copy.
 func (e *Executor) save(ctx context.Context, run WorkflowRun) error {
 	if e.store == nil {
 		return nil
 	}
-	return e.store.Save(ctx, run)
+	_, err := e.store.Update(ctx, run.ID, func(current WorkflowRun) (WorkflowRun, error) {
+		if current.Status != StatusRunning || current.LeaseOwner != run.LeaseOwner {
+			return current, runPreemptedError(current)
+		}
+		run.LeaseOwner = current.LeaseOwner
+		run.LeaseUntil = current.LeaseUntil
+		run.CreatedAt = current.CreatedAt
+		return run, nil
+	})
+	return err
 }
 
 func applyStepResult(run *WorkflowRun, result StepResult) {

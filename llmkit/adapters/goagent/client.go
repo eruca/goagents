@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/eruca/goagents/goagent/ports"
-	"github.com/eruca/goagents/llmkit/llmkit"
+	"github.com/eruca/goagents/llmkit"
 )
 
-var _ ports.LLMClient = (*Client)(nil)
+var _ ports.StreamingLLMClient = (*Client)(nil)
 
 const providerOutcomeCleanupTimeout = 2 * time.Second
 
@@ -23,20 +23,16 @@ type ProviderClient interface {
 	Chat(context.Context, ports.ChatRequest) (*ports.ChatResponse, error)
 }
 
-// ProviderClientWithMaxOutputTokens 是显式生成上限使用的增量 Provider 能力。
-type ProviderClientWithMaxOutputTokens interface {
-	ChatWithMaxOutputTokens(context.Context, ports.ChatRequest, int) (*ports.ChatResponse, error)
-}
-
 // ProviderRequestDigester 暴露 Provider 实际发送的请求 body 摘要；
 // Provider 不支持时，pre-dispatch hook 必须 fail closed。
 type ProviderRequestDigester interface {
 	ProviderRequestSHA256(ports.ChatRequest) ([sha256.Size]byte, error)
 }
 
-// ProviderRequestDigesterWithMaxOutputTokens 计算限额 Provider 请求的精确摘要。
-type ProviderRequestDigesterWithMaxOutputTokens interface {
-	ProviderRequestSHA256WithMaxOutputTokens(ports.ChatRequest, int) ([sha256.Size]byte, error)
+// ProviderStreamRequestDigester is ProviderRequestDigester for the body a
+// streaming provider's ChatStream sends.
+type ProviderStreamRequestDigester interface {
+	ProviderStreamRequestSHA256(ports.ChatRequest) ([sha256.Size]byte, error)
 }
 
 // ProfileProvider supplies task routing metadata for a goagent request.
@@ -88,32 +84,18 @@ type PreDispatchConfig struct {
 	Hook             PreDispatchHook
 }
 
-// FallbackPolicy controls provider fallback after route-level failures.
+// FallbackPolicy controls which provider failures move on to the next
+// candidate.
 type FallbackPolicy struct {
+	// MaxAttempts caps provider attempts per request; <= 0 tries every
+	// remaining eligible candidate.
 	MaxAttempts int
-}
-
-// RuntimeOption 在不改变已发布 Config 或 FallbackPolicy 形状的前提下，
-// 配置新的 fail-closed runtime 路径。
-type RuntimeOption func(*runtimeOptions)
-
-type runtimeOptions struct {
-	preDispatch         PreDispatchConfig
-	retryableErrorClass []llmkit.ErrorClass
-}
-
-// WithPreDispatch 启用类型化的 Host claim 边界。
-func WithPreDispatch(config PreDispatchConfig) RuntimeOption {
-	return func(options *runtimeOptions) {
-		options.preDispatch = config
-	}
-}
-
-// WithRetryableErrorClasses 显式允许可安全 fallback 的 pre-dispatch 类别。
-func WithRetryableErrorClasses(classes ...llmkit.ErrorClass) RuntimeOption {
-	return func(options *runtimeOptions) {
-		options.retryableErrorClass = append([]llmkit.ErrorClass(nil), classes...)
-	}
+	// FailClosed restricts fallback to failures the provider proved happened
+	// before dispatch and whose class is in RetryableErrorClasses, so a request
+	// that may have reached a provider is never sent to a second one. Without
+	// it, any provider failure falls back.
+	FailClosed            bool
+	RetryableErrorClasses []llmkit.ErrorClass
 }
 
 // ProviderDispatchStatus 让 Provider 证明错误发生在出站前；
@@ -136,6 +118,9 @@ type Config struct {
 	HealthStore           llmkit.HealthStore
 	FallbackPolicy        FallbackPolicy
 	ErrorClassifier       ErrorClassifier
+	// PreDispatch installs a host claim boundary before each provider call.
+	// It implies FallbackPolicy.FailClosed.
+	PreDispatch PreDispatchConfig
 }
 
 // Client implements goagent's LLMClient by routing to a provider client.
@@ -152,35 +137,14 @@ type Client struct {
 	healthStore           llmkit.HealthStore
 	preDispatchMetadata   PreDispatchMetadataProvider
 	preDispatchHook       PreDispatchHook
-	fallbackPolicy        FallbackPolicy
-	strictFallback        bool
+	maxAttempts           int
+	failClosed            bool
 	retryableErrorClass   []llmkit.ErrorClass
 	errorClassifier       ErrorClassifier
 }
 
 // NewClient creates a goagent LLMClient adapter.
 func NewClient(config Config) *Client {
-	return newClient(config, runtimeOptions{}, false)
-}
-
-// NewClientWithPreDispatch 创建带类型化 pre-dispatch hook 的 adapter。
-func NewClientWithPreDispatch(config Config, preDispatch PreDispatchConfig) *Client {
-	return NewRuntimeClient(config, WithPreDispatch(preDispatch))
-}
-
-// NewRuntimeClient 创建 fail-closed runtime 路径；只有显式允许且已证明未 dispatch 的
-// 错误类别才能触发 fallback。
-func NewRuntimeClient(config Config, options ...RuntimeOption) *Client {
-	runtime := runtimeOptions{}
-	for _, option := range options {
-		if option != nil {
-			option(&runtime)
-		}
-	}
-	return newClient(config, runtime, true)
-}
-
-func newClient(config Config, runtime runtimeOptions, strictFallback bool) *Client {
 	providers := make(map[string]ProviderClient, len(config.Providers))
 	for alias, provider := range config.Providers {
 		providers[alias] = provider
@@ -204,11 +168,11 @@ func newClient(config Config, runtime runtimeOptions, strictFallback bool) *Clie
 		modelStats:            config.ModelStats,
 		modelStatsProvider:    config.ModelStatsProvider,
 		healthStore:           config.HealthStore,
-		preDispatchMetadata:   runtime.preDispatch.MetadataProvider,
-		preDispatchHook:       runtime.preDispatch.Hook,
-		fallbackPolicy:        config.FallbackPolicy,
-		strictFallback:        strictFallback,
-		retryableErrorClass:   append([]llmkit.ErrorClass(nil), runtime.retryableErrorClass...),
+		preDispatchMetadata:   config.PreDispatch.MetadataProvider,
+		preDispatchHook:       config.PreDispatch.Hook,
+		maxAttempts:           config.FallbackPolicy.MaxAttempts,
+		failClosed:            config.FallbackPolicy.FailClosed || config.PreDispatch.Hook != nil,
+		retryableErrorClass:   slices.Clone(config.FallbackPolicy.RetryableErrorClasses),
 		errorClassifier:       errorClassifier,
 	}
 }
@@ -216,16 +180,18 @@ func newClient(config Config, runtime runtimeOptions, strictFallback bool) *Clie
 // Chat selects a route, records the route trace, and delegates to the selected
 // provider client.
 func (c *Client) Chat(ctx context.Context, req ports.ChatRequest) (*ports.ChatResponse, error) {
-	return c.chat(ctx, req, 0)
+	return c.route(ctx, req, nil)
 }
 
-// ChatWithMaxOutputTokens 在保持 ChatRequest v0.1.0 形状的同时路由限额请求，
-// 并要求 Provider 明确支持该能力。
-func (c *Client) ChatWithMaxOutputTokens(ctx context.Context, req ports.ChatRequest, maxOutputTokens int) (*ports.ChatResponse, error) {
-	return c.chat(ctx, req, maxOutputTokens)
+// ChatStream routes like Chat and delivers the selected provider's output to
+// onDelta: streamed when the provider implements ports.StreamingLLMClient,
+// otherwise as one delta of the complete response. An attempt that already
+// delivered output never falls back, so the caller never sees two answers.
+func (c *Client) ChatStream(ctx context.Context, req ports.ChatRequest, onDelta func(ports.ChatDelta) error) (*ports.ChatResponse, error) {
+	return c.route(ctx, req, onDelta)
 }
 
-func (c *Client) chat(ctx context.Context, req ports.ChatRequest, maxOutputTokens int) (*ports.ChatResponse, error) {
+func (c *Client) route(ctx context.Context, req ports.ChatRequest, onDelta func(ports.ChatDelta) error) (*ports.ChatResponse, error) {
 	profile := llmkit.DefaultTaskProfile()
 	if c.profileProvider != nil {
 		profile = c.profileProvider(ctx, req)
@@ -239,8 +205,8 @@ func (c *Client) chat(ctx context.Context, req ports.ChatRequest, maxOutputToken
 	var routeMetadata RouteMetadata
 	routeMetadataLoaded := false
 	lastProviderCallIndex := 0
-	maxAttempts := c.maxAttempts(len(candidates))
-	for attemptOffset := 0; len(candidates) > 0; attemptOffset++ {
+	maxAttempts := c.attemptLimit(len(candidates))
+	for attemptOffset := 0; len(candidates) > 0; {
 		if maxAttempts > 0 && attemptOffset >= maxAttempts {
 			break
 		}
@@ -251,76 +217,39 @@ func (c *Client) chat(ctx context.Context, req ports.ChatRequest, maxOutputToken
 				failures,
 			)
 		}
-
-		var trace llmkit.RouteTrace
-		if c.recorder != nil || c.preDispatchHook != nil {
-			if !routeMetadataLoaded {
-				routeMetadata, err = c.loadRouteMetadata(ctx, req)
-				if err != nil {
-					return nil, newRuntimeError(ErrorStagePreCall, llmkit.ErrorClassConfiguration, false, err)
-				}
-				routeMetadataLoaded = true
-			}
-			trace = c.routeTrace(profile, decision, routeMetadata, attemptOffset)
-			if c.recorder != nil {
-				if err := c.recorder.RecordRoute(ctx, trace); err != nil {
-					return nil, newRuntimeError(ErrorStagePreCall, c.errorClassifier(err), false, err)
-				}
-			}
-		}
-
 		provider, ok := c.providers[decision.SelectedAlias]
 		if !ok || provider == nil {
 			err := fmt.Errorf("missing provider client for selected model alias %q", decision.SelectedAlias)
 			return nil, newRuntimeError(ErrorStageConfig, llmkit.ErrorClassConfiguration, false, err)
-		} else {
-			if maxOutputTokens != 0 {
-				if _, ok := provider.(ProviderClientWithMaxOutputTokens); !ok {
-					err := fmt.Errorf("provider max output tokens capability is required")
-					return nil, newRuntimeError(ErrorStageConfig, llmkit.ErrorClassConfiguration, false, err)
-				}
-			}
-			if c.preDispatchHook != nil {
-				// claim 未明确成功前不能开始 health、调用 Provider 或进入 fallback。
-				providerCallIndex, err := c.runPreDispatchHook(ctx, req, maxOutputTokens, provider, trace, lastProviderCallIndex)
-				if err != nil {
-					return nil, err
-				}
-				lastProviderCallIndex = providerCallIndex
-			}
-			if c.healthStore != nil {
-				if err := c.healthStore.Begin(ctx, decision.Selected); err != nil {
+		}
+		if c.healthStore != nil {
+			if err := c.healthStore.Acquire(ctx, decision.Selected); err != nil {
+				if !errors.Is(err, llmkit.ErrProviderBusy) {
 					return nil, newRuntimeError(ErrorStagePreCall, c.errorClassifier(err), false, err)
 				}
-			}
-			resp, providerErr := callProvider(ctx, provider, req, maxOutputTokens)
-			if requestErr := ctx.Err(); requestErr != nil {
-				// 取消优先于晚到 Provider 结果，完整响应不得继续向上返回。
-				resp = nil
-				providerErr = requestErr
-			}
-			if providerErr == nil {
-				if err := c.recordOutcomeAfterCall(ctx, profile, decision, trace, resp, nil); err != nil {
-					return nil, newRuntimeError(ErrorStagePostCall, llmkit.ErrorClassPostCall, true, err)
-				}
-				return resp, nil
-			}
-			if err := c.recordOutcomeAfterCall(ctx, profile, decision, trace, nil, providerErr); err != nil {
-				return nil, newRuntimeError(ErrorStagePostCall, llmkit.ErrorClassPostCall, true, err)
-			}
-			runtimeErr := newRuntimeError(
-				ErrorStageProvider,
-				c.errorClassifier(providerErr),
-				providerWasDispatched(providerErr),
-				providerErr,
-			)
-			failures = append(failures, runtimeErr)
-			if ctx.Err() != nil || !c.allowsFallback(runtimeErr) {
-				return nil, joinRouteErrors(runtimeErr, failures[:len(failures)-1])
+				// Another request took the last slot or the probe since the
+				// snapshot: nothing was sent, so try the next candidate without
+				// spending an attempt.
+				failures = append(failures, newRuntimeError(ErrorStagePreCall, llmkit.ErrorClassProviderBusy, false, err))
+				candidates = removeSelectedCandidate(candidates, decision.Selected)
+				continue
 			}
 		}
 
+		resp, delivered, err := c.attempt(ctx, req, onDelta, profile, decision, provider, attemptOffset, &routeMetadata, &routeMetadataLoaded, &lastProviderCallIndex)
+		if err == nil {
+			return resp, nil
+		}
+		var runtimeErr *RuntimeError
+		if !errors.As(err, &runtimeErr) || runtimeErr.Stage != ErrorStageProvider {
+			return nil, err
+		}
+		failures = append(failures, runtimeErr)
+		if ctx.Err() != nil || delivered || !c.allowsFallback(runtimeErr) {
+			return nil, joinRouteErrors(runtimeErr, failures[:len(failures)-1])
+		}
 		candidates = removeSelectedCandidate(candidates, decision.Selected)
+		attemptOffset++
 	}
 
 	if len(failures) > 0 {
@@ -335,14 +264,97 @@ func (c *Client) chat(ctx context.Context, req ports.ChatRequest, maxOutputToken
 	)
 }
 
-func (c *Client) recordOutcomeAfterCall(requestCtx context.Context, profile llmkit.TaskProfile, decision llmkit.RouteDecision, trace llmkit.RouteTrace, resp *ports.ChatResponse, providerErr error) error {
+// attempt makes one admitted provider call. It owns the health slot
+// acquired for it: the slot is closed by the outcome once the provider was
+// called, or released if the attempt stops before that.
+func (c *Client) attempt(ctx context.Context, req ports.ChatRequest, onDelta func(ports.ChatDelta) error, profile llmkit.TaskProfile, decision llmkit.RouteDecision, provider ProviderClient, attemptOffset int, routeMetadata *RouteMetadata, routeMetadataLoaded *bool, lastProviderCallIndex *int) (*ports.ChatResponse, bool, error) {
+	called := false
+	defer func() {
+		if !called && c.healthStore != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), providerOutcomeCleanupTimeout)
+			defer cancel()
+			_ = c.healthStore.Release(cleanupCtx, decision.Selected)
+		}
+	}()
+
+	var trace llmkit.RouteTrace
+	if c.recorder != nil || c.preDispatchHook != nil {
+		if !*routeMetadataLoaded {
+			metadata, err := c.loadRouteMetadata(ctx, req)
+			if err != nil {
+				return nil, false, newRuntimeError(ErrorStagePreCall, llmkit.ErrorClassConfiguration, false, err)
+			}
+			*routeMetadata = metadata
+			*routeMetadataLoaded = true
+		}
+		trace = c.routeTrace(profile, decision, *routeMetadata, attemptOffset)
+		if c.recorder != nil {
+			if err := c.recorder.RecordRoute(ctx, trace); err != nil {
+				return nil, false, newRuntimeError(ErrorStagePreCall, c.errorClassifier(err), false, err)
+			}
+		}
+	}
+
+	streaming, streams := provider.(ports.StreamingLLMClient)
+	streams = streams && onDelta != nil
+	if c.preDispatchHook != nil {
+		// claim 未明确成功前不能调用 Provider 或进入 fallback。
+		providerCallIndex, err := c.runPreDispatchHook(ctx, req, provider, streams, trace, *lastProviderCallIndex)
+		if err != nil {
+			return nil, false, err
+		}
+		*lastProviderCallIndex = providerCallIndex
+	}
+
+	called = true
+	callStarted := time.Now()
+	delivered := false
+	var resp *ports.ChatResponse
+	var providerErr error
+	if streams {
+		resp, providerErr = streaming.ChatStream(ctx, req, func(delta ports.ChatDelta) error {
+			delivered = true
+			return onDelta(delta)
+		})
+	} else {
+		resp, providerErr = provider.Chat(ctx, req)
+	}
+	latency := time.Since(callStarted)
+	if requestErr := ctx.Err(); requestErr != nil {
+		// 取消优先于晚到 Provider 结果，完整响应不得继续向上返回。
+		resp = nil
+		providerErr = requestErr
+	}
+	if providerErr == nil {
+		if err := c.recordOutcomeAfterCall(ctx, profile, decision, trace, latency, resp, nil); err != nil {
+			return nil, delivered, newRuntimeError(ErrorStagePostCall, llmkit.ErrorClassPostCall, true, err)
+		}
+		if onDelta != nil && !streams && resp.Content != "" {
+			if err := onDelta(ports.ChatDelta{Content: resp.Content}); err != nil {
+				return nil, true, err
+			}
+		}
+		return resp, delivered, nil
+	}
+	if err := c.recordOutcomeAfterCall(ctx, profile, decision, trace, latency, nil, providerErr); err != nil {
+		return nil, delivered, newRuntimeError(ErrorStagePostCall, llmkit.ErrorClassPostCall, true, err)
+	}
+	return nil, delivered, newRuntimeError(
+		ErrorStageProvider,
+		c.errorClassifier(providerErr),
+		providerWasDispatched(providerErr),
+		providerErr,
+	)
+}
+
+func (c *Client) recordOutcomeAfterCall(requestCtx context.Context, profile llmkit.TaskProfile, decision llmkit.RouteDecision, trace llmkit.RouteTrace, latency time.Duration, resp *ports.ChatResponse, providerErr error) error {
 	// Provider 返回后不能复用可能已取消的请求 context，否则已开始的 health 计数无法归零。
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(requestCtx), providerOutcomeCleanupTimeout)
 	defer cancel()
-	return c.recordOutcome(cleanupCtx, profile, decision, trace, resp, providerErr)
+	return c.recordOutcome(cleanupCtx, profile, decision, trace, latency, resp, providerErr)
 }
 
-func (c *Client) recordOutcome(ctx context.Context, profile llmkit.TaskProfile, decision llmkit.RouteDecision, trace llmkit.RouteTrace, resp *ports.ChatResponse, providerErr error) error {
+func (c *Client) recordOutcome(ctx context.Context, profile llmkit.TaskProfile, decision llmkit.RouteDecision, trace llmkit.RouteTrace, latency time.Duration, resp *ports.ChatResponse, providerErr error) error {
 	outcome := llmkit.TaskOutcome{
 		RouteID:      trace.RouteID,
 		TaskID:       trace.TaskID,
@@ -352,6 +364,10 @@ func (c *Client) recordOutcome(ctx context.Context, profile llmkit.TaskProfile, 
 		ModelAlias:   decision.SelectedAlias,
 		Provider:     decision.Selected.Model.Provider,
 		Success:      providerErr == nil,
+	}
+	if latency > 0 {
+		// Round up so a sub-millisecond call still counts as a latency sample.
+		outcome.LatencyMillis = int((latency + time.Millisecond - 1) / time.Millisecond)
 	}
 	if resp != nil {
 		outcome.InputTokens = resp.Usage.InputTokens
@@ -444,12 +460,12 @@ func (c *Client) routeTrace(profile llmkit.TaskProfile, decision llmkit.RouteDec
 		ScoreBreakdown:        copyScoreBreakdown(decision.ScoreBreakdown),
 		CandidateModelAliases: candidateModelAliases(decision.Candidates),
 		Candidates:            copyCandidateScores(decision.Candidates),
-		FallbackMaxAttempts:   c.fallbackPolicy.MaxAttempts,
+		FallbackMaxAttempts:   c.maxAttempts,
 	}
 }
 
-func (c *Client) runPreDispatchHook(ctx context.Context, req ports.ChatRequest, maxOutputTokens int, provider ProviderClient, trace llmkit.RouteTrace, lastProviderCallIndex int) (int, error) {
-	providerDigest, err := providerRequestSHA256(provider, req, maxOutputTokens)
+func (c *Client) runPreDispatchHook(ctx context.Context, req ports.ChatRequest, provider ProviderClient, stream bool, trace llmkit.RouteTrace, lastProviderCallIndex int) (int, error) {
+	providerDigest, err := providerRequestSHA256(provider, req, stream)
 	if err != nil {
 		var runtimeErr *RuntimeError
 		if errors.As(err, &runtimeErr) {
@@ -481,18 +497,15 @@ func (c *Client) runPreDispatchHook(ctx context.Context, req ports.ChatRequest, 
 	return metadata.ProviderCallIndex, nil
 }
 
-func (c *Client) maxAttempts(candidateCount int) int {
-	if c.fallbackPolicy.MaxAttempts <= 0 {
+func (c *Client) attemptLimit(candidateCount int) int {
+	if c.maxAttempts <= 0 {
 		return 0
 	}
-	if c.fallbackPolicy.MaxAttempts > candidateCount {
-		return candidateCount
-	}
-	return c.fallbackPolicy.MaxAttempts
+	return min(c.maxAttempts, candidateCount)
 }
 
 func (c *Client) allowsFallback(err *RuntimeError) bool {
-	if !c.strictFallback {
+	if !c.failClosed {
 		return true
 	}
 	if err == nil || err.ProviderDispatched {
@@ -501,20 +514,13 @@ func (c *Client) allowsFallback(err *RuntimeError) bool {
 	return slices.Contains(c.retryableErrorClass, err.Class)
 }
 
-func callProvider(ctx context.Context, provider ProviderClient, req ports.ChatRequest, maxOutputTokens int) (*ports.ChatResponse, error) {
-	if maxOutputTokens == 0 {
-		return provider.Chat(ctx, req)
-	}
-	return provider.(ProviderClientWithMaxOutputTokens).ChatWithMaxOutputTokens(ctx, req, maxOutputTokens)
-}
-
-func providerRequestSHA256(provider ProviderClient, req ports.ChatRequest, maxOutputTokens int) ([sha256.Size]byte, error) {
-	if maxOutputTokens != 0 {
-		digester, ok := provider.(ProviderRequestDigesterWithMaxOutputTokens)
+func providerRequestSHA256(provider ProviderClient, req ports.ChatRequest, stream bool) ([sha256.Size]byte, error) {
+	if stream {
+		digester, ok := provider.(ProviderStreamRequestDigester)
 		if !ok {
-			return [sha256.Size]byte{}, newRuntimeError(ErrorStageConfig, llmkit.ErrorClassConfiguration, false, fmt.Errorf("provider limited request digester is required when pre-dispatch hook is configured"))
+			return [sha256.Size]byte{}, newRuntimeError(ErrorStageConfig, llmkit.ErrorClassConfiguration, false, fmt.Errorf("provider stream request digester is required when pre-dispatch hook is configured"))
 		}
-		return digester.ProviderRequestSHA256WithMaxOutputTokens(req, maxOutputTokens)
+		return digester.ProviderStreamRequestSHA256(req)
 	}
 	digester, ok := provider.(ProviderRequestDigester)
 	if !ok {

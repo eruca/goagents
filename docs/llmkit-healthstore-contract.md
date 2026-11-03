@@ -15,7 +15,8 @@ their own shared implementation.
 
 ```go
 type HealthStore interface {
-    Begin(context.Context, Candidate) error
+    Acquire(context.Context, Candidate) error
+    Release(context.Context, Candidate) error
     RecordOutcome(context.Context, TaskOutcome) error
     Snapshot() ProviderHealthSnapshot
 }
@@ -27,13 +28,17 @@ The goagent adapter uses it in this order:
 available candidates
   -> ApplyProviderHealth(HealthStore.Snapshot())
   -> RoutePolicy.Select(...)
-  -> HealthStore.Begin(selected candidate)
+  -> HealthStore.Acquire(selected candidate)
+       busy -> drop the candidate, select again (no attempt spent)
+  -> route trace, pre-dispatch hook
+       failure -> HealthStore.Release(selected candidate)
   -> provider.Chat(...)
   -> HealthStore.RecordOutcome(outcome)
 ```
 
-`llmkit` routing only depends on `Snapshot`; it does not require a concrete
-store type.
+The snapshot is a pre-filter that keeps routing from choosing a candidate that
+is visibly unavailable; `Acquire` is the authoritative, atomic admission check,
+so concurrent requests cannot all pass a stale snapshot.
 
 ## Key
 
@@ -76,26 +81,42 @@ storage.
 It must not contain prompts, responses, request headers, API keys, raw provider
 payloads, or user content.
 
-## Begin Semantics
+## Acquire Semantics
 
-`Begin(ctx, candidate)` is called after route selection and before the selected
-provider is invoked.
+`Acquire(ctx, candidate)` is called after route selection and before anything
+else happens for that attempt. It must check admission and take the slot in
+one atomic step (a mutex, a transaction, or a compare-and-set).
 
 Required behavior:
 
 - Return `ctx.Err()` if the context is already cancelled.
 - Identify the entry by `ProviderHealthKey`.
-- Increment `in_flight` for the selected candidate.
-- Preserve account/model/provider identity on the entry.
-- Update `updated_at`.
+- Reject with an error wrapping `ErrProviderBusy`, without changing the entry,
+  when:
+  - `cooldown_until` is in the future;
+  - `availability=unavailable` with no cooldown (set by the host);
+  - `availability=unavailable`, the cooldown has passed, and `in_flight > 0`:
+    half-open admits exactly one recovery probe;
+  - quota is exhausted;
+  - `in_flight` reached the limit: the entry's `max_concurrency`, or else the
+    candidate's configured `Model.MaxConcurrency`;
+  - the account's total `in_flight` across its entries reached
+    `candidate.AccountMaxConcurrency`.
+- Otherwise increment `in_flight`, preserve account/model/provider identity,
+  and update `updated_at`.
 
-Optional shared-store behavior:
+The adapter treats `ErrProviderBusy` as "try another candidate": it records no
+outcome and does not spend a fallback attempt. Any other error is a store
+failure and ends the request. Every successful `Acquire` is closed by exactly
+one `RecordOutcome` (the provider was called) or `Release` (it was not).
 
-- Reject the call if a distributed concurrency limit is already full.
-- Acquire a short-lived lease with a TTL.
-- Return an error if the lease cannot be acquired.
+## Release Semantics
 
-If `Begin` returns an error, the adapter does not call the provider.
+`Release(ctx, candidate)` gives back a slot whose call never reached the
+provider, for example because the route recorder or the pre-dispatch hook
+failed. It decrements `in_flight` if it is greater than zero and changes
+nothing else. The adapter calls it with a short cleanup context detached from
+request cancellation.
 
 ## RecordOutcome Semantics
 
@@ -112,6 +133,10 @@ Required behavior:
   - reset `failure_streak`
   - set `availability=available`
   - clear `cooldown_until`
+- On a failure the caller caused (`CountsTowardProviderHealth(outcome.ErrorClass)`
+  is false: canceled, request too large, budget exceeded, policy blocked,
+  capability mismatch, post-call error), leave `failure_streak`,
+  `availability`, and `cooldown_until` unchanged.
 - On provider failure:
   - increment `failure_streak`
   - mark the entry `degraded` until the cooldown threshold is reached
@@ -167,18 +192,18 @@ In those cases, use a custom `HealthStore`.
 
 A shared implementation should provide atomicity for:
 
-- incrementing `in_flight` in `Begin`
+- incrementing `in_flight` in `Acquire`
 - decrementing `in_flight` in `RecordOutcome`
 - setting cooldown and availability after failures
 - clearing cooldown after success
 
 It should also defend against leaked in-flight counts when a process crashes
-after `Begin` but before `RecordOutcome`. Use leases or TTLs for that.
+after `Acquire` but before `RecordOutcome` or `Release`. Use leases or TTLs for that.
 
 Recommended behavior:
 
 - Store `in_flight` as a lease count with per-call TTL.
-- Generate an internal lease id in `Begin`; the public `HealthStore` interface
+- Generate an internal lease id in `Acquire`; the public `HealthStore` interface
   does not currently pass `route_id`.
 - Refresh or expire leases independently of the health entry.
 - Let `Snapshot` compute `in_flight` from active leases.
@@ -188,7 +213,7 @@ Recommended behavior:
 ## Redis-Style Pseudocode
 
 ```text
-Begin(candidate):
+Acquire(candidate):
   key = health_key(candidate)
   lease_key = key + ":leases"
   now = utc_now()
@@ -252,13 +277,13 @@ provider_health_leases(
 )
 ```
 
-`Begin` runs in a transaction:
+`Acquire` runs in a transaction:
 
 ```text
 delete expired leases for key
 select health row for update
 count active leases
-if max_concurrency reached: rollback and return error
+if max_concurrency reached: rollback and return ErrProviderBusy
 insert lease
 upsert identity and updated_at
 commit
@@ -293,15 +318,11 @@ health store is memory-backed or shared.
 
 ## Error Handling
 
-`Begin` errors are pre-provider failures. Hosts can decide whether they should
-be treated as:
-
-- retryable local store errors
-- hard route failures
-- signals to choose another candidate
-
-The current adapter returns the error. Do not hide store failures by silently
-calling the provider anyway; that defeats concurrency and quota protection.
+`Acquire` errors wrapping `ErrProviderBusy` move routing to the next
+candidate; when no candidate admits the call, the request fails with class
+`provider_busy`. Other `Acquire` errors are store failures and the adapter
+returns them. Do not hide store failures by silently calling the provider
+anyway; that defeats concurrency and quota protection.
 
 `RecordOutcome` errors happen after provider completion. Hosts should treat
 these as audit/health persistence errors. Provider output may already exist, so
@@ -319,7 +340,9 @@ do not assume the LLM call can be retried safely.
 
 A custom `HealthStore` should have tests for:
 
-- `Begin` increments in-flight.
+- `Acquire` increments in-flight; `Release` decrements it.
+- concurrent `Acquire` calls never exceed `max_concurrency`.
+- after a cooldown, concurrent `Acquire` calls admit exactly one probe.
 - `RecordOutcome(success)` decrements in-flight and clears cooldown.
 - repeated failures move availability from degraded to unavailable.
 - cooldown produces a snapshot that `RoutePolicy` hard-filters.

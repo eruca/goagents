@@ -184,7 +184,8 @@ func TestStoreFailsOnlyExactPendingCheckpoint(t *testing.T) {
 	}
 	defer store.Close()
 
-	now := time.Now().UTC()
+	// timestamptz keeps microseconds; Linux clocks have nanoseconds.
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	checkpoint := runkit.ApprovalCheckpoint{
 		ID:             "checkpoint-pending-failure-" + now.Format("20060102150405.000000000"),
 		RunID:          "run-pending-failure",

@@ -36,11 +36,18 @@ type WorkflowRun struct {
 	CompletedSteps []string
 	StepAttempts   map[string]int
 	StepRecords    []StepRecord
-	Metadata       map[string]any
-	LeaseOwner     string
-	LeaseUntil     time.Time
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	// StepRetries counts consecutive transient failures of CurrentStep. It
+	// carries the retry budget across claims and resets when the step
+	// succeeds or the run fails, so a requeued run starts a fresh budget.
+	StepRetries int
+	// NextAttemptAt holds a pending run back from ClaimRunnable until a
+	// scheduled retry is due.
+	NextAttemptAt time.Time
+	Metadata      map[string]any
+	LeaseOwner    string
+	LeaseUntil    time.Time
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
 type StepRecord struct {

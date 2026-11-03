@@ -324,7 +324,7 @@ func waitForJanitorSignal(t *testing.T, signal <-chan struct{}, name string) {
 	t.Helper()
 	select {
 	case <-signal:
-	case <-time.After(2 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatalf("timed out waiting for %s", name)
 	}
 }

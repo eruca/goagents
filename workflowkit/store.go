@@ -58,6 +58,16 @@ type QueueLeaseStore interface {
 	ReleaseLease(ctx context.Context, id string, workerID string) (WorkflowRun, error)
 }
 
+// QueueRecoveryStore fails running workflows whose lease expired, which means
+// their worker stopped heartbeating. Recovery is fail-closed: the interrupted
+// step may already have had side effects, so it is never re-executed
+// automatically. A host can requeue the failed run after inspecting it.
+// Runs without a lease owner are never touched.
+type QueueRecoveryStore interface {
+	QueueLeaseStore
+	FailExpiredRunning(ctx context.Context, reason string) ([]WorkflowRun, error)
+}
+
 type MemoryStore struct {
 	mu   sync.RWMutex
 	runs map[string]WorkflowRun
@@ -218,7 +228,7 @@ func (s *MemoryStore) ClaimRunnable(ctx context.Context, workerID string, lease 
 
 	for _, id := range ids {
 		run := s.runs[id]
-		if run.Status != StatusPending {
+		if run.Status != StatusPending || run.NextAttemptAt.After(now) {
 			continue
 		}
 		if run.LeaseOwner != "" && run.LeaseUntil.After(now) {
@@ -295,4 +305,34 @@ func (s *MemoryStore) ReleaseLease(ctx context.Context, id string, workerID stri
 	run.UpdatedAt = now
 	s.runs[id] = cloneRun(run)
 	return cloneRun(run), nil
+}
+
+func (s *MemoryStore) FailExpiredRunning(ctx context.Context, reason string) ([]WorkflowRun, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	now := s.now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var failed []WorkflowRun
+	for id, run := range s.runs {
+		if run.Status != StatusRunning || run.LeaseOwner == "" || run.LeaseUntil.After(now) {
+			continue
+		}
+		run.Status = StatusFailed
+		run.Error = reason
+		run.LeaseOwner = ""
+		run.LeaseUntil = time.Time{}
+		run.UpdatedAt = now
+		s.runs[id] = cloneRun(run)
+		failed = append(failed, cloneRun(run))
+	}
+	sort.Slice(failed, func(i, j int) bool {
+		return failed[i].ID < failed[j].ID
+	})
+	return failed, nil
 }

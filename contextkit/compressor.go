@@ -9,11 +9,14 @@ type Request struct {
 }
 
 type Result struct {
-	Messages    []Message      `json:"messages"`
-	Profile     Profile        `json:"profile"`
-	Levels      []Level        `json:"levels"`
-	Summary     string         `json:"summary,omitempty"`
-	Dropped     int            `json:"dropped"`
+	Messages []Message `json:"messages"`
+	Profile  Profile   `json:"profile"`
+	Levels   []Level   `json:"levels"`
+	Summary  string    `json:"summary,omitempty"`
+	Dropped  int       `json:"dropped"`
+	// OverBudget reports that system messages and the kept conversation
+	// still exceed the budget, because the newest turn alone does.
+	OverBudget  bool           `json:"over_budget,omitempty"`
 	Collapses   []Collapse     `json:"collapses,omitempty"`
 	AutoCompact *Compact       `json:"auto_compact,omitempty"`
 	Metadata    map[string]any `json:"metadata,omitempty"`
@@ -42,6 +45,9 @@ type Summarizer interface {
 }
 
 type SummarizeRequest struct {
+	// Previous is the summary an earlier Compress produced; fold Collapsed
+	// into it rather than summarizing from scratch.
+	Previous  string         `json:"previous,omitempty"`
 	Collapsed []Message      `json:"collapsed"`
 	Recent    []Message      `json:"recent"`
 	Budget    Budget         `json:"budget"`
@@ -53,22 +59,27 @@ type SummarizeResult struct {
 	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
+// RestoreProjection replaces each collapse summary in messages with the
+// messages it collapsed, recursively, so chained incremental collapses expand
+// back to the full history.
 func RestoreProjection(messages []Message, collapses []Collapse) []Message {
-	if len(collapses) == 0 {
-		return cloneMessages(messages)
-	}
 	byID := make(map[string]Collapse, len(collapses))
 	for _, collapse := range collapses {
 		if collapse.ID != "" {
 			byID[collapse.ID] = collapse
 		}
 	}
+	return restore(messages, byID, map[string]bool{})
+}
 
+func restore(messages []Message, byID map[string]Collapse, expanding map[string]bool) []Message {
 	restored := make([]Message, 0, len(messages))
 	for _, msg := range messages {
-		if id, ok := collapseIDFromMessage(msg); ok {
+		if id, ok := collapseIDFromMessage(msg); ok && !expanding[id] {
 			if collapse, found := byID[id]; found {
-				restored = append(restored, cloneMessages(collapse.Originals)...)
+				expanding[id] = true
+				restored = append(restored, restore(collapse.Originals, byID, expanding)...)
+				delete(expanding, id)
 				continue
 			}
 		}

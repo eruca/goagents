@@ -66,6 +66,8 @@ type ReActConfig struct {
 	OutputValidator      OutputValidator
 	BudgetGuard          BudgetGuard
 	MaxIterations        int
+	// MaxOutputTokens caps generated tokens per model call; zero leaves it to the provider.
+	MaxOutputTokens int
 }
 
 type ReActRunner struct {
@@ -75,12 +77,6 @@ type ReActRunner struct {
 }
 
 func NewReActRunner(config ReActConfig) *ReActRunner {
-	return NewReActRunnerWithMaxOutputTokens(config, 0)
-}
-
-// NewReActRunnerWithMaxOutputTokens 在不改变已发布 ReActConfig 形状的前提下，
-// 为每次模型调用增加生成 token 上限。
-func NewReActRunnerWithMaxOutputTokens(config ReActConfig, maxOutputTokens int) *ReActRunner {
 	maxIterations := config.MaxIterations
 	if maxIterations <= 0 {
 		maxIterations = 8
@@ -103,7 +99,7 @@ func NewReActRunnerWithMaxOutputTokens(config ReActConfig, maxOutputTokens int) 
 			OutputFormatStage{Format: config.OutputFormat},
 			PromptStage{Compiler: config.PromptCompiler, Blocks: config.PromptBlocks},
 			ContextProjectionStage{Projector: config.ContextProjector, Budget: budget},
-			NewThinkStageWithMaxOutputTokens(config.LLM, registry, maxOutputTokens),
+			ThinkStage{LLM: config.LLM, ToolRegistry: registry, MaxOutputTokens: config.MaxOutputTokens},
 			BudgetStage{Guard: config.BudgetGuard},
 			PolicyStage{Engine: config.PolicyEngine, ToolRegistry: registry},
 			ApprovalStage{Approver: config.ToolApprover},

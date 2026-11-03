@@ -9,22 +9,17 @@ RAG codebase.
 ## Install
 
 ```bash
-go get github.com/eruca/goagents/ocrs
+go get github.com/eruca/goagents@latest
 ```
 
-For local development before publishing:
-
-```bash
-go mod edit -replace github.com/eruca/goagents/ocrs=/Users/nick/VibeCoding/goagents/ocrs
-go get github.com/eruca/goagents/ocrs
-```
+Then import `github.com/eruca/goagents/ocrs`.
 
 ## Packages
 
 - `ocrs`: generic `Handler`, `Middleware`, `OCR`, provider contracts, and common result types.
 - `paddleocr`: PaddleOCR HTTP API client, response DTOs, structured chunk parsing, and chunk result merging.
 - `chunking`: PDF chunk orchestration and a `pdfcpu` splitter.
-- `scheduler`: worker dispatcher for routing calls across OCR providers.
+- `scheduler`: one worker pool across OCR providers; every free worker takes the next call, so load follows each provider's `Workers` count.
 - `retrypolicy`: generic retry middleware with bounded exponential backoff.
 
 ## Use With goagent

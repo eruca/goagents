@@ -12,10 +12,11 @@
 // Tool results separate model-visible and host-visible output. ForLLM is the
 // observation appended to model context. ForUser is available to host and UI
 // surfaces. Ref can point to a host-owned artifact, and Metadata can carry small
-// structured facts about that artifact. Silent suppresses a successful result
-// from model context. IsError marks a recoverable domain error the model can
-// correct on a later turn. Return a Go error for executor failures that should
-// abort the run.
+// structured facts about that artifact. Silent replaces a successful result's
+// content in model context with a short acknowledgement. IsError marks a
+// recoverable domain error the model can correct on a later turn. Return a Go
+// error for executor failures that should abort the run. A panicking tool is
+// reported as ErrToolExecutionFailed instead of crashing the process.
 //
 // Missing tools and common executor failures return errors classifiable with
 // errors.Is: ErrToolNotFound, ErrToolInputInvalid, ErrToolSchemaInvalid,

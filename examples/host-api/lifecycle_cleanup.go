@@ -104,6 +104,10 @@ func (s *Server) finalizePendingCheckpointShutdown(
 }
 
 func (s *Server) finalizeRunningAgentRunShutdown(ctx context.Context, agentRunID string) error {
+	return s.failRunningAgentRun(ctx, agentRunID, hostShutdownTimeoutCode)
+}
+
+func (s *Server) failRunningAgentRun(ctx context.Context, agentRunID string, reason string) error {
 	if agentRunID == "" || s.runs == nil {
 		return nil
 	}
@@ -116,7 +120,7 @@ func (s *Server) finalizeRunningAgentRunShutdown(ctx context.Context, agentRunID
 	}
 	summary := agentRun.Summary
 	summary.Status = runkit.StatusFailed
-	summary.AbortReason = hostShutdownTimeoutCode
+	summary.AbortReason = reason
 	return s.runs.Complete(ctx, agentRunID, summary)
 }
 

@@ -18,11 +18,12 @@ import (
 
 	"github.com/eruca/goagents/artifactkit"
 	"github.com/eruca/goagents/goagent/agentcore"
+	"github.com/eruca/goagents/goagent/extensions/providers/openaiapi"
 	"github.com/eruca/goagents/goagent/policy"
 	"github.com/eruca/goagents/goagent/ports"
 	"github.com/eruca/goagents/goagent/prompt"
+	"github.com/eruca/goagents/llmkit"
 	goagentadapter "github.com/eruca/goagents/llmkit/adapters/goagent"
-	"github.com/eruca/goagents/llmkit/llmkit"
 	memoryagentadapter "github.com/eruca/goagents/memorykit/agentadapter"
 	"github.com/eruca/goagents/runkit"
 	"github.com/eruca/goagents/runkit/goagentapproval"
@@ -208,6 +209,7 @@ const (
 	queuedPollInterval                = 100 * time.Millisecond
 	minQueuedHeartbeatInterval        = time.Millisecond
 	requeueEventsMetadataKey          = "requeue_events"
+	queuedLeaseExpiredCode            = "queued_lease_expired"
 )
 
 var (
@@ -936,6 +938,7 @@ func (s *Server) runOneQueuedWorkflow(intakeCtx context.Context, executionCtx co
 	if s.queue == nil {
 		return false, true, nil
 	}
+	s.failExpiredQueuedWorkflows(intakeCtx)
 	s.worker.recordClaimAttempt()
 	claimed, err := s.queue.ClaimRunnable(intakeCtx, queuedWorkerID, s.queuedLeaseDuration())
 	if err != nil {
@@ -981,6 +984,27 @@ func (s *Server) runOneQueuedWorkflow(intakeCtx context.Context, executionCtx co
 	}
 	s.worker.recordCompleted(claimed.ID)
 	return true, true, nil
+}
+
+// failExpiredQueuedWorkflows fails queued runs whose worker stopped
+// heartbeating, for example after a host crash. The interrupted step is not
+// replayed because it may already have had side effects; an operator can
+// requeue the failed run, which resumes after its completed steps.
+func (s *Server) failExpiredQueuedWorkflows(ctx context.Context) {
+	recovery, ok := s.queue.(workflowkit.QueueRecoveryStore)
+	if !ok {
+		return
+	}
+	failed, err := recovery.FailExpiredRunning(ctx, queuedLeaseExpiredCode)
+	if err != nil {
+		s.worker.recordError(fmt.Errorf("fail expired queued workflows: %w", err))
+		return
+	}
+	for _, run := range failed {
+		if err := s.failRunningAgentRun(ctx, run.AgentRunID, queuedLeaseExpiredCode); err != nil {
+			s.worker.recordWorkflowError(run.ID, err)
+		}
+	}
 }
 
 func (s *Server) releaseQueuedWorkflowLease(workflowID string) {
@@ -1931,7 +1955,7 @@ func loadLLMKitComposition(home string) ([]llmkit.Candidate, map[string]goagenta
 	if len(candidates) == 0 {
 		return nil, nil, nil, fmt.Errorf("llmkit config has no models")
 	}
-	providers, err := goagentadapter.OpenAICompatibleProvidersFromConfig(*config, os.Getenv, nil)
+	providers, err := goagentadapter.OpenAICompatibleProvidersFromConfig(*config, os.Getenv, nil, openaiapi.Limits{})
 	if err != nil {
 		return nil, nil, nil, err
 	}

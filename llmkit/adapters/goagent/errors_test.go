@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/eruca/goagents/goagent/extensions/providers/openaiapi"
-	"github.com/eruca/goagents/llmkit/llmkit"
+	"github.com/eruca/goagents/llmkit"
 )
 
 func TestDefaultErrorClassifier(t *testing.T) {

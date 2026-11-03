@@ -8,7 +8,14 @@ import (
 var (
 	ErrInvalidTransition = errors.New("invalid workflow status transition")
 	ErrInvalidStatus     = errors.New("invalid workflow status")
+	// ErrRunPreempted reports that a running workflow was cancelled, failed, or
+	// claimed by another lease owner, so the executor stopped writing to it.
+	ErrRunPreempted = errors.New("workflow run preempted")
 )
+
+func runPreemptedError(current WorkflowRun) error {
+	return fmt.Errorf("%w: workflow %s is %s with lease owner %q", ErrRunPreempted, current.ID, current.Status, current.LeaseOwner)
+}
 
 type InvalidTransitionError struct {
 	From Status

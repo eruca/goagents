@@ -20,19 +20,14 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version-file: go.work
-          cache-dependency-path: |
-            **/go.sum
-            go.work.sum
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
 
-      - name: Verify release layout
-        run: bash ./scripts/verify-release-layout.sh
-
-      - name: Verify Week 17 external consumer
-        run: bash ./scripts/verify-week17-consumer.sh
-
-      - name: Verify workspace
+      - name: Verify module
         run: bash ./scripts/verify-all.sh
+
+      - name: Verify external consumer
+        run: bash ./scripts/verify-external-consumer.sh
 
   memory-postgres:
     runs-on: ubuntu-latest
@@ -54,13 +49,12 @@ jobs:
     env:
       MEMORYKIT_REQUIRE_POSTGRES: "1"
       MEMORYKIT_POSTGRES_TEST_DSN: postgres://postgres:postgres@localhost:5432/memorykit_test?sslmode=disable
+      RUNKIT_POSTGRES_TEST_DSN: postgres://postgres:postgres@localhost:5432/memorykit_test?sslmode=disable
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version-file: go.work
-          cache-dependency-path: |
-            **/go.sum
-            go.work.sum
-      - run: cd memorykit && go test -race ./...
-      - run: cd examples/host-api && go test -race -run '^TestHostMemoryPostgresBlackBox$' ./...
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - run: go test -race -p 1 ./memorykit/... ./runkit/...
+      - run: go test -race -run '^TestHostMemoryPostgresBlackBox$' ./examples/host-api

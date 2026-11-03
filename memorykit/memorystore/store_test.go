@@ -46,6 +46,13 @@ func TestLifecycleConformance(t *testing.T) {
 	})
 }
 
+func TestFullTextRecallConformance(t *testing.T) {
+	storetest.RunFullTextRecallConformance(t, func(t *testing.T) storetest.FullTextStore {
+		t.Helper()
+		return newTestStore(t)
+	})
+}
+
 func TestSearchCandidatesFindsExactFullTextAndPrivateVectorFixtures(t *testing.T) {
 	store := newTestStore(t)
 	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)

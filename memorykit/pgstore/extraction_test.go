@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/eruca/goagents/memorykit"
-	"github.com/google/uuid"
 )
 
 const extractionTenantID = "tenant-extraction"
@@ -342,7 +341,9 @@ func TestExtractionWorkerWithPostgreSQLCreatesOnlyCandidate(t *testing.T) {
 	if err := store.EnqueueExtraction(context.Background(), job); err != nil {
 		t.Fatal(err)
 	}
-	candidateID := uuid.NewSHA1(uuid.MustParse(job.ID), []byte("candidate:0")).String()
+	candidateID := mustExtractionCandidateID(t, job.ID, memorykit.CandidateDraft{
+		Kind: memorykit.KindLesson, Key: "worker.lesson", Content: "Review model-derived output",
+	})
 	worker, err := memorykit.NewExtractionWorker(memorykit.ExtractionWorkerConfig{
 		Jobs: store, Memories: store,
 		Reader: extractionSourceReaderFunc(func(context.Context, memorykit.Source) (string, error) {
@@ -419,7 +420,9 @@ func TestExtractionWorkerRetryReusesCandidateWithoutDuplicateRevision(t *testing
 	if err := store.EnqueueExtraction(context.Background(), job); err != nil {
 		t.Fatal(err)
 	}
-	candidateID := uuid.NewSHA1(uuid.MustParse(job.ID), []byte("candidate:0")).String()
+	candidateID := mustExtractionCandidateID(t, job.ID, memorykit.CandidateDraft{
+		Kind: memorykit.KindLesson, Key: "worker.retry", Content: "Use stable candidate identity",
+	})
 	newWorker := func(now time.Time) *memorykit.ExtractionWorker {
 		t.Helper()
 		worker, err := memorykit.NewExtractionWorker(memorykit.ExtractionWorkerConfig{
@@ -447,6 +450,67 @@ func TestExtractionWorkerRetryReusesCandidateWithoutDuplicateRevision(t *testing
 		t.Fatalf("first RunOnce() = %v, %v, want injected completion error", worked, firstErr)
 	}
 	worker = newWorker(job.CreatedAt.Add(time.Second))
+	worked, err := worker.RunOnce(context.Background())
+	if err != nil || !worked {
+		t.Fatalf("second RunOnce() = %v, %v", worked, err)
+	}
+
+	var memoryCount int
+	if err := store.db.QueryRowContext(context.Background(),
+		"SELECT count(*) FROM memories WHERE id = $1", candidateID).Scan(&memoryCount); err != nil {
+		t.Fatal(err)
+	}
+	revisions, err := store.Revisions(context.Background(), memorykit.RevisionQuery{
+		Scope: job.Scope, MemoryID: candidateID, Limit: 10,
+	})
+	if err != nil || memoryCount != 1 || len(revisions) != 1 {
+		t.Fatalf("retry memory/revisions = %d/%d, %v", memoryCount, len(revisions), err)
+	}
+	status, attempts, source, _ := extractionJobState(t, store, job.ID)
+	if status != memorykit.ExtractionCompleted || attempts != 2 || source != (memorykit.Source{}) {
+		t.Fatalf("retry job state = %q/%d/%#v", status, attempts, source)
+	}
+}
+
+func TestExtractionWorkerRetryWithDefaultedValidFromCompletes(t *testing.T) {
+	store := openExtractionStore(t)
+	jobs := &failFirstCompletionStore{Store: store}
+	job := extractionJobFixture("8eeeeeee-eeee-4eee-8eee-eeeeeeeeeeee")
+	if err := store.EnqueueExtraction(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	candidateID := mustExtractionCandidateID(t, job.ID, memorykit.CandidateDraft{
+		Kind: memorykit.KindLesson, Key: "worker.retry", Content: "Use stable candidate identity",
+	})
+	newWorker := func(now time.Time) *memorykit.ExtractionWorker {
+		t.Helper()
+		worker, err := memorykit.NewExtractionWorker(memorykit.ExtractionWorkerConfig{
+			Jobs: jobs, Memories: store,
+			Reader: extractionSourceReaderFunc(func(context.Context, memorykit.Source) (string, error) {
+				return "terminal output", nil
+			}),
+			// Mirrors JSONCandidateExtractor, which defaults ValidFrom to request.Now.
+			Extractor: extractionCandidateExtractorFunc(func(_ context.Context, request memorykit.ExtractionRequest) ([]memorykit.CandidateDraft, error) {
+				return []memorykit.CandidateDraft{{
+					Kind: memorykit.KindLesson, Key: "worker.retry", Content: "Use stable candidate identity", Confidence: .9,
+					ValidFrom: request.Now,
+				}}, nil
+			}),
+			ValidateContent: extractionContentValidatorFunc(func(context.Context, string) error { return nil }),
+			Limits:          validConfig().Limits, WorkerID: "worker-1", LeaseDuration: time.Minute, MaxAttempts: 3,
+			Now: func() time.Time { return now },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return worker
+	}
+	worker := newWorker(job.CreatedAt)
+	worked, firstErr := worker.RunOnce(context.Background())
+	if !worked || !errors.Is(firstErr, errInjectedCompletion) {
+		t.Fatalf("first RunOnce() = %v, %v, want injected completion error", worked, firstErr)
+	}
+	worker = newWorker(job.CreatedAt.Add(time.Minute))
 	worked, err := worker.RunOnce(context.Background())
 	if err != nil || !worked {
 		t.Fatalf("second RunOnce() = %v, %v", worked, err)
@@ -604,4 +668,13 @@ func (s *failFirstCompletionStore) CompleteExtraction(ctx context.Context, id, w
 		return errInjectedCompletion
 	}
 	return s.Store.CompleteExtraction(ctx, id, workerID, expectedAttempt, now)
+}
+
+func mustExtractionCandidateID(t *testing.T, jobID string, draft memorykit.CandidateDraft) string {
+	t.Helper()
+	id, err := memorykit.ExtractionCandidateID(jobID, draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
 }

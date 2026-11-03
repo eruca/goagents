@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/eruca/goagents/artifactkit"
-	"github.com/eruca/goagents/llmkit/llmkit"
+	"github.com/eruca/goagents/llmkit"
 	"github.com/eruca/goagents/runkit"
 	"github.com/eruca/goagents/workflowkit"
 )

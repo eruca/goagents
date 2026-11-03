@@ -73,6 +73,9 @@ fails instead of silently routing unauthenticated requests.
 
 The default policy applies hard filters first, then ranks eligible candidates by capability, price, locality, latency, recent reliability, and current provider health.
 
+- Reliability is minus the smoothed failure rate in percent, bounded to `[-100, 0]`. Observed outcomes are blended with a 5% prior worth 10 observations, so a model with no history scores -5, a long clean history beats no history, and ten straight failures read as a majority failure rate.
+- Latency uses observed average latency from model stats when present (at most 2s is fast, at most 10s is normal, slower is slow) and falls back to the configured `latency_class`.
+
 Simple tasks should be local-first when the profile allows it. For example, low failure-cost classification, short rewriting, formatting, or simple JSON extraction can prefer a free local model with fast latency and low operational cost.
 
 Hard or high failure-cost tasks should route to an advanced model. For example, tasks that need stronger reasoning, long context, tool use, strict JSON, or reviewer-visible correctness should be profiled with `complexity: hard`, `failure_cost: high`, or the relevant `needs_*` flags so local simple models are filtered out or outscored.
@@ -105,7 +108,7 @@ if err != nil {
 _ = stats
 ```
 
-`model-stats.json` groups records by `task_type`, `account_alias`, `model_alias`, and `provider`. Each bucket includes route attempts, completed outcomes, pending outcomes, success/failure rates, average latency, average token counts, average estimated cents, and last seen time. The file is derived data: keep `route-events.jsonl` and `outcomes.jsonl` as the append-only source of truth.
+`model-stats.json` groups records by `task_type`, `account_alias`, `model_alias`, and `provider`. Each bucket includes route attempts, completed outcomes, pending outcomes, success/failure rates, average latency, average token counts, average estimated cents, and last seen time. Outcomes are matched to routes by `route_id` and `attempt`, so every fallback attempt is counted; average latency and cost only include outcomes that reported them. The file is derived data: keep `route-events.jsonl` and `outcomes.jsonl` as the append-only source of truth.
 
 Hosts can also expose route-level observability by reading the same audit files:
 
@@ -159,15 +162,21 @@ This keeps newly written outcomes useful without waiting for a process restart.
 
 - in-flight calls and concurrency ceilings
 - quota exhaustion
-- failure streaks
+- failure streaks, counting only failures attributable to the provider; a
+  cancelled, oversized, or over-budget request does not degrade it
 - degraded or unavailable providers
-- cooldown windows after repeated failures
+- cooldown windows after repeated failures; each failure past the threshold,
+  such as a failed recovery probe, doubles the cooldown up to
+  `HealthPolicy.MaxCooldownDuration` (default 32x `CooldownDuration`)
 
 Hosts can keep this in memory for a single process, or replace the interface
 with a durable/shared implementation later. The route policy treats quota
-exhaustion, active cooldown, unavailable providers, and full provider
-concurrency as hard filters. Degraded providers remain eligible but receive a
-lower score, so they are used only when better options are unavailable.
+exhaustion, active cooldown, unavailable providers, and full provider or
+account concurrency (including `max_concurrency` from config) as hard filters.
+Degraded providers remain eligible but receive a lower score, so they are used
+only when better options are unavailable. After a cooldown expires, an
+unavailable provider is half-open: exactly one probe call tests recovery while
+the others wait for its outcome.
 
 Typical adapter wiring:
 
@@ -186,9 +195,12 @@ client := goagentadapter.NewClient(goagentadapter.Config{
 })
 ```
 
-The adapter applies `HealthStore.Snapshot()` before each routing decision,
-calls `Begin` before invoking the selected provider, and calls `RecordOutcome`
-after success or failure. This keeps simple tasks local-first when local is
+The adapter applies `HealthStore.Snapshot()` before each routing decision.
+Because the snapshot can be stale under concurrency, it then calls `Acquire`,
+which checks the same limits atomically and takes the slot; a candidate that
+turns out busy is skipped without spending a fallback attempt. After the call
+the adapter records the outcome, or `Release`s the slot if the provider was
+never called. This keeps simple tasks local-first when local is
 healthy, while allowing fallback to cloud when the local provider is busy,
 quota-exhausted, or cooling down after failures.
 
@@ -218,26 +230,26 @@ client := goagentadapter.NewClient(goagentadapter.Config{
 `MaxAttempts <= 0` preserves the default behavior: try all remaining eligible
 provider-backed candidates.
 
-`NewClient` deliberately preserves the v0.1.0 fallback contract above. New
-reliability-sensitive runtimes should opt into fail-closed behavior and
-allowlist only errors that are known to occur before dispatch:
+Reliability-sensitive runtimes should fail closed and allowlist only errors
+that are known to occur before dispatch:
 
 ```go
-client := goagentadapter.NewRuntimeClient(
-    goagentadapter.Config{
-        Candidates: config.Candidates(),
-        Providers:  providers,
+client := goagentadapter.NewClient(goagentadapter.Config{
+    Candidates: config.Candidates(),
+    Providers:  providers,
+    FallbackPolicy: goagentadapter.FallbackPolicy{
+        FailClosed: true,
+        RetryableErrorClasses: []llmkit.ErrorClass{
+            llmkit.ErrorClassTransient,
+            llmkit.ErrorClassTimeout,
+        },
     },
-    goagentadapter.WithRetryableErrorClasses(
-        llmkit.ErrorClassTransient,
-        llmkit.ErrorClassTimeout,
-    ),
-)
+})
 ```
 
-The runtime path never falls back when the provider error is dispatched or its
-dispatch status is unknown. `NewClientWithPreDispatch` is a convenience for the
-same fail-closed path with a typed pre-dispatch hook.
+A fail-closed client never falls back when the provider error is dispatched or
+its dispatch status is unknown. Setting `Config.PreDispatch` (a typed host
+claim boundary run before each provider call) implies `FailClosed`.
 
 Hosts can also classify provider errors for audit and future typed fallback
 rules:
@@ -316,7 +328,7 @@ Import aliases are host-owned; one common pattern is:
 ```go
 import (
     goagentadapter "github.com/eruca/goagents/llmkit/adapters/goagent"
-    "github.com/eruca/goagents/llmkit/llmkit"
+    "github.com/eruca/goagents/llmkit"
 )
 ```
 
@@ -324,11 +336,12 @@ The provider map keys must match `Candidate.Model.Alias`. Missing provider-backe
 
 `OpenAICompatibleProvidersFromConfig` supports `provider: openai`, `provider: openai_compatible`, and local OpenAI-compatible servers. It uses account `base_url`, model `model`, and account `api_key_env`; if `model` is omitted, the model alias is used as the provider model id. Passing `nil` as the HTTP client uses the default client.
 
-That factory preserves the v0.1.0 provider behavior. A runtime that requires
-request, response, or output-token bounds should construct each OpenAI-compatible
-provider with `openaiapi.NewWithLimits`, place it in the same alias-keyed provider
-map, and call `ChatWithMaxOutputTokens` through the adapter. Zero-valued limits
-are disabled; limits are never silently inferred from an application profile.
+Its `limits` argument applies the same `openaiapi.Limits` to every provider it
+builds, and `ports.ChatRequest.MaxOutputTokens` reaches the selected provider
+unchanged. Zero values disable a bound; limits are never silently inferred from
+an application profile.
+
+The adapter implements `ports.StreamingLLMClient`, so `Agent.Stream` receives model output as it is generated. `ChatStream` streams through providers that implement `ports.StreamingLLMClient`, such as `openaiapi`, and delivers any other provider's complete response as one delta. An attempt that has already delivered output never falls back to another candidate, so a consumer never sees two answers spliced together. With a pre-dispatch hook, streaming providers must implement `ProviderStreamRequestDigester` so the claim covers the exact streaming request body.
 
 When a selected provider fails, the adapter removes that candidate and asks the policy to select the next best provider-backed candidate. Each attempted route is recorded with an incremented `attempt` value when a recorder is configured.
 
@@ -356,23 +369,11 @@ Important behavior:
 See `../docs/host-api-contract.md` for the prose endpoint contract and
 `../examples/host-api/openapi.yaml` for the machine-readable contract.
 
-## Independent Testing
-
-Run llmkit tests from the module directory:
+## Testing
 
 ```sh
-cd llmkit
-go test ./...
+go test ./llmkit/...
 ```
 
-After the internal `goagent/v0.1.0` tag is available, use `GOWORK=off` to test
-llmkit as an independent module:
-
-```sh
-cd llmkit
-GOWORK=off go test ./...
-```
-
-The published `llmkit/go.mod` intentionally has no local replace. Before the tag
-exists, the root `go.work` supplies the exact local `goagent@v0.1.0` mapping for
-workspace tests; this does not count as a clean consumer check.
+The core `llmkit` package does not import `goagent`; only
+`llmkit/adapters/goagent` does. `internal/boundary` enforces this.

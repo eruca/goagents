@@ -3,13 +3,12 @@ package memorykit
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 func TestValidateCandidateDraftReusesCreateValidation(t *testing.T) {
@@ -231,14 +230,17 @@ func TestExtractionWorkerCreatesCandidatesThenCompletesLease(t *testing.T) {
 		t.Fatalf("Create() calls = %d, want 2", len(memories.creates))
 	}
 	for index, request := range memories.creates {
-		wantID := uuid.NewSHA1(uuid.MustParse(job.ID), []byte("candidate:"+string(rune('0'+index)))).String()
+		wantID, err := ExtractionCandidateID(job.ID, CandidateDraft{Kind: request.Kind, Key: request.Key, Content: request.Content})
+		if err != nil {
+			t.Fatal(err)
+		}
 		if request.ID != wantID {
 			t.Errorf("Create[%d].ID = %q, want %q", index, request.ID, wantID)
 		}
 		if request.Status != StatusCandidate {
 			t.Errorf("Create[%d].Status = %q, want candidate", index, request.Status)
 		}
-		if request.IdempotencyKey != "extraction:"+job.ID+":"+string(rune('0'+index)) ||
+		if request.IdempotencyKey != "extraction:"+wantID ||
 			request.SourceAgentID != job.SourceAgentID || request.Actor != "extractor:"+job.ExtractorID ||
 			request.Reason != "model-derived candidate" || !reflect.DeepEqual(request.Sources, []Source{job.Source}) {
 			t.Errorf("Create[%d] provenance = %#v", index, request)
@@ -788,3 +790,99 @@ func (*extractionLifecycleStoreStub) Revisions(context.Context, RevisionQuery) (
 var _ ExtractionJobStore = (*extractionJobStoreStub)(nil)
 var _ LifecycleStore = (*extractionLifecycleStoreStub)(nil)
 var _ SourceReader = sourceReaderFunc(nil)
+
+func TestExtractionWorkerRetryReplaysSameCandidatesDespiteClockAndOrder(t *testing.T) {
+	created := time.Date(2026, 7, 21, 8, 0, 0, 0, time.UTC)
+	drafts := []CandidateDraft{
+		{Kind: KindLesson, Key: "testing.pgvector", Content: "Run the real integration gate", Confidence: 1},
+		{Kind: KindDecision, Key: "release.strategy", Content: "Use the conservative release gate", Confidence: .99},
+	}
+	run := func(claimNow time.Time, order []int) map[string]CreateRequest {
+		t.Helper()
+		job := extractionWorkerTestJob()
+		job.CreatedAt = created
+		job.UpdatedAt = claimNow
+		job.LeaseUntil = claimNow.Add(time.Minute)
+		memories := &extractionLifecycleStoreStub{}
+		config := extractionWorkerTestConfig()
+		config.Jobs = &extractionJobStoreStub{claimJob: job}
+		config.Memories = memories
+		config.Now = func() time.Time { return claimNow }
+		config.Extractor = candidateExtractorFunc(func(_ context.Context, request ExtractionRequest) ([]CandidateDraft, error) {
+			// Mirrors JSONCandidateExtractor, which defaults ValidFrom to request.Now.
+			result := make([]CandidateDraft, 0, len(order))
+			for _, index := range order {
+				draft := drafts[index]
+				draft.ValidFrom = request.Now
+				result = append(result, draft)
+			}
+			return result, nil
+		})
+		worker, err := NewExtractionWorker(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if worked, err := worker.RunOnce(context.Background()); err != nil || !worked {
+			t.Fatalf("RunOnce() = %v, %v", worked, err)
+		}
+		byID := map[string]CreateRequest{}
+		for _, request := range memories.creates {
+			request.Now = time.Time{}
+			byID[request.ID] = request
+		}
+		return byID
+	}
+
+	first := run(created.Add(time.Minute), []int{0, 1})
+	retry := run(created.Add(time.Hour), []int{1, 0})
+	if len(first) != 2 || !reflect.DeepEqual(first, retry) {
+		t.Fatalf("retry creates differ:\nfirst %#v\nretry %#v", first, retry)
+	}
+	for id, request := range first {
+		if !request.ValidFrom.Equal(created) {
+			t.Fatalf("candidate %s ValidFrom = %v, want job creation time %v", id, request.ValidFrom, created)
+		}
+	}
+}
+
+func TestExtractionWorkerCompletesWhenSameContentWasCapturedWithDifferentScores(t *testing.T) {
+	jobs := &extractionJobStoreStub{claimJob: extractionWorkerTestJob()}
+	config := extractionWorkerTestConfig()
+	config.Jobs = jobs
+	config.Memories = &extractionLifecycleStoreStub{createErr: fmt.Errorf("%w: idempotency key was already used", ErrConflict)}
+	config.Extractor = candidateExtractorFunc(func(context.Context, ExtractionRequest) ([]CandidateDraft, error) {
+		return []CandidateDraft{{Kind: KindLesson, Key: "testing.pgvector", Content: "Run the real integration gate", Confidence: .5}}, nil
+	})
+	worker, err := NewExtractionWorker(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if worked, err := worker.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("RunOnce() = %v, %v, want completed job", worked, err)
+	}
+	if !jobs.completed || jobs.failedCode != "" {
+		t.Fatalf("job complete/failed = %v/%q, want completed", jobs.completed, jobs.failedCode)
+	}
+}
+
+func TestExtractionWorkerWritesDuplicateDraftOnce(t *testing.T) {
+	memories := &extractionLifecycleStoreStub{}
+	config := extractionWorkerTestConfig()
+	config.Memories = memories
+	config.Extractor = candidateExtractorFunc(func(context.Context, ExtractionRequest) ([]CandidateDraft, error) {
+		draft := CandidateDraft{Kind: KindLesson, Key: "testing.pgvector", Content: "Run the real integration gate", Confidence: 1}
+		return []CandidateDraft{draft, draft}, nil
+	})
+	worker, err := NewExtractionWorker(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if worked, err := worker.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("RunOnce() = %v, %v", worked, err)
+	}
+	if len(memories.creates) != 1 {
+		t.Fatalf("Create() calls = %d, want 1", len(memories.creates))
+	}
+}

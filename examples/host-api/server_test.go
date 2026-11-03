@@ -19,7 +19,7 @@ import (
 	"github.com/eruca/goagents/artifactkit"
 	"github.com/eruca/goagents/goagent/agentcore"
 	"github.com/eruca/goagents/goagent/ports"
-	"github.com/eruca/goagents/llmkit/llmkit"
+	"github.com/eruca/goagents/llmkit"
 	"github.com/eruca/goagents/runkit"
 	"github.com/eruca/goagents/skillkit"
 	"github.com/eruca/goagents/workflowkit"
@@ -563,7 +563,7 @@ func TestHostAPIQueuedWorkerRecoversPendingWorkflowAfterReopen(t *testing.T) {
 		t.Fatalf("reopen NewServer returned error: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+	stopWorkerOnCleanup(t, reopened, cancel)
 	reopened.StartQueuedWorker(ctx)
 
 	loaded := waitForWorkflowStatus(t, reopened.Handler(), "wf-queued-recover", workflowkit.StatusWaitingApproval)
@@ -576,13 +576,59 @@ func TestHostAPIQueuedWorkerRecoversPendingWorkflowAfterReopen(t *testing.T) {
 	}
 }
 
+func TestHostAPIQueuedWorkerFailsRunningWorkflowWithExpiredLease(t *testing.T) {
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer returned error: %v", err)
+	}
+	// A previous host process crashed mid-step: its lease expired and nothing
+	// will ever heartbeat or finish this run.
+	if err := server.runs.Create(context.Background(), runkit.RunRecord{
+		RunID:      "agent-crashed",
+		WorkflowID: "wf-crashed",
+		Status:     runkit.StatusRunning,
+	}); err != nil {
+		t.Fatalf("Create AgentRun returned error: %v", err)
+	}
+	if err := server.workflows.Save(context.Background(), workflowkit.WorkflowRun{
+		ID:             "wf-crashed",
+		Status:         workflowkit.StatusRunning,
+		AgentRunID:     "agent-crashed",
+		CurrentStep:    "agent",
+		CompletedSteps: []string{"prepare"},
+		LeaseOwner:     "crashed-worker",
+		LeaseUntil:     time.Now().Add(-time.Minute).UTC(),
+	}); err != nil {
+		t.Fatalf("Save running workflow returned error: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	stopWorkerOnCleanup(t, server, cancel)
+	server.StartQueuedWorker(ctx)
+
+	waitForWorkflowStatus(t, server.Handler(), "wf-crashed", workflowkit.StatusFailed)
+	failed, err := server.workflows.Get(context.Background(), "wf-crashed")
+	if err != nil {
+		t.Fatalf("Get workflow returned error: %v", err)
+	}
+	if failed.Error != queuedLeaseExpiredCode || failed.LeaseOwner != "" {
+		t.Fatalf("failed workflow = %+v, want %s with cleared lease", failed, queuedLeaseExpiredCode)
+	}
+	agentRun, err := server.runs.Get(context.Background(), "agent-crashed")
+	if err != nil {
+		t.Fatalf("Get AgentRun returned error: %v", err)
+	}
+	if agentRun.Status != runkit.StatusFailed || agentRun.Summary.AbortReason != queuedLeaseExpiredCode {
+		t.Fatalf("agent run = %+v, want failed with %s", agentRun, queuedLeaseExpiredCode)
+	}
+}
+
 func TestHostAPIQueuedWorkerStatusTracksCompletedRun(t *testing.T) {
 	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
 	if err != nil {
 		t.Fatalf("NewServer returned error: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+	stopWorkerOnCleanup(t, server, cancel)
 	server.StartQueuedWorker(ctx)
 
 	queued := doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]string{
@@ -860,7 +906,7 @@ func testHostAPIQueuedWorkerSingleExecutionSlot(t *testing.T, starts int) {
 
 	select {
 	case <-step.started:
-	case <-time.After(2 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("queued worker did not start the first workflow")
 	}
 	select {
@@ -887,7 +933,7 @@ func testHostAPIQueuedWorkerSingleExecutionSlot(t *testing.T, starts int) {
 	}
 
 	cancel()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for runtime.NumGoroutine() > baselineGoroutines+5 && time.Now().Before(deadline) {
 		runtime.Gosched()
 	}
@@ -920,17 +966,19 @@ func savePendingWorkflow(t *testing.T, store workflowkit.Store, workflowID strin
 }
 
 func TestHostAPIQueuedWorkerExtendsLeaseWhileWorkflowRuns(t *testing.T) {
-	t.Setenv("HOST_API_QUEUED_LEASE_DURATION", "40ms")
+	// Heartbeats run every lease/2, so the lease must leave room for a delayed
+	// tick on a loaded -race run; a missed renewal loses the lease for good.
+	t.Setenv("HOST_API_QUEUED_LEASE_DURATION", "200ms")
 
 	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
 	if err != nil {
 		t.Fatalf("NewServer returned error: %v", err)
 	}
 	server.executor = workflowkit.NewExecutor(server.workflows, []workflowkit.Step{
-		slowApprovalStep{delay: 500 * time.Millisecond},
+		slowApprovalStep{delay: 800 * time.Millisecond},
 	})
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+	stopWorkerOnCleanup(t, server, cancel)
 	server.StartQueuedWorker(ctx)
 
 	queued := doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]string{
@@ -972,7 +1020,7 @@ func TestHostAPIQueuedWorkerStatusTracksRunError(t *testing.T) {
 		t.Fatalf("Save pending workflow returned error: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+	stopWorkerOnCleanup(t, server, cancel)
 	server.StartQueuedWorker(ctx)
 
 	waitForWorkflowStatus(t, server.Handler(), "wf-worker-error", workflowkit.StatusFailed)
@@ -1005,7 +1053,7 @@ func TestHostAPIRequeuesFailedWorkflow(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+	stopWorkerOnCleanup(t, server, cancel)
 	server.StartQueuedWorker(ctx)
 	failed := waitForWorkflowStatus(t, server.Handler(), "wf-requeue-failed", workflowkit.StatusFailed)
 	if failed.RunMode != string(RunModeQueued) {
@@ -1053,7 +1101,7 @@ func TestHostAPIWorkflowEventsExposeStepFailureAndRequeue(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+	stopWorkerOnCleanup(t, server, cancel)
 	server.StartQueuedWorker(ctx)
 	waitForWorkflowStatus(t, server.Handler(), "wf-events", workflowkit.StatusFailed)
 
@@ -1722,7 +1770,7 @@ func TestHostAPIRunModeSyncAndQueuedSemantics(t *testing.T) {
 		t.Fatalf("NewServer returned error: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+	stopWorkerOnCleanup(t, server, cancel)
 	server.StartQueuedWorker(ctx)
 
 	syncRun := doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]string{
@@ -1998,9 +2046,32 @@ func selectedTaskType(t *testing.T, routes llmRoutesResponse) string {
 	return selectedRoute(t, routes).TaskType
 }
 
+// stopWorkerOnCleanup cancels the queued worker, waits for it to exit, and
+// closes the server's stores. Registered after t.TempDir, it runs before the
+// directory is removed, so no background write races the removal.
+func stopWorkerOnCleanup(t *testing.T, server *Server, cancel context.CancelFunc) {
+	t.Helper()
+	t.Cleanup(func() {
+		cancel()
+		ctx, done := context.WithTimeout(context.Background(), testWaitTimeout)
+		defer done()
+		if err := server.WaitQueuedWorker(ctx); err != nil {
+			t.Errorf("queued worker did not stop: %v", err)
+		}
+		if err := server.Close(ctx); err != nil {
+			t.Errorf("Close returned error: %v", err)
+		}
+	})
+}
+
+// testWaitTimeout bounds polling waits for background work. Waits return as
+// soon as their condition holds, so the bound only matters on failure and is
+// generous enough for a loaded -race run.
+const testWaitTimeout = 10 * time.Second
+
 func waitForWorkflowStatus(t *testing.T, handler http.Handler, id string, want workflowkit.Status) workflowResponse {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	var last workflowResponse
 	for time.Now().Before(deadline) {
 		last = doJSON[workflowResponse](t, handler, http.MethodGet, "/workflows/"+id, nil)
@@ -2015,7 +2086,7 @@ func waitForWorkflowStatus(t *testing.T, handler http.Handler, id string, want w
 
 func waitForWorkflowLeaseCleared(t *testing.T, store workflowkit.Store, id string) workflowkit.WorkflowRun {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for time.Now().Before(deadline) {
 		run, err := store.Get(context.Background(), id)
 		if err != nil {
@@ -2070,7 +2141,7 @@ func workflowResponseIDs(workflows []workflowResponse) []string {
 
 func waitForQueuedWorkerStatus(t *testing.T, handler http.Handler, accept func(queuedWorkerStatusResponse) bool) queuedWorkerStatusResponse {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	var last queuedWorkerStatusResponse
 	for time.Now().Before(deadline) {
 		last = doJSON[queuedWorkerStatusResponse](t, handler, http.MethodGet, "/workers/queued", nil)
@@ -2219,7 +2290,7 @@ func waitForQueuedWorkerSignal(t *testing.T, signal <-chan struct{}, name string
 	t.Helper()
 	select {
 	case <-signal:
-	case <-time.After(2 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatalf("timed out waiting for %s", name)
 	}
 }
@@ -2245,7 +2316,7 @@ func (s slowApprovalStep) Run(ctx context.Context, run workflowkit.WorkflowRun) 
 
 func waitForWorkflowLeasePresent(t *testing.T, store workflowkit.Store, id string) workflowkit.WorkflowRun {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for time.Now().Before(deadline) {
 		run, err := store.Get(context.Background(), id)
 		if err != nil {
@@ -2266,7 +2337,7 @@ func waitForWorkflowLeasePresent(t *testing.T, store workflowkit.Store, id strin
 
 func waitForWorkflowLeaseExtendedAfter(t *testing.T, store workflowkit.Store, id string, previous time.Time) workflowkit.WorkflowRun {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for time.Now().Before(deadline) {
 		run, err := store.Get(context.Background(), id)
 		if err != nil {

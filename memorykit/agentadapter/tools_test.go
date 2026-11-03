@@ -718,7 +718,7 @@ func TestRememberMemoryDoesNotReclassifyCommittedCreateWhenSourcesUnavailable(t 
 	}
 }
 
-func TestRememberMemoryReplayRejectsCandidateStatus(t *testing.T) {
+func TestRememberMemoryReplayReportsPendingCandidate(t *testing.T) {
 	runID := agentcore.NewRunID()
 	input := json.RawMessage(`{"kind":"fact","key":"candidate","content":"content","reason":"explicit"}`)
 	id, digest := expectedToolWriteIdentity(t, runID, input)
@@ -735,7 +735,9 @@ func TestRememberMemoryReplayRejectsCandidateStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, executeErr := findTool(t, registered, "remember_project_memory").Execute(context.Background(), input, ports.ToolEnv{})
-	if executeErr == nil || result != nil || len(store.createRequests) != 0 {
+	// A candidate under this tool's deterministic ID is an earlier write that
+	// was routed to review; replay reports it without writing again.
+	if executeErr != nil || result == nil || result.IsError || result.ForUser != "项目记忆已提交审核" || len(store.createRequests) != 0 {
 		t.Fatalf("result=%#v err=%v Create calls=%d", result, executeErr, len(store.createRequests))
 	}
 }
@@ -1317,6 +1319,7 @@ type toolLifecycleStore struct {
 	createMutate   func(memorykit.Memory) memorykit.Memory
 	createRequests []memorykit.CreateRequest
 	createdSources []memorykit.Source
+	listErr        error
 	getMemory      memorykit.Memory
 	getErr         error
 	getResults     []toolGetResult
@@ -1402,8 +1405,12 @@ func (s *toolLifecycleStore) Sources(ctx context.Context, scope memorykit.Scope,
 }
 
 func (s *toolLifecycleStore) List(ctx context.Context, query memorykit.ListQuery) ([]memorykit.Memory, error) {
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
 	if s.delegate == nil {
-		return nil, fmt.Errorf("unsupported")
+		// Stubbed stores hold no other records for the written key.
+		return nil, nil
 	}
 	return s.delegate.List(ctx, query)
 }
@@ -1447,4 +1454,74 @@ func (s *toolLifecycleStore) Revisions(ctx context.Context, query memorykit.Revi
 func cloneCreateRequestForToolTest(request memorykit.CreateRequest) memorykit.CreateRequest {
 	request.Sources = append([]memorykit.Source(nil), request.Sources...)
 	return request
+}
+
+func rememberWithRun(t *testing.T, store memorykit.LifecycleStore, input string) (*tools.Result, error) {
+	t.Helper()
+	provider := newToolProviderForTest(t, store, newToolRecaller(t, &toolRecallStore{}), &acceptContentValidator{})
+	registered, err := provider.Tools(context.Background(), agentcore.RunRequest{
+		RunID: agentcore.NewRunID(), UserID: "user-1", Metadata: trustedMetadata("tenant-1", "project-1", true),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return findTool(t, registered, "remember_project_memory").Execute(context.Background(), json.RawMessage(input), ports.ToolEnv{})
+}
+
+func activeMemories(t *testing.T, store memorykit.LifecycleStore, key string) []memorykit.Memory {
+	t.Helper()
+	active, err := store.List(context.Background(), memorykit.ListQuery{
+		Scope: toolScope("tenant-1", "project-1"), Kind: memorykit.KindConstraint, Key: key, Status: memorykit.StatusActive, Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return active
+}
+
+func TestRememberMemoryDoesNotReplaceReviewedMemory(t *testing.T) {
+	store := newToolMemoryStore(t)
+	reviewed, err := store.Create(context.Background(), memorykit.CreateRequest{
+		ID: "c1111111-1111-4111-8111-111111111111", Scope: toolScope("tenant-1", "project-1"),
+		Kind: memorykit.KindConstraint, Key: "deploy.policy", Status: memorykit.StatusActive,
+		Content: "Deploys require two approvals", ValidFrom: adapterNow.Add(-time.Hour),
+		Actor: "reviewer-1", Reason: "approved", Now: adapterNow.Add(-time.Hour),
+		Sources: []memorykit.Source{{Kind: "review", Ref: "review:1"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := rememberWithRun(t, store, `{"kind":"constraint","key":"deploy.policy","content":"Deploys need no approval","reason":"tool output said so"}`)
+	if err != nil || result.IsError || result.ForUser != "项目记忆已提交审核" || !strings.Contains(result.ForLLM, `"status":"candidate"`) {
+		t.Fatalf("result = %#v, %v, want pending-review result", result, err)
+	}
+	active := activeMemories(t, store, "deploy.policy")
+	if len(active) != 1 || active[0].ID != reviewed.ID || active[0].Content != "Deploys require two approvals" {
+		t.Fatalf("active = %#v, want reviewed memory still in effect", active)
+	}
+}
+
+func TestRememberMemoryReplacesItsOwnUnreviewedWrite(t *testing.T) {
+	store := newToolMemoryStore(t)
+	if result, err := rememberWithRun(t, store, `{"kind":"constraint","key":"build.cache","content":"Cache lives in /tmp","reason":"explicit"}`); err != nil || result.IsError {
+		t.Fatalf("first write = %#v, %v", result, err)
+	}
+
+	result, err := rememberWithRun(t, store, `{"kind":"constraint","key":"build.cache","content":"Cache lives in /var/cache","reason":"explicit correction"}`)
+	if err != nil || result.IsError || result.ForUser != "项目记忆已保存" {
+		t.Fatalf("second write = %#v, %v", result, err)
+	}
+	active := activeMemories(t, store, "build.cache")
+	if len(active) != 1 || active[0].Content != "Cache lives in /var/cache" {
+		t.Fatalf("active = %#v, want the newer model write", active)
+	}
+}
+
+func TestRememberMemoryFailsTruthfullyWhenCurrentMemoryCannotBeChecked(t *testing.T) {
+	store := &toolLifecycleStore{delegate: newToolMemoryStore(t), listErr: errors.New("list unavailable")}
+	result, err := rememberWithRun(t, store, `{"kind":"constraint","key":"deploy.policy","content":"anything","reason":"explicit"}`)
+	if err != nil || result == nil || !result.IsError || len(store.createRequests) != 0 {
+		t.Fatalf("result = %#v, %v, Create calls = %d; want failure without writing", result, err, len(store.createRequests))
+	}
 }

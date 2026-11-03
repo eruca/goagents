@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type stepFunc struct {
@@ -497,5 +499,300 @@ func TestExecutorCancelRejectsTerminalRun(t *testing.T) {
 	}
 	if result.Status != StatusSucceeded {
 		t.Fatalf("result = %#v", result)
+	}
+}
+
+func claimedRun(t *testing.T, store *MemoryStore, id string) WorkflowRun {
+	t.Helper()
+	if err := store.Save(context.Background(), WorkflowRun{ID: id, Status: StatusPending}); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+	claimed, err := store.ClaimRunnable(context.Background(), "worker-1", time.Minute)
+	if err != nil {
+		t.Fatalf("ClaimRunnable returned error: %v", err)
+	}
+	return claimed
+}
+
+func TestExecutorKeepsLeaseExtendedDuringRun(t *testing.T) {
+	store := NewMemoryStore()
+	claimed := claimedRun(t, store, "wf-lease")
+	var extendedUntil time.Time
+	executor := NewExecutor(store, []Step{
+		stepFunc{name: "work", run: func(ctx context.Context, run WorkflowRun) (StepResult, error) {
+			extended, err := store.ExtendLease(ctx, run.ID, "worker-1", time.Hour)
+			if err != nil {
+				t.Fatalf("ExtendLease returned error: %v", err)
+			}
+			extendedUntil = extended.LeaseUntil
+			return StepResult{}, nil
+		}},
+	})
+
+	if _, err := executor.Run(context.Background(), claimed); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	stored, err := store.Get(context.Background(), "wf-lease")
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if stored.Status != StatusSucceeded || !stored.LeaseUntil.Equal(extendedUntil) || stored.LeaseOwner != "worker-1" {
+		t.Fatalf("stored = %+v, want succeeded with heartbeat lease %v kept", stored, extendedUntil)
+	}
+	if _, err := store.ExtendLease(context.Background(), "wf-lease", "worker-1", time.Minute); err != nil {
+		t.Fatalf("heartbeat after executor writes returned error: %v", err)
+	}
+}
+
+func TestExecutorStopsWhenRunIsCancelledMidStep(t *testing.T) {
+	store := NewMemoryStore()
+	var executor *Executor
+	secondRan := false
+	executor = NewExecutor(store, []Step{
+		stepFunc{name: "first", run: func(ctx context.Context, run WorkflowRun) (StepResult, error) {
+			if _, err := executor.Cancel(ctx, run.ID, "operator stop"); err != nil {
+				t.Fatalf("Cancel returned error: %v", err)
+			}
+			return StepResult{Status: StatusSucceeded}, nil
+		}},
+		stepFunc{name: "second", run: func(ctx context.Context, run WorkflowRun) (StepResult, error) {
+			secondRan = true
+			return StepResult{}, nil
+		}},
+	})
+
+	_, err := executor.Run(context.Background(), WorkflowRun{ID: "wf-cancel-mid", Status: StatusPending})
+	if !errors.Is(err, ErrRunPreempted) {
+		t.Fatalf("Run err = %v, want ErrRunPreempted", err)
+	}
+	if secondRan {
+		t.Fatal("second step ran after cancellation")
+	}
+	stored, err := store.Get(context.Background(), "wf-cancel-mid")
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if stored.Status != StatusCancelled || stored.Error != "operator stop" {
+		t.Fatalf("stored = %+v, want cancellation kept", stored)
+	}
+}
+
+// rendezvousStore pairs up Get calls so each pair waits for the other. A
+// check-then-act approval then lets both callers observe waiting_approval.
+type rendezvousStore struct {
+	*MemoryStore
+	arrivals *atomic.Int32
+	pairs    []chan struct{}
+}
+
+func newRendezvousStore(memory *MemoryStore) rendezvousStore {
+	pairs := make([]chan struct{}, 8)
+	for i := range pairs {
+		pairs[i] = make(chan struct{})
+	}
+	return rendezvousStore{MemoryStore: memory, arrivals: new(atomic.Int32), pairs: pairs}
+}
+
+func (s rendezvousStore) Get(ctx context.Context, id string) (WorkflowRun, error) {
+	run, err := s.MemoryStore.Get(ctx, id)
+	n := int(s.arrivals.Add(1)) - 1
+	if n/2 >= len(s.pairs) {
+		return run, err
+	}
+	if n%2 == 1 {
+		close(s.pairs[n/2])
+		return run, err
+	}
+	select {
+	case <-s.pairs[n/2]:
+	case <-time.After(time.Second):
+	}
+	return run, err
+}
+
+func TestExecutorConcurrentApprovalsRunRemainingStepsOnce(t *testing.T) {
+	memory := NewMemoryStore()
+	if err := memory.Save(context.Background(), WorkflowRun{ID: "wf-double-approve", Status: StatusWaitingApproval, CompletedSteps: []string{"draft"}}); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+	store := newRendezvousStore(memory)
+	var finalizeRuns atomic.Int32
+	executor := NewExecutor(store, []Step{
+		stepFunc{name: "draft", run: func(ctx context.Context, run WorkflowRun) (StepResult, error) {
+			return StepResult{}, errors.New("completed step ran again")
+		}},
+		stepFunc{name: "finalize", run: func(ctx context.Context, run WorkflowRun) (StepResult, error) {
+			finalizeRuns.Add(1)
+			return StepResult{Status: StatusSucceeded}, nil
+		}},
+	})
+
+	errs := make(chan error, 2)
+	for _, audit := range []string{"audit:a", "audit:b"} {
+		go func() {
+			_, err := executor.Approve(context.Background(), "wf-double-approve", Approval{AuditRef: audit})
+			errs <- err
+		}()
+	}
+	var succeeded, rejected int
+	for range 2 {
+		switch err := <-errs; {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, ErrInvalidTransition):
+			rejected++
+		default:
+			t.Fatalf("Approve err = %v", err)
+		}
+	}
+	if succeeded != 1 || rejected != 1 || finalizeRuns.Load() != 1 {
+		t.Fatalf("succeeded=%d rejected=%d finalize runs=%d, want one winner", succeeded, rejected, finalizeRuns.Load())
+	}
+}
+
+func TestExecutorStopsWritingAfterLeaseOwnerChanges(t *testing.T) {
+	store := NewMemoryStore()
+	claimed := claimedRun(t, store, "wf-stolen")
+	executor := NewExecutor(store, []Step{
+		stepFunc{name: "work", run: func(ctx context.Context, run WorkflowRun) (StepResult, error) {
+			if _, err := store.Update(ctx, run.ID, func(current WorkflowRun) (WorkflowRun, error) {
+				current.LeaseOwner = "worker-2"
+				return current, nil
+			}); err != nil {
+				t.Fatalf("Update returned error: %v", err)
+			}
+			return StepResult{Status: StatusSucceeded, OutputRef: "artifact:zombie"}, nil
+		}},
+	})
+
+	if _, err := executor.Run(context.Background(), claimed); !errors.Is(err, ErrRunPreempted) {
+		t.Fatalf("Run err = %v, want ErrRunPreempted", err)
+	}
+	stored, err := store.Get(context.Background(), "wf-stolen")
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if stored.Status != StatusRunning || stored.OutputRef != "" || stored.LeaseOwner != "worker-2" {
+		t.Fatalf("stored = %+v, want new owner's state untouched", stored)
+	}
+}
+
+func TestExecutorRunRejectsPendingRunClaimedByAnotherOwner(t *testing.T) {
+	store := NewMemoryStore()
+	stale := claimedRun(t, store, "wf-reclaimed")
+	if _, err := store.Update(context.Background(), stale.ID, func(current WorkflowRun) (WorkflowRun, error) {
+		current.LeaseOwner = "worker-2"
+		return current, nil
+	}); err != nil {
+		t.Fatalf("Update returned error: %v", err)
+	}
+	executor := NewExecutor(store, []Step{
+		stepFunc{name: "work", run: func(ctx context.Context, run WorkflowRun) (StepResult, error) {
+			t.Fatal("stale owner ran a step")
+			return StepResult{}, nil
+		}},
+	})
+
+	if _, err := executor.Run(context.Background(), stale); !errors.Is(err, ErrRunPreempted) {
+		t.Fatalf("Run err = %v, want ErrRunPreempted", err)
+	}
+}
+
+func TestRetryPolicyBackoffIsJitteredAndCapped(t *testing.T) {
+	policy := RetryPolicy{BaseDelay: 10 * time.Millisecond, MaxDelay: 40 * time.Millisecond}
+	for retry, ceiling := range map[int]time.Duration{1: 10, 2: 20, 3: 40, 10: 40} {
+		ceiling *= time.Millisecond
+		seen := map[time.Duration]bool{}
+		for range 200 {
+			delay := policy.Backoff(retry)
+			if delay < 0 || delay > ceiling {
+				t.Fatalf("Backoff(%d) = %s, want within [0, %s]", retry, delay, ceiling)
+			}
+			seen[delay] = true
+		}
+		if len(seen) < 10 {
+			t.Fatalf("Backoff(%d) produced %d distinct delays, want jitter", retry, len(seen))
+		}
+	}
+	if got := (RetryPolicy{}).Backoff(3); got != 0 {
+		t.Fatalf("Backoff without BaseDelay = %s, want 0", got)
+	}
+}
+
+func TestExecutorYieldsLeasedRunBetweenRetriesAndKeepsBudgetAcrossClaims(t *testing.T) {
+	store := NewMemoryStore()
+	attempts := 0
+	executor := NewExecutor(store, []Step{
+		stepFunc{name: "flaky", run: func(context.Context, WorkflowRun) (StepResult, error) {
+			attempts++
+			return StepResult{}, TransientError{Err: errors.New("temporary outage")}
+		}},
+	}, WithRetryPolicy(RetryPolicy{MaxAttempts: 3, BaseDelay: time.Hour}))
+	if err := store.Save(context.Background(), WorkflowRun{ID: "wf-yield", Status: StatusPending}); err != nil {
+		t.Fatal(err)
+	}
+
+	claimAndRun := func() (WorkflowRun, error) {
+		t.Helper()
+		claimed, err := store.ClaimRunnable(context.Background(), "worker-1", time.Minute)
+		if err != nil {
+			t.Fatalf("ClaimRunnable returned error: %v", err)
+		}
+		run, runErr := executor.Run(context.Background(), claimed)
+		if _, err := store.ReleaseLease(context.Background(), run.ID, "worker-1"); err != nil {
+			t.Fatalf("ReleaseLease returned error: %v", err)
+		}
+		return run, runErr
+	}
+	makeDue := func() {
+		t.Helper()
+		if _, err := store.Update(context.Background(), "wf-yield", func(run WorkflowRun) (WorkflowRun, error) {
+			run.NextAttemptAt = time.Now().Add(-time.Second)
+			return run, nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for retry := 1; retry <= 2; retry++ {
+		before := time.Now()
+		run, err := claimAndRun()
+		if err != nil {
+			t.Fatalf("attempt %d: Run returned error: %v", retry, err)
+		}
+		if run.Status != StatusPending || run.StepRetries != retry || run.NextAttemptAt.Before(before) {
+			t.Fatalf("attempt %d: run = %+v, want pending retry %d scheduled ahead", retry, run, retry)
+		}
+		if _, err := store.ClaimRunnable(context.Background(), "worker-2", time.Minute); !errors.Is(err, ErrNoRunnableWorkflow) {
+			t.Fatalf("attempt %d: claim before retry is due = %v, want none", retry, err)
+		}
+		makeDue()
+	}
+
+	run, err := claimAndRun()
+	if err == nil || run.Status != StatusFailed {
+		t.Fatalf("final run = %+v, %v; want failure after the budget", run, err)
+	}
+	if attempts != 3 || run.StepAttempts["flaky"] != 3 || run.StepRetries != 0 {
+		t.Fatalf("attempts = %d, run = %+v; want 3 attempts and a reset retry count", attempts, run)
+	}
+}
+
+func TestExecutorWaitsInProcessForUnleasedRetry(t *testing.T) {
+	store := NewMemoryStore()
+	attempts := 0
+	executor := NewExecutor(store, []Step{
+		stepFunc{name: "flaky", run: func(context.Context, WorkflowRun) (StepResult, error) {
+			attempts++
+			if attempts < 3 {
+				return StepResult{}, TransientError{Err: errors.New("temporary outage")}
+			}
+			return StepResult{}, nil
+		}},
+	}, WithRetryPolicy(RetryPolicy{MaxAttempts: 3, BaseDelay: time.Millisecond}))
+
+	run, err := executor.Run(context.Background(), WorkflowRun{ID: "wf-sync-retry"})
+	if err != nil || run.Status != StatusSucceeded || attempts != 3 || run.StepRetries != 0 {
+		t.Fatalf("run = %+v, %v, attempts = %d; want success after in-process retries", run, err, attempts)
 	}
 }

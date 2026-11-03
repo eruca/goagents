@@ -559,3 +559,75 @@ func assertNonCanonicalIdentityRejected(t *testing.T, store memorykit.LifecycleS
 		t.Fatalf("Sources non-canonical ID error = %v, want ErrInvalidMemory", err)
 	}
 }
+
+// FullTextStore is a store whose full-text recall channel is under test.
+type FullTextStore interface {
+	memorykit.LifecycleStore
+	memorykit.RecallStore
+}
+
+// RunFullTextRecallConformance checks that full-text recall matches any query
+// term, handles Chinese text, drops matches weaker than half the best one, and
+// ranks by matched terms the same way in every store.
+func RunFullTextRecallConformance(t *testing.T, newStore func(*testing.T) FullTextStore) {
+	t.Helper()
+	cases := []struct {
+		name  string
+		query string
+		want  []string
+	}{
+		{"any english term matches", "which database do we use for embeddings", []string{fullTextPgvector}},
+		{"chinese question matches chinese memory", "我们选了哪个数据库？", []string{fullTextChineseDB}},
+		{"more matched terms rank first", "deploy approvals pgvector embeddings", []string{fullTextDeploy, fullTextPgvector}},
+		{"no matching term finds nothing", "kubernetes 天气", []string{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newStore(t)
+			seedFullTextMemories(t, store)
+			set, err := store.SearchCandidates(context.Background(), memorykit.CandidateQuery{
+				Scope: fullTextScope, Text: tc.query, FullTextLimit: 10,
+				Now: time.Date(2026, 7, 22, 0, 0, 0, 0, time.UTC),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := make([]string, 0, len(set.FullText))
+			for _, candidate := range set.FullText {
+				got = append(got, candidate.Memory.ID)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("full-text IDs = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+const (
+	fullTextPgvector  = "f1111111-1111-4111-8111-111111111111"
+	fullTextDeploy    = "f2222222-2222-4222-8222-222222222222"
+	fullTextChineseDB = "f3333333-3333-4333-8333-333333333333"
+)
+
+var fullTextScope = memorykit.Scope{TenantID: "tenant-conformance", SubjectType: memorykit.SubjectProject, SubjectID: "project-fulltext"}
+
+func seedFullTextMemories(t *testing.T, store memorykit.LifecycleStore) {
+	t.Helper()
+	for _, seed := range []struct {
+		id, key, content string
+		importance       int
+	}{
+		{fullTextPgvector, "storage.vectors", "Use pgvector to store embeddings", 90},
+		{fullTextDeploy, "release.policy", "Every deploy needs two approvals and passing embeddings checks", 10},
+		{fullTextChineseDB, "storage.database", "项目使用 PostgreSQL 数据库存储记忆", 50},
+	} {
+		request := baseCreate(seed.id, fullTextScope.SubjectID, memorykit.StatusActive)
+		request.Key = seed.key
+		request.Content = seed.content
+		request.Importance = seed.importance
+		request.IdempotencyKey = ""
+		if _, err := store.Create(context.Background(), request); err != nil {
+			t.Fatalf("seed %s: %v", seed.id, err)
+		}
+	}
+}

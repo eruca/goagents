@@ -20,10 +20,10 @@ type Config struct {
 	Model      string
 	HTTPClient *http.Client
 	Headers    map[string]string
+	Limits     Limits
 }
 
-// Limits 是显式启用的 Provider 侧边界；零值关闭对应边界，
-// 从而让 New 为既有 consumer 保持 v0.1.0 行为。
+// Limits bounds provider requests and responses. A zero field disables that bound.
 type Limits struct {
 	MaxOutputTokens  int
 	MaxRequestBytes  int
@@ -38,12 +38,7 @@ type Client struct {
 }
 
 func New(config Config) (*Client, error) {
-	return NewWithLimits(config, Limits{})
-}
-
-// NewWithLimits 创建带显式请求、响应与输出 token 边界的 client。
-// 需要可靠性限制的调用者必须主动选择该入口。
-func NewWithLimits(config Config, limits Limits) (*Client, error) {
+	limits := config.Limits
 	if limits.MaxOutputTokens < 0 || limits.MaxRequestBytes < 0 || limits.MaxResponseBytes < 0 {
 		return nil, newProviderError("configuration_error", false, ErrInvalidConfig)
 	}
@@ -79,20 +74,25 @@ func NewWithLimits(config Config, limits Limits) (*Client, error) {
 }
 
 func (c *Client) Chat(ctx context.Context, req ports.ChatRequest) (*ports.ChatResponse, error) {
-	return c.chat(ctx, req, 0)
-}
-
-// ChatWithMaxOutputTokens 在保持 ChatRequest v0.1.0 形状的同时，
-// 使用显式生成上限发送一次请求。
-func (c *Client) ChatWithMaxOutputTokens(ctx context.Context, req ports.ChatRequest, maxOutputTokens int) (*ports.ChatResponse, error) {
-	return c.chat(ctx, req, maxOutputTokens)
-}
-
-func (c *Client) chat(ctx context.Context, req ports.ChatRequest, maxOutputTokens int) (*ports.ChatResponse, error) {
-	payload, err := c.providerRequestPayload(req, maxOutputTokens)
+	payload, err := c.providerRequestPayload(req)
 	if err != nil {
 		return nil, err
 	}
+	resp, err := c.post(ctx, payload)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	data, err := readResponseBody(resp, c.limits.MaxResponseBytes)
+	if err != nil {
+		return nil, err
+	}
+	return parseChatResponse(data)
+}
+
+// post sends a chat completions body and returns a successful response.
+func (c *Client) post(ctx context.Context, payload []byte) (*http.Response, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return nil, newProviderError("configuration_error", false, ErrInvalidConfig)
@@ -109,17 +109,14 @@ func (c *Client) chat(ctx context.Context, req ports.ChatRequest, maxOutputToken
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		resp.Body.Close()
 		return nil, &ResponseError{StatusCode: resp.StatusCode}
 	}
+	return resp, nil
+}
 
-	data, err := readResponseBody(resp, c.limits.MaxResponseBytes)
-	if err != nil {
-		return nil, err
-	}
-
+func parseChatResponse(data []byte) (*ports.ChatResponse, error) {
 	var decoded chatCompletionsResponse
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return nil, newProviderError("invalid_json", true, ErrInvalidJSON)
@@ -130,10 +127,13 @@ func (c *Client) chat(ctx context.Context, req ports.ChatRequest, maxOutputToken
 	if len(decoded.Choices) == 0 {
 		return nil, newProviderError("invalid_response", true, ErrInvalidResponse)
 	}
-	result := &ports.ChatResponse{}
 	message := decoded.Choices[0].Message
-	result.Content = message.Content
-	for _, call := range message.ToolCalls {
+	return chatResponse(message.Content, message.ToolCalls, *decoded.Usage)
+}
+
+func chatResponse(content string, calls []chatToolCall, usage chatUsage) (*ports.ChatResponse, error) {
+	result := &ports.ChatResponse{Content: content}
+	for _, call := range calls {
 		if call.ID == "" || call.Function.Name == "" {
 			return nil, newProviderError("tool_call_invalid", true, ErrInvalidResponse)
 		}
@@ -143,32 +143,26 @@ func (c *Client) chat(ctx context.Context, req ports.ChatRequest, maxOutputToken
 			Input: json.RawMessage(call.Function.Arguments),
 		})
 	}
-	result.Usage.InputTokens = decoded.Usage.PromptTokens
-	result.Usage.OutputTokens = decoded.Usage.CompletionTokens
+	result.Usage.InputTokens = usage.PromptTokens
+	result.Usage.OutputTokens = usage.CompletionTokens
 	return result, nil
 }
 
-// ProviderRequestSHA256 返回 Chat 实际发送的 JSON body 摘要。
+// ProviderRequestSHA256 returns the digest of the exact JSON body Chat sends.
 func (c *Client) ProviderRequestSHA256(req ports.ChatRequest) ([sha256.Size]byte, error) {
-	payload, err := c.providerRequestPayload(req, 0)
+	payload, err := c.providerRequestPayload(req)
 	if err != nil {
 		return [sha256.Size]byte{}, err
 	}
 	return sha256.Sum256(payload), nil
 }
 
-// ProviderRequestSHA256WithMaxOutputTokens 计算限额请求的精确 body 摘要，
-// 避免 pre-dispatch claim 与真实 dispatch 内容分叉。
-func (c *Client) ProviderRequestSHA256WithMaxOutputTokens(req ports.ChatRequest, maxOutputTokens int) ([sha256.Size]byte, error) {
-	payload, err := c.providerRequestPayload(req, maxOutputTokens)
-	if err != nil {
-		return [sha256.Size]byte{}, err
-	}
-	return sha256.Sum256(payload), nil
+func (c *Client) providerRequestPayload(req ports.ChatRequest) ([]byte, error) {
+	return c.requestPayload(req, false)
 }
 
-func (c *Client) providerRequestPayload(req ports.ChatRequest, requestedMaxOutputTokens int) ([]byte, error) {
-	maxTokens, err := normalizedMaxOutputTokens(requestedMaxOutputTokens, c.limits.MaxOutputTokens)
+func (c *Client) requestPayload(req ports.ChatRequest, stream bool) ([]byte, error) {
+	maxTokens, err := normalizedMaxOutputTokens(req.MaxOutputTokens, c.limits.MaxOutputTokens)
 	if err != nil {
 		return nil, err
 	}
@@ -177,6 +171,10 @@ func (c *Client) providerRequestPayload(req ports.ChatRequest, requestedMaxOutpu
 		Messages:  buildMessages(req.Messages),
 		Tools:     buildTools(req.Tools),
 		MaxTokens: maxTokens,
+	}
+	if stream {
+		body.Stream = true
+		body.StreamOptions = &streamOptions{IncludeUsage: true}
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -220,10 +218,16 @@ func readResponseBody(resp *http.Response, maxResponseBytes int) ([]byte, error)
 }
 
 type chatCompletionsRequest struct {
-	Model     string        `json:"model"`
-	Messages  []chatMessage `json:"messages"`
-	Tools     []chatTool    `json:"tools,omitempty"`
-	MaxTokens int           `json:"max_tokens,omitempty"`
+	Model         string         `json:"model"`
+	Messages      []chatMessage  `json:"messages"`
+	Tools         []chatTool     `json:"tools,omitempty"`
+	MaxTokens     int            `json:"max_tokens,omitempty"`
+	Stream        bool           `json:"stream,omitempty"`
+	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+}
+
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type chatMessage struct {

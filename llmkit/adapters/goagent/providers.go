@@ -6,13 +6,13 @@ import (
 	"strings"
 
 	"github.com/eruca/goagents/goagent/extensions/providers/openaiapi"
-	"github.com/eruca/goagents/llmkit/llmkit"
+	"github.com/eruca/goagents/llmkit"
 )
 
 // OpenAICompatibleProvidersFromConfig builds provider clients for configured
 // OpenAI-compatible models. It reads API key values from getenv at construction
 // time and never stores keys in llmkit audit records.
-func OpenAICompatibleProvidersFromConfig(config llmkit.Config, getenv func(string) string, httpClient *http.Client) (map[string]ProviderClient, error) {
+func OpenAICompatibleProvidersFromConfig(config llmkit.Config, getenv func(string) string, httpClient *http.Client, limits openaiapi.Limits) (map[string]ProviderClient, error) {
 	accounts := accountConfigsByAlias(config.Accounts)
 	providers := make(map[string]ProviderClient)
 	for _, model := range config.Models {
@@ -42,6 +42,7 @@ func OpenAICompatibleProvidersFromConfig(config llmkit.Config, getenv func(strin
 			APIKey:     apiKey,
 			Model:      modelName,
 			HTTPClient: httpClient,
+			Limits:     limits,
 		})
 		if err != nil {
 			wrapped := fmt.Errorf("create provider for model %q: %w", model.Alias, err)

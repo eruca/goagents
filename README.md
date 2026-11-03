@@ -1,13 +1,17 @@
 # goagents
 
-`goagents` is a Go workspace for composing durable agent runtimes from small,
-independent kits. Each top-level module owns one boundary and can be used or
-tested independently.
+`goagents` is one Go module, `github.com/eruca/goagents`, for composing
+durable agent runtimes from small kits. Each top-level directory is a kit that
+owns one boundary; a kit's packages import no other kit except where
+[`docs/modules.md`](docs/modules.md) allows it, which `internal/boundary`
+enforces in tests. Go compiles only the packages you import, so depending on
+the module does not build unrelated kits or their dependencies.
 
-## Modules
+```bash
+go get github.com/eruca/goagents@latest
+```
 
-The current release layout contains 14 workspace modules: 13 released modules
-plus unreleased `memorykit`.
+## Kits
 
 - [`goagent`](goagent/README.md): agent loop, typed tools, approvals, events, and provider adapters.
 - [`workflowkit`](workflowkit/README.md): durable workflow lifecycle, retries, approvals, and queue leases.
@@ -24,46 +28,50 @@ plus unreleased `memorykit`.
 - [`mcpkit/officialsdk`](mcpkit/officialsdk/README.md): official MCP Go SDK transport adapter.
 - [`ocrs`](ocrs/README.md): OCR parsing, chunking, scheduling, and retry support.
 
-## Verify the workspace
+## Verify
 
 From the repository root:
 
 ```bash
 bash ./scripts/verify-all.sh
+bash ./scripts/verify-external-consumer.sh
 ```
 
-This runs module tests, race checks for the core execution paths, MCP smokes,
-and runnable examples.
+`verify-all.sh` checks the single-module layout and formatting, then runs
+`go vet`, `go test -race ./...` (including the kit dependency boundaries), MCP
+smokes, and the runnable examples. `verify-external-consumer.sh` packs the
+working tree into a local module proxy and builds and tests a separate module
+that depends on it with `GOWORK=off` and no replace directives.
 
-`memorykit` unit tests are part of this workspace command. Its required real
-PostgreSQL/pgvector gate is separate and fail-closed:
+The real PostgreSQL/pgvector gates are separate and fail-closed:
 
 ```bash
 MEMORYKIT_REQUIRE_POSTGRES=1 \
 MEMORYKIT_POSTGRES_TEST_DSN='postgres://postgres:postgres@localhost:5432/memorykit_test?sslmode=disable' \
 go test -count=1 -race ./memorykit/...
 
-cd examples/host-api
+RUNKIT_POSTGRES_TEST_DSN='postgres://postgres:postgres@localhost:5432/runkit_test?sslmode=disable' \
+go test -count=1 -race ./runkit/...
+
 MEMORYKIT_REQUIRE_POSTGRES=1 \
 MEMORYKIT_POSTGRES_TEST_DSN='postgres://postgres:postgres@localhost:5432/memorykit_test?sslmode=disable' \
-go test -count=1 -race -run '^TestHostMemoryPostgresBlackBox$' ./...
+go test -count=1 -race -run '^TestHostMemoryPostgresBlackBox$' ./examples/host-api
 ```
 
-## Release layout
+## Release
 
-The repository uses one monorepo namespace, `github.com/eruca/goagents`, with
-independently tagged subdirectory modules. The historical v0.1.0 publication
-contains 12 modules; the Host lifecycle v0.1.1 candidate adds `hostkit` and
-selectively versions only modules with public changes. Validate module paths,
-internal dependency edges, workspace mappings, and tag prefixes with:
+Releases are tags of the whole module: `vX.Y.Z` on a commit where CI passed.
+After pushing a tag, confirm that the published version resolves and builds:
 
 ```bash
-bash ./scripts/verify-release-layout.sh
+bash ./scripts/verify-external-consumer.sh vX.Y.Z
 ```
 
-Local layout checks do not prove publication. Every release still requires an
-exact remote commit, successful CI, annotated tags, and clean `GOWORK=off`
-consumers without local replacements.
+Before the single-module layout, each kit was its own module with tags such as
+`goagent/v0.1.2`. Those versions still exist in the module proxy. A consumer
+that starts with `go get github.com/eruca/goagents@vX.Y.Z` resolves every kit
+from this module; requiring an old per-kit module path at the same time would
+make imports ambiguous.
 
 ## Host API MVP
 
@@ -106,9 +114,10 @@ production throughput SLO. A `SKIP` is not a passing acceptance result.
 
 The historical MVP GO decision and its accepted P2 items remain recorded in
 the [v0.1.0 final acceptance record](docs/superpowers/specs/2026-07-15-mvp-final-acceptance.md).
-Both lifecycle P2 items are now implemented; the current selective-module
-release boundary is recorded in the
-[v0.1.1 publication record](docs/superpowers/specs/2026-07-18-v0.1.1-publication.md).
+Both lifecycle P2 items are now implemented. The last per-kit module release
+is recorded in the
+[v0.1.1 publication record](docs/superpowers/specs/2026-07-18-v0.1.1-publication.md);
+releases are now whole-module tags as described under [Release](#release).
 
 ## License
 

@@ -10,15 +10,10 @@ It is not an agent runtime. `goagent` owns a single ReAct-style agent run;
 ## Install
 
 ```bash
-go get github.com/eruca/goagents/workflowkit
+go get github.com/eruca/goagents@latest
 ```
 
-For local development before publishing:
-
-```bash
-go mod edit -replace github.com/eruca/goagents/workflowkit=/Users/nick/VibeCoding/goagents/workflowkit
-go get github.com/eruca/goagents/workflowkit
-```
+Then import `github.com/eruca/goagents/workflowkit`.
 
 ## Boundary
 
@@ -139,7 +134,11 @@ Configure retry policy on the executor:
 
 ```go
 executor := workflowkit.NewExecutor(store, steps,
-	workflowkit.WithRetryPolicy(workflowkit.RetryPolicy{MaxAttempts: 3}),
+	workflowkit.WithRetryPolicy(workflowkit.RetryPolicy{
+		MaxAttempts: 3,               // attempts per step, counting the first
+		BaseDelay:   time.Second,     // retry n waits rand[0, BaseDelay*2^(n-1)]
+		MaxDelay:    time.Minute,     // backoff cap (default 32 x BaseDelay)
+	}),
 )
 ```
 
@@ -149,8 +148,15 @@ Only errors marked as transient are retried:
 return workflowkit.StepResult{}, workflowkit.TransientError{Err: err}
 ```
 
-Plain Go errors fail the workflow immediately. Retry is intentionally local to a
-step execution; it is not a distributed scheduler or delayed job queue.
+Plain Go errors fail the workflow immediately.
+
+Backoff uses full jitter, so many runs failing together do not retry in
+lockstep. A run claimed from a queue (it has a lease owner) does not hold its
+worker during the wait: `Run` returns it as `pending` with `NextAttemptAt` set,
+the worker releases its lease, and `ClaimRunnable` skips it until the retry is
+due. The retry budget travels with the run in `StepRetries`, so it holds across
+claims; it resets when the step succeeds or the run fails, so requeueing a
+failed run starts a fresh budget. Runs without a lease wait in-process.
 
 ## Step History
 
@@ -257,22 +263,21 @@ step. Host applications decide how to persist audit events and full artifacts.
 ## Verify
 
 ```bash
-./scripts/verify-e2e.sh
+go test -race ./workflowkit/...
 ```
 
-The script runs core tests, race tests, basic workflow examples, SQLite resume,
-the main-module dependency boundary check, the optional `agentstep` module, and
-the nested `agent-approval` and `ocr-review` examples.
+The repository's `scripts/verify-all.sh` also runs the workflow examples. The
+core `workflowkit` packages must not import `goagent`; only `agentstep` does,
+which `internal/boundary` enforces.
 
-See `docs/contracts.md` for API and persistence contracts, and
-`docs/release.md` and `docs/release-readiness.md` for release preparation.
+See `docs/contracts.md` for API and persistence contracts.
 
 ## Examples
 
 - `examples/basic` shows retry, approval wait, `Approve`, and resume.
 - `examples/agent-approval` shows `agentstep` wrapping a mock `goagent` run, mapping the agent result to `waiting_approval`, recording an audit ref, and continuing to finalization.
 - `examples/sqlite-resume` shows waiting approval, closing the process-owned store, reopening SQLite, updating audit refs, and continuing from persisted state.
-- `examples/ocr-review` is a nested example module that shows a host-owned composition across `ocrs`, `contextkit`, `goagent`, and `workflowkit`. OCR output is stored behind artifact refs, `contextkit` builds a bounded model-facing projection, `agentstep` maps the review to `waiting_approval`, and the workflow resumes after the host records an audit ref.
+- `examples/ocr-review` is an example that shows a host-owned composition across `ocrs`, `contextkit`, `goagent`, and `workflowkit`. OCR output is stored behind artifact refs, `contextkit` builds a bounded model-facing projection, `agentstep` maps the review to `waiting_approval`, and the workflow resumes after the host records an audit ref.
 
 ## API Stability
 
@@ -287,14 +292,10 @@ The intended stable surface is:
 
 Extension packages are useful but still early:
 
-- `agentstep` is a separately versioned optional module. It depends on `goagent`;
-  the main `workflowkit` module does not.
+- `agentstep` is an optional adapter package. It depends on `goagent`; the core
+  `workflowkit` packages do not.
 - `sqlitestore` is suitable for local persistence and prototypes; schema
   compatibility should be treated as experimental until versioned migrations are
   introduced.
 - `storetest` is intended for future store implementations.
 
-`workflowkit/agentstep` requires tagged `goagent` and `workflowkit` versions and
-contains no local replace. The root `go.work` supplies version-specific local
-mappings before those tags exist; nested example modules keep relative replaces
-because they are verification programs, not published libraries.

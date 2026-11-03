@@ -5,84 +5,64 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"sync/atomic"
-	"time"
 
 	"github.com/eruca/goagents/ocrs"
 )
 
-var ErrNoEndpoint = errors.New("no endpoint configured")
+var (
+	ErrNoEndpoint = errors.New("no endpoint configured")
+	ErrClosed     = errors.New("dispatcher closed")
+)
 
-type Config struct {
-	QueueSize    int
-	PollInterval time.Duration
-}
-
+// Dispatcher runs calls on a pool of workers shared across providers. Every
+// worker takes the next call from one queue as soon as it is free, so load
+// follows each provider's capacity (its Workers count and speed) and a call
+// never waits behind a busy provider while another one is idle.
 type Dispatcher[I, O any] struct {
-	states []*endpointState[I, O]
-	next   atomic.Uint64
+	jobs   chan request[I, O]
 	closed chan struct{}
 	once   sync.Once
 	wg     sync.WaitGroup
-	cfg    Config
-}
-
-type endpointState[I, O any] struct {
-	ep   ocrs.ProviderConfig[I, O]
-	jobs chan request[I, O]
 }
 
 type request[I, O any] struct {
 	ctx   context.Context
 	data  I
-	reply chan response[I, O]
+	reply chan response[O]
 }
 
-type response[I, O any] struct {
+type response[O any] struct {
 	value O
 	err   error
 }
 
-func NewDispatcher[I, O any](providers []ocrs.ProviderConfig[I, O], cfg Config) (*Dispatcher[I, O], error) {
+func NewDispatcher[I, O any](providers []ocrs.ProviderConfig[I, O]) (*Dispatcher[I, O], error) {
 	if len(providers) == 0 {
 		return nil, ErrNoEndpoint
 	}
-	if cfg.QueueSize <= 0 {
-		cfg.QueueSize = 64
-	}
-	if cfg.PollInterval <= 0 {
-		cfg.PollInterval = 50 * time.Millisecond
-	}
-
-	d := &Dispatcher[I, O]{
-		closed: make(chan struct{}),
-		cfg:    cfg,
-	}
-
 	for i, provider := range providers {
 		if provider.Provider == nil {
 			return nil, fmt.Errorf("provider at index %d is nil", i)
 		}
-		workers := provider.Workers
-		if workers <= 0 {
-			workers = 1
-		}
-
-		st := &endpointState[I, O]{
-			ep:   provider,
-			jobs: make(chan request[I, O], cfg.QueueSize),
-		}
-		d.states = append(d.states, st)
-
-		for range workers {
-			d.wg.Add(1)
-			go d.worker(st)
-		}
 	}
 
+	d := &Dispatcher[I, O]{
+		// Unbuffered: Handle blocks until a worker takes the call, so a
+		// cancelled caller never leaves a stale call queued.
+		jobs:   make(chan request[I, O]),
+		closed: make(chan struct{}),
+	}
+	for _, provider := range providers {
+		for range max(provider.Workers, 1) {
+			d.wg.Add(1)
+			go d.worker(provider.Provider)
+		}
+	}
 	return d, nil
 }
 
+// Close stops the workers after their current calls; pending and later Handle
+// calls return ErrClosed.
 func (d *Dispatcher[I, O]) Close() {
 	d.once.Do(func() {
 		close(d.closed)
@@ -92,76 +72,35 @@ func (d *Dispatcher[I, O]) Close() {
 
 func (d *Dispatcher[I, O]) Handle(ctx context.Context, data I) (O, error) {
 	var zero O
-	reply := make(chan response[I, O], 1)
-	req := request[I, O]{
-		ctx:   ctx,
-		data:  data,
-		reply: reply,
+	reply := make(chan response[O], 1)
+	select {
+	case d.jobs <- request[I, O]{ctx: ctx, data: data, reply: reply}:
+	case <-ctx.Done():
+		return zero, ctx.Err()
+	case <-d.closed:
+		return zero, ErrClosed
 	}
-
-	ticker := time.NewTicker(d.cfg.PollInterval)
-	defer ticker.Stop()
-
-	for {
-		if st, ok := d.pickEndpointForEnqueue(); ok {
-			select {
-			case st.jobs <- req:
-				select {
-				case out := <-reply:
-					return out.value, out.err
-				case <-ctx.Done():
-					return zero, ctx.Err()
-				case <-d.closed:
-					return zero, errors.New("dispatcher closed")
-				}
-			case <-d.closed:
-				return zero, errors.New("dispatcher closed")
-			default:
-			}
-		}
-
-		select {
-		case <-ctx.Done():
-			return zero, ctx.Err()
-		case <-d.closed:
-			return zero, errors.New("dispatcher closed")
-		case <-ticker.C:
-		}
+	select {
+	case out := <-reply:
+		return out.value, out.err
+	case <-ctx.Done():
+		return zero, ctx.Err()
 	}
 }
 
-func (d *Dispatcher[I, O]) pickEndpointForEnqueue() (*endpointState[I, O], bool) {
-	if len(d.states) == 0 {
-		return nil, false
-	}
-	idx := (d.next.Add(1) - 1) % uint64(len(d.states))
-	return d.states[idx], true
-}
-
-func (d *Dispatcher[I, O]) worker(st *endpointState[I, O]) {
+func (d *Dispatcher[I, O]) worker(provider ocrs.Provider[I, O]) {
 	defer d.wg.Done()
-
 	for {
 		select {
 		case <-d.closed:
 			return
-		case req := <-st.jobs:
-			d.handleRequest(st, req)
+		case req := <-d.jobs:
+			if err := req.ctx.Err(); err != nil {
+				req.reply <- response[O]{err: err}
+				continue
+			}
+			value, err := provider.Handle(req.ctx, req.data)
+			req.reply <- response[O]{value: value, err: err}
 		}
 	}
-}
-
-func (d *Dispatcher[I, O]) handleRequest(st *endpointState[I, O], req request[I, O]) {
-	select {
-	case <-req.ctx.Done():
-		req.reply <- response[I, O]{err: req.ctx.Err()}
-		return
-	case <-d.closed:
-		req.reply <- response[I, O]{err: errors.New("dispatcher closed")}
-		return
-	default:
-	}
-
-	value, err := st.ep.Provider.Handle(req.ctx, req.data)
-	req.reply <- response[I, O]{value: value, err: err}
 }

@@ -11,6 +11,7 @@ const (
 	EventToolStarted     EventType = "tool.started"
 	EventToolCompleted   EventType = "tool.completed"
 	EventToolFailed      EventType = "tool.failed"
+	EventToolRejected    EventType = "tool.rejected"
 	EventMemoryLoaded    EventType = "memory.loaded"
 	EventMemorySaved     EventType = "memory.saved"
 	EventFinalized       EventType = "finalized"

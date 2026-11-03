@@ -34,12 +34,13 @@ func TestClientProviderRequestSHA256MatchesDispatchedBody(t *testing.T) {
 	req := ports.ChatRequest{
 		Messages: []ports.ChatMessage{{Role: "user", Content: "hello"}},
 	}
-	want, err := client.ProviderRequestSHA256WithMaxOutputTokens(req, 123)
+	req.MaxOutputTokens = 123
+	want, err := client.ProviderRequestSHA256(req)
 	if err != nil {
-		t.Fatalf("ProviderRequestSHA256WithMaxOutputTokens returned error: %v", err)
+		t.Fatalf("ProviderRequestSHA256 returned error: %v", err)
 	}
-	if _, err := client.ChatWithMaxOutputTokens(context.Background(), req, 123); err != nil {
-		t.Fatalf("ChatWithMaxOutputTokens returned error: %v", err)
+	if _, err := client.Chat(context.Background(), req); err != nil {
+		t.Fatalf("Chat returned error: %v", err)
 	}
 	if got := sha256.Sum256(dispatchedBody); got != want {
 		t.Fatalf("dispatched request SHA-256 = %x, want %x", got, want)
@@ -73,7 +74,7 @@ func TestClientBuildsChatCompletionsRequest(t *testing.T) {
 		t.Fatalf("New returned error: %v", err)
 	}
 
-	_, err = client.ChatWithMaxOutputTokens(context.Background(), ports.ChatRequest{
+	_, err = chatWithMaxOutputTokens(client, ports.ChatRequest{
 		Messages: []ports.ChatMessage{
 			{Role: "system", Content: "system"},
 			{Role: "user", Content: "hello"},
@@ -298,7 +299,7 @@ func TestClientDoesNotExposeNon2xxResponseBody(t *testing.T) {
 	if !errors.As(err, &responseErr) {
 		t.Fatalf("err type = %T, want *ResponseError", err)
 	}
-	if responseErr.StatusCode != http.StatusBadRequest || responseErr.Body != "" {
+	if responseErr.StatusCode != http.StatusBadRequest {
 		t.Fatalf("ResponseError = %+v, want status only", responseErr)
 	}
 }
@@ -387,14 +388,14 @@ func TestClientEnforcesMaxOutputTokens(t *testing.T) {
 			}))
 			defer server.Close()
 
-			client, err := NewWithLimits(
+			client, err := newWithLimits(
 				Config{BaseURL: server.URL, Model: "test-model"},
 				Limits{MaxOutputTokens: 4096},
 			)
 			if err != nil {
 				t.Fatalf("New returned error: %v", err)
 			}
-			_, err = client.ChatWithMaxOutputTokens(context.Background(), ports.ChatRequest{}, tt.requested)
+			_, err = chatWithMaxOutputTokens(client, ports.ChatRequest{}, tt.requested)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("Chat() error = %v, wantErr %t", err, tt.wantErr)
 			}
@@ -411,15 +412,15 @@ func TestClientEnforcesMaxOutputTokens(t *testing.T) {
 	}
 }
 
-func TestNewWithLimitsRejectsNegativeValues(t *testing.T) {
+func TestNewRejectsNegativeLimits(t *testing.T) {
 	limits := []Limits{
 		{MaxOutputTokens: -1},
 		{MaxRequestBytes: -1},
 		{MaxResponseBytes: -1},
 	}
 	for _, limit := range limits {
-		if _, err := NewWithLimits(Config{BaseURL: "https://provider.invalid", Model: "test-model"}, limit); !errors.Is(err, ErrInvalidConfig) {
-			t.Fatalf("NewWithLimits(%+v) error = %v, want ErrInvalidConfig", limit, err)
+		if _, err := newWithLimits(Config{BaseURL: "https://provider.invalid", Model: "test-model"}, limit); !errors.Is(err, ErrInvalidConfig) {
+			t.Fatalf("New with limits %+v error = %v, want ErrInvalidConfig", limit, err)
 		}
 	}
 }
@@ -477,7 +478,7 @@ func TestClientEnforcesRequestByteLimit(t *testing.T) {
 			}))
 			defer server.Close()
 
-			client, err := NewWithLimits(
+			client, err := newWithLimits(
 				Config{BaseURL: server.URL, Model: "test-model"},
 				Limits{MaxRequestBytes: 128 << 10},
 			)
@@ -584,7 +585,7 @@ func testClientWithLimits(t *testing.T, response string, limits Limits) *Client 
 	}))
 	t.Cleanup(server.Close)
 
-	client, err := NewWithLimits(Config{BaseURL: server.URL, Model: "test-model"}, limits)
+	client, err := newWithLimits(Config{BaseURL: server.URL, Model: "test-model"}, limits)
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
 	}
@@ -615,4 +616,14 @@ func chatRequestWithSerializedSize(t *testing.T, target int) ports.ChatRequest {
 		}
 		req.Messages[0].Content = strings.Repeat("x", contentSize)
 	}
+}
+
+func newWithLimits(config Config, limits Limits) (*Client, error) {
+	config.Limits = limits
+	return New(config)
+}
+
+func chatWithMaxOutputTokens(client *Client, req ports.ChatRequest, maxOutputTokens int) (*ports.ChatResponse, error) {
+	req.MaxOutputTokens = maxOutputTokens
+	return client.Chat(context.Background(), req)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/eruca/goagents/memorykit"
 	pgvector "github.com/pgvector/pgvector-go"
@@ -82,24 +83,51 @@ func (s *Store) searchExact(ctx context.Context, query memorykit.CandidateQuery)
 	return scanCandidates(rows, memorykit.ChannelExact, false)
 }
 
+// searchFullText matches any query term (memorykit.SearchTerms): words against
+// the 'simple' tsvector, Chinese and Japanese grams as substrings, since the
+// default parser does not segment those scripts. Only memories matching more
+// than half as many terms as the best match are kept, so a lone shared word
+// does not earn a high rank, and results rank by matched terms, the same
+// cutoff and order memorystore uses.
 func (s *Store) searchFullText(ctx context.Context, query memorykit.CandidateQuery) ([]memorykit.Candidate, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+qualifiedMemoryColumns+`
-		FROM memories m
-		WHERE m.tenant_id = $1 AND m.subject_type = $2 AND m.subject_id = $3
-		  AND m.status = 'active'
-		  AND m.valid_from <= $4
-		  AND (m.valid_until IS NULL OR m.valid_until > $4)
-		  AND m.search_vector @@ websearch_to_tsquery('simple', $5)
-		  AND (cardinality($6::text[]) = 0 OR m.kind = ANY($6::text[]))
-		ORDER BY ts_rank_cd(m.search_vector, websearch_to_tsquery('simple', $5)) DESC,
-		         m.importance DESC, m.updated_at DESC, m.id ASC
-		LIMIT $7`,
+	words, grams := memorykit.SearchTerms(query.Text)
+	if len(words) == 0 && len(grams) == 0 {
+		return []memorykit.Candidate{}, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT `+qualifiedMemoryColumns+` FROM (
+		SELECT scored.*, max(scored.hits) OVER () AS best_hits FROM (
+			SELECT m.*,
+			       (SELECT count(*) FROM unnest($5::text[]) AS w WHERE m.search_vector @@ w::tsquery)
+			     + (SELECT count(*) FROM unnest($6::text[]) AS g
+			        WHERE strpos(m.memory_key || ' ' || m.content, g) > 0) AS hits
+			FROM memories m
+			WHERE m.tenant_id = $1 AND m.subject_type = $2 AND m.subject_id = $3
+			  AND m.status = 'active'
+			  AND m.valid_from <= $4
+			  AND (m.valid_until IS NULL OR m.valid_until > $4)
+			  AND (cardinality($7::text[]) = 0 OR m.kind = ANY($7::text[]))
+		) scored
+		WHERE scored.hits > 0
+		) m
+		WHERE m.hits * 2 > m.best_hits
+		ORDER BY m.hits DESC, m.importance DESC, m.updated_at DESC, m.id ASC
+		LIMIT $8`,
 		query.Scope.TenantID, query.Scope.SubjectType, query.Scope.SubjectID, query.Now,
-		query.Text, kindStrings(query.Kinds), query.FullTextLimit)
+		quotedLexemes(words), grams, kindStrings(query.Kinds), query.FullTextLimit)
 	if err != nil {
 		return nil, wrapBackend("full-text candidates", err)
 	}
 	return scanCandidates(rows, memorykit.ChannelFullText, false)
+}
+
+// quotedLexemes quotes each word as a tsquery lexeme, so no word is parsed as
+// tsquery syntax.
+func quotedLexemes(words []string) []string {
+	quoted := make([]string, len(words))
+	for i, word := range words {
+		quoted[i] = "'" + strings.ReplaceAll(word, "'", "''") + "'"
+	}
+	return quoted
 }
 
 func (s *Store) searchVector(ctx context.Context, query memorykit.CandidateQuery) ([]memorykit.Candidate, error) {

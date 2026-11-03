@@ -51,8 +51,11 @@ func TestEvaluateProjectMemoryV1ProductionRecallerAblations(t *testing.T) {
 			Cases: 4, ExpectedFound: 1, ExpectedTotal: 2,
 			ForbiddenTotal: 4, RecallAtBudget: 0.5,
 		},
+		// Full-text matches any query term, so it finds both keyword cases on
+		// its own; the relative cutoff keeps the lexical distractor out.
 		"fts-only": {
-			Cases: 4, ExpectedTotal: 2, ForbiddenTotal: 4,
+			Cases: 4, ExpectedFound: 2, ExpectedTotal: 2,
+			ForbiddenTotal: 4, RecallAtBudget: 1,
 		},
 		"vector-only": {
 			Cases: 4, ExpectedFound: 2, ExpectedTotal: 2,

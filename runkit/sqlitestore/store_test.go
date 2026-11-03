@@ -316,3 +316,53 @@ func TestStoreFailsOnlyExactPendingCheckpointAndPersistsAcrossReopen(t *testing.
 		t.Fatalf("persisted checkpoint = %#v", persisted)
 	}
 }
+
+func TestStoreOrdersRunsByInstantAcrossZones(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "runkit.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+
+	base := time.Date(2026, 5, 6, 2, 0, 0, 0, time.UTC)
+	// run-first is older, but its local text sorts after run-second's UTC text.
+	for _, record := range []runkit.RunRecord{
+		{RunID: "run-second", WorkflowID: "wf-zones", Status: runkit.StatusRunning, CreatedAt: base.Add(time.Hour)},
+		{RunID: "run-first", WorkflowID: "wf-zones", Status: runkit.StatusRunning, CreatedAt: base.In(time.FixedZone("UTC+9", 9*3600))},
+	} {
+		if err := store.Create(ctx, record); err != nil {
+			t.Fatalf("Create(%s) returned error: %v", record.RunID, err)
+		}
+	}
+	records, err := store.FindByWorkflowID(ctx, "wf-zones")
+	if err != nil {
+		t.Fatalf("FindByWorkflowID returned error: %v", err)
+	}
+	if len(records) != 2 || records[0].RunID != "run-first" || !records[0].CreatedAt.Equal(base) {
+		t.Fatalf("records = %+v, want run-first first at %s", records, base)
+	}
+}
+
+func TestStoreConnectionSettings(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "runkit.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+
+	var journalMode string
+	var foreignKeys, busyTimeout int
+	if err := store.db.QueryRow(`PRAGMA journal_mode`).Scan(&journalMode); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`PRAGMA busy_timeout`).Scan(&busyTimeout); err != nil {
+		t.Fatal(err)
+	}
+	if journalMode != "wal" || foreignKeys != 1 || busyTimeout != 5000 {
+		t.Fatalf("journal_mode/foreign_keys/busy_timeout = %s/%d/%d, want wal/1/5000", journalMode, foreignKeys, busyTimeout)
+	}
+}

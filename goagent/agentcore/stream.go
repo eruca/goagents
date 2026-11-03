@@ -15,11 +15,22 @@ type RunStream struct {
 	relayDone   <-chan struct{}
 }
 
+// RunStreamEvent carries one of: a run Event, a ModelDelta of streamed model
+// output, or, when Done is set, the run's Result and Error.
 type RunStreamEvent struct {
 	Event  Event
+	Delta  *ModelDelta
 	Result *RunResult
 	Error  error
 	Done   bool
+}
+
+// ModelDelta is a piece of model output streamed while a call runs, when the
+// Agent's LLM implements ports.StreamingLLMClient. Iteration identifies the
+// model call. Deltas reach only the stream, never the Agent's EventSink.
+type ModelDelta struct {
+	Iteration int
+	Content   string
 }
 
 type runStreamDone struct {
@@ -47,7 +58,10 @@ func (a *Agent) Stream(ctx context.Context, req RunRequest) *RunStream {
 	go relayRunStreamEvents(pending, events, discard, relayDone)
 	go func() {
 		defer close(pending)
-		result, err := a.runWithEventSink(ctx, req, true, sink)
+		onDelta := func(delta ModelDelta) {
+			sendRunStreamEvent(pending, RunStreamEvent{Delta: &delta})
+		}
+		result, err := a.runWithEventSink(ctx, req, true, sink, onDelta)
 		sendRunStreamEvent(pending, RunStreamEvent{Result: result, Error: err, Done: true})
 		done <- runStreamDone{result: result, err: err}
 	}()

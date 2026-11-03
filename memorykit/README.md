@@ -66,15 +66,31 @@ call, enforces one configured deadline and item/token budget, fuses exact,
 PostgreSQL full-text, and pgvector ranks, and inserts a bounded memory view
 immediately before the current user message.
 
+Full-text recall splits the query with `memorykit.SearchTerms`: words match
+the `simple` tsvector, and runs of Chinese or Japanese characters, which the
+default PostgreSQL parser does not segment, become overlapping two-character
+grams matched as substrings. A memory matches if it shares any term; only
+memories matching more than half as many terms as the best match are kept, and
+results rank by matched terms. `memorystore` and `pgstore` apply the same rule,
+checked by `storetest.RunFullTextRecallConformance`. The query is evaluated per
+scope without the GIN index, which is fine at project-memory scale.
+
 On-demand recall uses request-scoped `search_memory` and `read_memory` tools.
 Their schemas contain no Scope fields. `remember_project_memory` is registered
-only when trusted Host metadata grants explicit write intent.
+only when trusted Host metadata grants explicit write intent. A model write
+takes effect immediately only for a new kind/key or to replace the model's own
+untouched earlier write. If the current active record was written, reviewed,
+or corrected by anyone else, the write is stored as a candidate for review and
+the existing record stays in effect.
 
 A typed recoverable embedding/vector failure degrades to the remaining
 exact/full-text channels and records only content-free channel/ID metadata.
 If the entire Recall Store returns a typed recoverable failure, the Agent
 Projector injects no memory, records a content-free degradation marker, and
-continues through the next projector/main task path. Invalid Scope or
+continues through the next projector/main task path. The same degradation
+applies when Recall's own deadline expires while the caller's context is still
+alive. The Projector keeps only the last `MaxQueryRunes` runes of an oversized
+query instead of failing the turn. Invalid Scope or
 authorization, policy, candidate shape, and Store integrity still fail closed.
 Raw query text, content, vectors, bearer headers, provider payloads, and
 Artifact bodies are not valid log/event/error fields.

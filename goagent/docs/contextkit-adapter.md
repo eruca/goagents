@@ -15,7 +15,7 @@ For local development before `contextkit` is published:
 
 ```bash
 go mod edit -replace github.com/eruca/goagents/contextkit=/Users/nick/VibeCoding/goagents/contextkit
-go get github.com/eruca/goagents/contextkit
+go get github.com/eruca/goagents@latest
 ```
 
 Adapter shape:
