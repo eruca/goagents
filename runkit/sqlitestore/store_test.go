@@ -181,7 +181,7 @@ func TestCheckpointPersistsFailedLeaseAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetCheckpoint: %v", err)
 	}
-	if stored.Status != runkit.CheckpointFailed || stored.FailureCode != "checkpoint_decode_failed" || string(stored.Ciphertext) != "ciphertext" {
+	if stored.Status != runkit.CheckpointFailed || stored.FailureCode != "checkpoint_decode_failed" || len(stored.Ciphertext) != 0 {
 		t.Fatalf("stored checkpoint = %#v", stored)
 	}
 	if stored.Approval == nil || stored.Approval.ApproverID != "operator-1" || !stored.Approval.Approved {

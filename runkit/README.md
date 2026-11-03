@@ -72,10 +72,15 @@ if err != nil {
 
 The provider generates the active 32-byte key only on its first use and stores
 it only in macOS Keychain. SQLite receives a versioned envelope with `key_id`,
-nonce, and ciphertext. The goagent adapter authenticates checkpoint ID, tenant
-ID, and definition hash as associated data, so a ciphertext cannot be moved to
-another approval record. Rotate by choosing a new active key ID; retain the old
-Keychain item until every checkpoint encrypted with it has expired or consumed.
+a key fingerprint, nonce, and ciphertext; the header is authenticated with the
+ciphertext. The goagent adapter authenticates checkpoint ID, run ID, tenant ID,
+and definition hash as associated data, so a ciphertext cannot be moved to
+another approval record or run. If the Keychain item is deleted, the provider
+generates a new key under the same ID; checkpoints encrypted with the old key
+then fail with `ErrKeyMaterialChanged`. Rotate by choosing a new active key ID;
+retain the old Keychain item until every checkpoint encrypted with it is
+terminal. Stores drop a checkpoint's ciphertext once it is consumed, rejected,
+failed, or expired.
 There is intentionally no file or environment-variable fallback.
 
 `runkit` is a host-side run store contract for Go agent applications. It keeps

@@ -124,7 +124,7 @@ func (s *Store) RejectCheckpoint(ctx context.Context, request runkit.ApprovalLea
 	}
 	defer tx.Rollback()
 	result, err := tx.ExecContext(ctx, `
-UPDATE approval_checkpoints SET status = 'rejected', updated_at = $1
+UPDATE approval_checkpoints SET status = 'rejected', ciphertext = ''::bytea, updated_at = $1
 WHERE checkpoint_id = $2 AND tenant_id = $3 AND definition_hash = $4 AND status = 'pending' AND expires_at > $1`,
 		now, request.CheckpointID, request.TenantID, request.DefinitionHash)
 	if err != nil {
@@ -157,7 +157,7 @@ func (s *Store) FailPendingCheckpoint(ctx context.Context, request runkit.Pendin
 	}
 	result, err := s.db.ExecContext(ctx, `
 UPDATE approval_checkpoints
-SET status = 'failed', failure_code = $1, lease_owner = '', lease_until = NULL,
+SET status = 'failed', ciphertext = ''::bytea, failure_code = $1, lease_owner = '', lease_until = NULL,
  updated_at = CASE WHEN status = 'pending' THEN $2 ELSE updated_at END
 WHERE checkpoint_id = $3 AND run_id = $4 AND tenant_id = $5 AND definition_hash = $6
  AND (status = 'pending' OR (status = 'failed' AND failure_code = $1))`,
@@ -188,7 +188,7 @@ func (s *Store) finishLease(ctx context.Context, completion runkit.CheckpointLea
 		failureCode = completion.FailureCode
 	}
 	result, err := s.db.ExecContext(ctx, `
-UPDATE approval_checkpoints SET status = $1, failure_code = $2, lease_owner = '', lease_until = NULL, updated_at = $3
+UPDATE approval_checkpoints SET status = $1, ciphertext = ''::bytea, failure_code = $2, lease_owner = '', lease_until = NULL, updated_at = $3
 WHERE checkpoint_id = $4 AND tenant_id = $5 AND status = 'leased' AND lease_owner = $6`,
 		status, failureCode, requestNow(completion.Now), completion.CheckpointID, completion.TenantID, completion.LeaseOwner)
 	if err != nil {
@@ -205,7 +205,7 @@ WHERE checkpoint_id = $4 AND tenant_id = $5 AND status = 'leased' AND lease_owne
 }
 
 func (s *Store) ExpireCheckpoints(ctx context.Context, now time.Time) (int, error) {
-	result, err := s.db.ExecContext(ctx, `UPDATE approval_checkpoints SET status = 'expired', lease_owner = '', lease_until = NULL, updated_at = $1 WHERE status IN ('pending', 'leased') AND expires_at <= $1`, requestNow(now))
+	result, err := s.db.ExecContext(ctx, `UPDATE approval_checkpoints SET status = 'expired', ciphertext = ''::bytea, lease_owner = '', lease_until = NULL, updated_at = $1 WHERE status IN ('pending', 'leased') AND expires_at <= $1`, requestNow(now))
 	if err != nil {
 		return 0, err
 	}
