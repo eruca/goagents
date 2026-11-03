@@ -47,6 +47,8 @@ type RunState struct {
 	summary        ExecutionSummary
 	startedAt      time.Time
 	usedToolLookup map[string]struct{}
+	// onDelta receives streamed model output; nil means the run does not stream.
+	onDelta func(ModelDelta)
 }
 
 func (s *RunState) Emit(ctx context.Context, event Event) {

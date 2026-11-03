@@ -23,7 +23,7 @@ go run ./goagent/examples/basic
 - `examples/prompt` shows compact prompt assembly order.
 - `examples/openai-compatible` shows a real-provider run against an OpenAI-compatible service.
 - `examples/events` shows runtime observability with `WithEventSink`.
-- `examples/stream` shows in-process lifecycle updates with `Agent.Stream`.
+- `examples/stream` shows in-process lifecycle updates and streamed model output with `Agent.Stream`.
 - `examples/stream-sse` shows a host-owned SSE adapter around `Agent.Stream`.
 - `examples/audit-log` shows a host-owned JSONL audit adapter around `Agent.Stream`.
 - `examples/approval` shows host-controlled tool approval with stream events.
@@ -160,6 +160,8 @@ result, err := stream.Wait()
 
 `Stream` uses `RunDetailed` semantics for terminal results. On abort, `Wait` returns the partial result and error. Existing sinks configured with `WithEventSink` still receive runtime events.
 Call `stream.DiscardEvents()` if the host stops reading `Events`; this releases the event relay without canceling the Agent run or the configured event sink.
+
+When the LLM implements `ports.StreamingLLMClient`, the stream also carries model output as it is generated: events with a non-nil `Delta` hold a `ModelDelta` whose `Iteration` identifies the model call. Deltas go only to the stream, never to the configured event sink, so durable audit storage does not record every token. `Run` and `RunDetailed` always use `Chat`. `extensions/providers/openaiapi` streams over server-sent events.
 
 The stream is in-process and transport-neutral; HTTP, SSE, WebSocket, and durable audit storage belong in the host application.
 

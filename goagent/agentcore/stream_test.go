@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -231,5 +232,113 @@ func TestAgentStreamDiscardEventsDoesNotCancelRunOrSink(t *testing.T) {
 	}
 	if _, ok := <-stream.Events; ok {
 		t.Fatal("Events remained open after discarded run completed")
+	}
+}
+
+// streamingLLM streams each response's content in fixed-size chunks.
+type streamingLLM struct {
+	mockLLM
+	chunk       int
+	streamCalls int
+}
+
+func (s *streamingLLM) ChatStream(ctx context.Context, req ports.ChatRequest, onDelta func(ports.ChatDelta) error) (*ports.ChatResponse, error) {
+	s.streamCalls++
+	resp, err := s.Chat(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	for content := resp.Content; content != ""; {
+		n := min(s.chunk, len(content))
+		if err := onDelta(ports.ChatDelta{Content: content[:n]}); err != nil {
+			return nil, err
+		}
+		content = content[n:]
+	}
+	return resp, nil
+}
+
+func TestAgentStreamDeliversModelDeltasBeforeResult(t *testing.T) {
+	sink := &recordingEventSink{}
+	llm := &streamingLLM{chunk: 4, mockLLM: mockLLM{responses: []*ports.ChatResponse{
+		{Content: "checking", ToolCalls: []ports.ToolCall{{ID: "call_1", Name: "lookup", Input: json.RawMessage(`{}`)}}},
+		{Content: "final answer"},
+	}}}
+	registry := tools.NewRegistry()
+	registry.Register(testAgentTool{
+		spec: tools.Spec{Name: "lookup", Permission: policy.PermissionRead},
+		run: func(ctx context.Context, input json.RawMessage, env tools.Env) (*tools.Result, error) {
+			return &tools.Result{ForLLM: "observation"}, nil
+		},
+	})
+	agent, err := NewAgent(WithLLM(llm), WithToolRegistry(registry), WithEventSink(sink))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stream := agent.Stream(context.Background(), RunRequest{Input: "hello"})
+	var deltas []ModelDelta
+	sawDone := false
+	for event := range stream.Events {
+		if event.Delta != nil {
+			if sawDone {
+				t.Fatal("delta arrived after the terminal event")
+			}
+			deltas = append(deltas, *event.Delta)
+		}
+		sawDone = sawDone || event.Done
+	}
+	result, err := stream.Wait()
+	if err != nil || result.Content != "final answer" {
+		t.Fatalf("result = %+v, %v", result, err)
+	}
+	var first, second strings.Builder
+	for _, delta := range deltas {
+		switch delta.Iteration {
+		case 0:
+			first.WriteString(delta.Content)
+		case 1:
+			second.WriteString(delta.Content)
+		default:
+			t.Fatalf("delta iteration = %d", delta.Iteration)
+		}
+	}
+	if first.String() != "checking" || second.String() != "final answer" || len(deltas) != 5 {
+		t.Fatalf("deltas = %+v, want chunks of each model call grouped by iteration", deltas)
+	}
+	for _, event := range sink.events {
+		if strings.Contains(event.Message, "final") {
+			t.Fatalf("event sink received model output: %+v", event)
+		}
+	}
+}
+
+func TestAgentRunDoesNotStreamModelOutput(t *testing.T) {
+	llm := &streamingLLM{chunk: 4, mockLLM: mockLLM{responses: []*ports.ChatResponse{{Content: "answer"}}}}
+	agent, err := NewAgent(WithLLM(llm))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.Run(context.Background(), RunRequest{Input: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	if llm.streamCalls != 0 {
+		t.Fatalf("ChatStream calls = %d, want Chat for a non-streaming run", llm.streamCalls)
+	}
+}
+
+func TestAgentStreamWithNonStreamingLLMHasNoDeltas(t *testing.T) {
+	agent, err := NewAgent(WithLLM(&mockLLM{responses: []*ports.ChatResponse{{Content: "answer"}}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream := agent.Stream(context.Background(), RunRequest{Input: "hello"})
+	for event := range stream.Events {
+		if event.Delta != nil {
+			t.Fatalf("unexpected delta %+v", event.Delta)
+		}
+	}
+	if result, err := stream.Wait(); err != nil || result.Content != "answer" {
+		t.Fatalf("result = %+v, %v", result, err)
 	}
 }

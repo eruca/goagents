@@ -21,11 +21,24 @@ func (s ThinkStage) Name() string {
 }
 
 func (s ThinkStage) Run(ctx context.Context, state *RunState) (StageResult, error) {
-	resp, err := s.LLM.Chat(ctx, ports.ChatRequest{
+	req := ports.ChatRequest{
 		Messages:        chatMessages(state),
 		Tools:           chatToolSpecs(s.ToolRegistry),
 		MaxOutputTokens: s.MaxOutputTokens,
-	})
+	}
+	var resp *ports.ChatResponse
+	var err error
+	if streaming, ok := s.LLM.(ports.StreamingLLMClient); ok && state.onDelta != nil {
+		iteration := state.Iteration
+		resp, err = streaming.ChatStream(ctx, req, func(delta ports.ChatDelta) error {
+			if delta.Content != "" {
+				state.onDelta(ModelDelta{Iteration: iteration, Content: delta.Content})
+			}
+			return nil
+		})
+	} else {
+		resp, err = s.LLM.Chat(ctx, req)
+	}
 	if err != nil {
 		return StageAbort, err
 	}

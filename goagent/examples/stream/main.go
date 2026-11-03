@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/eruca/goagents/goagent/agentcore"
 	"github.com/eruca/goagents/goagent/policy"
@@ -18,6 +19,21 @@ type mockLLM struct {
 func (m *mockLLM) Chat(ctx context.Context, req ports.ChatRequest) (*ports.ChatResponse, error) {
 	resp := m.responses[0]
 	m.responses = m.responses[1:]
+	return resp, nil
+}
+
+// ChatStream makes mockLLM a ports.StreamingLLMClient: it streams the
+// response word by word before returning it whole.
+func (m *mockLLM) ChatStream(ctx context.Context, req ports.ChatRequest, onDelta func(ports.ChatDelta) error) (*ports.ChatResponse, error) {
+	resp, err := m.Chat(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	for _, word := range strings.SplitAfter(resp.Content, " ") {
+		if err := onDelta(ports.ChatDelta{Content: word}); err != nil {
+			return nil, err
+		}
+	}
 	return resp, nil
 }
 
@@ -57,6 +73,10 @@ func main() {
 
 	stream := agent.Stream(ctx, agentcore.RunRequest{Input: "Check account acct_1."})
 	for event := range stream.Events {
+		if event.Delta != nil {
+			fmt.Printf("stream=delta iteration=%d text=%q\n", event.Delta.Iteration, event.Delta.Content)
+			continue
+		}
 		if event.Done {
 			fmt.Printf("stream=done llm=%d tools=%d\n", event.Result.ExecutionSummary.LLMCalls, event.Result.ExecutionSummary.ToolCalls)
 			continue

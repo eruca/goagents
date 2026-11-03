@@ -14,6 +14,20 @@ type LLMClient interface {
 	Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error)
 }
 
+// StreamingLLMClient is an LLMClient that can deliver output while a call
+// runs. ChatStream calls onDelta with each increment in order and returns the
+// complete response, the same one Chat would return; tool calls arrive only in
+// that response. An error from onDelta aborts the call and is returned.
+type StreamingLLMClient interface {
+	LLMClient
+	ChatStream(ctx context.Context, req ChatRequest, onDelta func(ChatDelta) error) (*ChatResponse, error)
+}
+
+// ChatDelta is an increment of generated text.
+type ChatDelta struct {
+	Content string
+}
+
 type ChatRequest struct {
 	Messages []ChatMessage
 	Tools    []ToolSpec

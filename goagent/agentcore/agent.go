@@ -205,16 +205,17 @@ func (a *Agent) ResumeDetailed(ctx context.Context, checkpoint RunCheckpoint, re
 }
 
 func (a *Agent) run(ctx context.Context, req RunRequest, detailed bool) (*RunResult, error) {
-	return a.runWithEventSink(ctx, req, detailed, a.eventSink)
+	return a.runWithEventSink(ctx, req, detailed, a.eventSink, nil)
 }
 
-func (a *Agent) runWithEventSink(ctx context.Context, req RunRequest, detailed bool, sink EventSink) (*RunResult, error) {
+func (a *Agent) runWithEventSink(ctx context.Context, req RunRequest, detailed bool, sink EventSink, onDelta func(ModelDelta)) (*RunResult, error) {
 	runID := req.RunID
 	if runID.IsZero() {
 		runID = NewRunID()
 	}
 	state := NewRunState(runID, req)
 	state.EventSink = sink
+	state.onDelta = onDelta
 	runRegistry := newRunToolRegistry(a.toolRegistry)
 	runner := a.newReActRunner(runRegistry)
 	result, err := runner.Run(ctx, state)
