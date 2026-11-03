@@ -11,7 +11,7 @@ The example includes:
 - `Spec.Timeout`: bounds tool and middleware execution.
 - `Result.ForLLM`: model-visible observation for the next LLM turn.
 - `Result.ForUser`: host-visible output for UI or caller surfaces.
-- `Result.Silent`: suppresses a successful result from model context.
+- `Result.Silent`: replaces a successful result's content in model context with a short acknowledgement.
 - `Result.IsError`: marks a recoverable domain error that the model can correct on a later turn.
 
 Return a Go error for executor failures that should abort the current run path. Return `Result{IsError: true, ForLLM: "..."}` for recoverable domain errors such as invalid business state or correctable arguments.

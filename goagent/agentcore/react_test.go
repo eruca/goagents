@@ -3,6 +3,7 @@ package agentcore
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/eruca/goagents/goagent/policy"
@@ -270,9 +271,9 @@ func TestSelfCorrectionObservesRecoverableToolError(t *testing.T) {
 	}
 }
 
-func TestSilentToolResultDoesNotAppendObservation(t *testing.T) {
+func TestSilentToolResultKeepsToolCallPairingWithoutContent(t *testing.T) {
 	llm := &mockLLM{responses: []*ports.ChatResponse{
-		{ToolCalls: []ports.ToolCall{{Name: "audit", Input: json.RawMessage(`{}`)}}},
+		{ToolCalls: []ports.ToolCall{{ID: "call_audit", Name: "audit", Input: json.RawMessage(`{}`)}}},
 		{Content: "done"},
 	}}
 	registry := tools.NewRegistry()
@@ -298,10 +299,17 @@ func TestSilentToolResultDoesNotAppendObservation(t *testing.T) {
 	if len(llm.requests) != 2 {
 		t.Fatalf("LLM requests = %d", len(llm.requests))
 	}
+	var toolMessages []ports.ChatMessage
 	for _, message := range llm.requests[1].Messages {
 		if message.Role == "tool" {
-			t.Fatalf("unexpected tool observation: %#v", message)
+			toolMessages = append(toolMessages, message)
 		}
+	}
+	if len(toolMessages) != 1 || toolMessages[0].ToolCallID != "call_audit" {
+		t.Fatalf("tool messages = %#v, want one reply to call_audit", toolMessages)
+	}
+	if strings.Contains(toolMessages[0].Content, "internal audit trail") {
+		t.Fatalf("silent result leaked into model context: %q", toolMessages[0].Content)
 	}
 }
 

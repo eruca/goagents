@@ -176,7 +176,7 @@ Prompt blocks are model-facing instructions. They are not tools, memory, policy,
 - Non-empty block content is joined with newlines.
 - The compiled prompt is sent as the first `system` message when non-empty.
 - Memory messages load before current user input.
-- Tool observations are appended before the next LLM turn unless the tool result is `Silent`.
+- Tool observations are appended before the next LLM turn; a `Silent` result is replaced by a contentless acknowledgement so every tool call keeps its reply.
 
 Do not put secrets or raw sensitive data into prompt blocks unless the host intentionally wants that data in model context.
 
@@ -351,7 +351,7 @@ Tool results keep model-visible and user-visible output separate:
 - `ForUser` is available for UI surfaces.
 - `Ref` can point to a host-owned artifact such as a stored query result, OCR output, or generated file.
 - `Metadata` can carry small structured facts about the result, such as counts or MIME type.
-- `Silent` suppresses observation messages.
+- `Silent` replaces the observation content with a short acknowledgement; the tool message itself is kept because providers require a reply to every tool call.
 - `IsError` marks recoverable tool errors so the agent can ask the LLM to correct tool arguments.
 
 ## Writing Tools
@@ -364,7 +364,7 @@ A tool is a host-owned typed action. Keep each tool focused on one operation and
 - `Schema.Validate` can add host-specific validation after JSON Schema validation succeeds.
 - `Timeout` bounds tool and middleware execution.
 - Return `ForLLM` for compact model observations, `ForUser` for host/UI output, and `Ref` when the full result lives in host storage.
-- Use `Silent` when a successful tool result should not be appended to model context.
+- Use `Silent` when a successful tool result's content should not be appended to model context.
 - Use `IsError` for recoverable domain errors the model can correct; return a Go error for executor failures that should abort the run.
 
 See `examples/tools` for a minimal tool-authoring example.
