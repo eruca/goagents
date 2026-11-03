@@ -39,6 +39,10 @@ const memoryLoadedKey = "agentcore.memory.loaded"
 func memoryStateMessages(messages []ports.MemoryMessage) []Message {
 	converted := make([]Message, 0, len(messages))
 	for _, message := range messages {
+		// MemoryMessage has no tool call ID, so a stored tool message would reach the provider orphaned.
+		if message.Role == "tool" {
+			continue
+		}
 		converted = append(converted, Message{Role: message.Role, Content: message.Content})
 	}
 	return converted
@@ -47,7 +51,7 @@ func memoryStateMessages(messages []ports.MemoryMessage) []Message {
 func memoryMessages(messages []Message) []ports.MemoryMessage {
 	converted := make([]ports.MemoryMessage, 0, len(messages))
 	for _, message := range messages {
-		if len(message.ToolCalls) > 0 {
+		if len(message.ToolCalls) > 0 || message.Role == "tool" {
 			continue
 		}
 		converted = append(converted, ports.MemoryMessage{Role: message.Role, Content: message.Content})
