@@ -15,7 +15,8 @@
 // structured facts about that artifact. Silent replaces a successful result's
 // content in model context with a short acknowledgement. IsError marks a
 // recoverable domain error the model can correct on a later turn. Return a Go
-// error for executor failures that should abort the run.
+// error for executor failures that should abort the run. A panicking tool is
+// reported as ErrToolExecutionFailed instead of crashing the process.
 //
 // Missing tools and common executor failures return errors classifiable with
 // errors.Is: ErrToolNotFound, ErrToolInputInvalid, ErrToolSchemaInvalid,

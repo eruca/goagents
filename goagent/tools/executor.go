@@ -3,6 +3,8 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"maps"
 	"sync"
 
 	"github.com/eruca/goagents/goagent/ports"
@@ -80,9 +82,17 @@ func executeOne(ctx context.Context, call Call, tool Tool, env Env, results []Ex
 	results[index] = Execution{Index: index, Call: call, Result: result}
 }
 
-func runTool(ctx context.Context, tool Tool, call Call, env Env) (*Result, error) {
+func runTool(ctx context.Context, tool Tool, call Call, env Env) (result *Result, err error) {
 	toolCtx, cancel := toolContext(ctx, tool)
 	defer cancel()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			result = nil
+			err = fmt.Errorf("%w: tool %q panicked: %v", ErrToolExecutionFailed, call.Name, recovered)
+		}
+	}()
+	// Parallel calls share the caller's Env, so each call gets its own top-level metadata map.
+	env.Metadata = maps.Clone(env.Metadata)
 	return toolHandler(tool)(toolCtx, call.Input, env)
 }
 

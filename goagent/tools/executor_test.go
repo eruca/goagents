@@ -476,3 +476,51 @@ type middlewareTool struct {
 func (t middlewareTool) Middleware() []Middleware {
 	return t.middleware
 }
+
+func TestExecutorConvertsToolPanicToError(t *testing.T) {
+	registry := NewRegistry()
+	registry.Register(testTool{
+		spec: Spec{Name: "ok", Permission: policy.PermissionRead},
+		run: func(ctx context.Context, input json.RawMessage, env Env) (*Result, error) {
+			return &Result{ForLLM: "ok"}, nil
+		},
+	})
+	registry.Register(testTool{
+		spec: Spec{Name: "explodes", Permission: policy.PermissionRead},
+		run: func(ctx context.Context, input json.RawMessage, env Env) (*Result, error) {
+			panic("kaboom")
+		},
+	})
+
+	for _, calls := range [][]Call{
+		{{Name: "explodes"}},
+		{{Name: "ok"}, {Name: "explodes"}},
+	} {
+		_, err := NewExecutor(registry).Execute(context.Background(), calls, Env{})
+		if !errors.Is(err, ErrToolExecutionFailed) {
+			t.Fatalf("calls %v: err = %v, want ErrToolExecutionFailed", calls, err)
+		}
+	}
+}
+
+func TestExecutorIsolatesEnvMetadataPerCall(t *testing.T) {
+	registry := NewRegistry()
+	registry.Register(testTool{
+		spec: Spec{Name: "writer", Permission: policy.PermissionRead},
+		run: func(ctx context.Context, input json.RawMessage, env Env) (*Result, error) {
+			for i := range 100 {
+				env.Metadata[fmt.Sprintf("key_%d", i)] = i
+			}
+			return &Result{ForLLM: "ok"}, nil
+		},
+	})
+	metadata := map[string]any{"tenant": "t1"}
+
+	calls := []Call{{Name: "writer"}, {Name: "writer"}, {Name: "writer"}}
+	if _, err := NewExecutor(registry).Execute(context.Background(), calls, Env{Metadata: metadata}); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if len(metadata) != 1 || metadata["tenant"] != "t1" {
+		t.Fatalf("caller metadata mutated: %#v", metadata)
+	}
+}
