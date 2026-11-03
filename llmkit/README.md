@@ -227,26 +227,26 @@ client := goagentadapter.NewClient(goagentadapter.Config{
 `MaxAttempts <= 0` preserves the default behavior: try all remaining eligible
 provider-backed candidates.
 
-`NewClient` deliberately preserves the v0.1.0 fallback contract above. New
-reliability-sensitive runtimes should opt into fail-closed behavior and
-allowlist only errors that are known to occur before dispatch:
+Reliability-sensitive runtimes should fail closed and allowlist only errors
+that are known to occur before dispatch:
 
 ```go
-client := goagentadapter.NewRuntimeClient(
-    goagentadapter.Config{
-        Candidates: config.Candidates(),
-        Providers:  providers,
+client := goagentadapter.NewClient(goagentadapter.Config{
+    Candidates: config.Candidates(),
+    Providers:  providers,
+    FallbackPolicy: goagentadapter.FallbackPolicy{
+        FailClosed: true,
+        RetryableErrorClasses: []llmkit.ErrorClass{
+            llmkit.ErrorClassTransient,
+            llmkit.ErrorClassTimeout,
+        },
     },
-    goagentadapter.WithRetryableErrorClasses(
-        llmkit.ErrorClassTransient,
-        llmkit.ErrorClassTimeout,
-    ),
-)
+})
 ```
 
-The runtime path never falls back when the provider error is dispatched or its
-dispatch status is unknown. `NewClientWithPreDispatch` is a convenience for the
-same fail-closed path with a typed pre-dispatch hook.
+A fail-closed client never falls back when the provider error is dispatched or
+its dispatch status is unknown. Setting `Config.PreDispatch` (a typed host
+claim boundary run before each provider call) implies `FailClosed`.
 
 Hosts can also classify provider errors for audit and future typed fallback
 rules:

@@ -121,19 +121,20 @@ func TestClientChatStreamFallsBackOnlyBeforeOutput(t *testing.T) {
 func TestClientChatStreamPreDispatchUsesStreamRequestDigest(t *testing.T) {
 	local := &streamingProviderClient{chunks: []string{"ok"}, streamDigest: sha256.Sum256([]byte("stream body"))}
 	var got PreDispatchRequest
-	client := NewClientWithPreDispatch(Config{
+	client := NewClient(Config{
 		Candidates:            testCandidates()[:1],
 		Providers:             map[string]ProviderClient{"local-small": local},
 		ProfileProvider:       fixedProfile(simpleProfile()),
 		RouteMetadataProvider: fixedRouteMetadata(RouteMetadata{RouteID: "route-stream", TaskID: "task-stream", Attempt: 1}),
-	}, PreDispatchConfig{
-		MetadataProvider: fixedPreDispatchMetadata(PreDispatchMetadata{
-			ProviderCallIndex: 1,
-			RunRequestSHA256:  sha256.Sum256([]byte("run")),
-		}),
-		Hook: func(_ context.Context, req PreDispatchRequest) error {
-			got = req
-			return nil
+		PreDispatch: PreDispatchConfig{
+			MetadataProvider: fixedPreDispatchMetadata(PreDispatchMetadata{
+				ProviderCallIndex: 1,
+				RunRequestSHA256:  sha256.Sum256([]byte("run")),
+			}),
+			Hook: func(_ context.Context, req PreDispatchRequest) error {
+				got = req
+				return nil
+			},
 		},
 	})
 

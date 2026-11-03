@@ -84,32 +84,18 @@ type PreDispatchConfig struct {
 	Hook             PreDispatchHook
 }
 
-// FallbackPolicy controls provider fallback after route-level failures.
+// FallbackPolicy controls which provider failures move on to the next
+// candidate.
 type FallbackPolicy struct {
+	// MaxAttempts caps provider attempts per request; <= 0 tries every
+	// remaining eligible candidate.
 	MaxAttempts int
-}
-
-// RuntimeOption 在不改变已发布 Config 或 FallbackPolicy 形状的前提下，
-// 配置新的 fail-closed runtime 路径。
-type RuntimeOption func(*runtimeOptions)
-
-type runtimeOptions struct {
-	preDispatch         PreDispatchConfig
-	retryableErrorClass []llmkit.ErrorClass
-}
-
-// WithPreDispatch 启用类型化的 Host claim 边界。
-func WithPreDispatch(config PreDispatchConfig) RuntimeOption {
-	return func(options *runtimeOptions) {
-		options.preDispatch = config
-	}
-}
-
-// WithRetryableErrorClasses 显式允许可安全 fallback 的 pre-dispatch 类别。
-func WithRetryableErrorClasses(classes ...llmkit.ErrorClass) RuntimeOption {
-	return func(options *runtimeOptions) {
-		options.retryableErrorClass = append([]llmkit.ErrorClass(nil), classes...)
-	}
+	// FailClosed restricts fallback to failures the provider proved happened
+	// before dispatch and whose class is in RetryableErrorClasses, so a request
+	// that may have reached a provider is never sent to a second one. Without
+	// it, any provider failure falls back.
+	FailClosed            bool
+	RetryableErrorClasses []llmkit.ErrorClass
 }
 
 // ProviderDispatchStatus 让 Provider 证明错误发生在出站前；
@@ -132,6 +118,9 @@ type Config struct {
 	HealthStore           llmkit.HealthStore
 	FallbackPolicy        FallbackPolicy
 	ErrorClassifier       ErrorClassifier
+	// PreDispatch installs a host claim boundary before each provider call.
+	// It implies FallbackPolicy.FailClosed.
+	PreDispatch PreDispatchConfig
 }
 
 // Client implements goagent's LLMClient by routing to a provider client.
@@ -148,35 +137,14 @@ type Client struct {
 	healthStore           llmkit.HealthStore
 	preDispatchMetadata   PreDispatchMetadataProvider
 	preDispatchHook       PreDispatchHook
-	fallbackPolicy        FallbackPolicy
-	strictFallback        bool
+	maxAttempts           int
+	failClosed            bool
 	retryableErrorClass   []llmkit.ErrorClass
 	errorClassifier       ErrorClassifier
 }
 
 // NewClient creates a goagent LLMClient adapter.
 func NewClient(config Config) *Client {
-	return newClient(config, runtimeOptions{}, false)
-}
-
-// NewClientWithPreDispatch 创建带类型化 pre-dispatch hook 的 adapter。
-func NewClientWithPreDispatch(config Config, preDispatch PreDispatchConfig) *Client {
-	return NewRuntimeClient(config, WithPreDispatch(preDispatch))
-}
-
-// NewRuntimeClient 创建 fail-closed runtime 路径；只有显式允许且已证明未 dispatch 的
-// 错误类别才能触发 fallback。
-func NewRuntimeClient(config Config, options ...RuntimeOption) *Client {
-	runtime := runtimeOptions{}
-	for _, option := range options {
-		if option != nil {
-			option(&runtime)
-		}
-	}
-	return newClient(config, runtime, true)
-}
-
-func newClient(config Config, runtime runtimeOptions, strictFallback bool) *Client {
 	providers := make(map[string]ProviderClient, len(config.Providers))
 	for alias, provider := range config.Providers {
 		providers[alias] = provider
@@ -200,11 +168,11 @@ func newClient(config Config, runtime runtimeOptions, strictFallback bool) *Clie
 		modelStats:            config.ModelStats,
 		modelStatsProvider:    config.ModelStatsProvider,
 		healthStore:           config.HealthStore,
-		preDispatchMetadata:   runtime.preDispatch.MetadataProvider,
-		preDispatchHook:       runtime.preDispatch.Hook,
-		fallbackPolicy:        config.FallbackPolicy,
-		strictFallback:        strictFallback,
-		retryableErrorClass:   append([]llmkit.ErrorClass(nil), runtime.retryableErrorClass...),
+		preDispatchMetadata:   config.PreDispatch.MetadataProvider,
+		preDispatchHook:       config.PreDispatch.Hook,
+		maxAttempts:           config.FallbackPolicy.MaxAttempts,
+		failClosed:            config.FallbackPolicy.FailClosed || config.PreDispatch.Hook != nil,
+		retryableErrorClass:   slices.Clone(config.FallbackPolicy.RetryableErrorClasses),
 		errorClassifier:       errorClassifier,
 	}
 }
@@ -237,7 +205,7 @@ func (c *Client) route(ctx context.Context, req ports.ChatRequest, onDelta func(
 	var routeMetadata RouteMetadata
 	routeMetadataLoaded := false
 	lastProviderCallIndex := 0
-	maxAttempts := c.maxAttempts(len(candidates))
+	maxAttempts := c.attemptLimit(len(candidates))
 	for attemptOffset := 0; len(candidates) > 0; attemptOffset++ {
 		if maxAttempts > 0 && attemptOffset >= maxAttempts {
 			break
@@ -459,7 +427,7 @@ func (c *Client) routeTrace(profile llmkit.TaskProfile, decision llmkit.RouteDec
 		ScoreBreakdown:        copyScoreBreakdown(decision.ScoreBreakdown),
 		CandidateModelAliases: candidateModelAliases(decision.Candidates),
 		Candidates:            copyCandidateScores(decision.Candidates),
-		FallbackMaxAttempts:   c.fallbackPolicy.MaxAttempts,
+		FallbackMaxAttempts:   c.maxAttempts,
 	}
 }
 
@@ -496,18 +464,15 @@ func (c *Client) runPreDispatchHook(ctx context.Context, req ports.ChatRequest, 
 	return metadata.ProviderCallIndex, nil
 }
 
-func (c *Client) maxAttempts(candidateCount int) int {
-	if c.fallbackPolicy.MaxAttempts <= 0 {
+func (c *Client) attemptLimit(candidateCount int) int {
+	if c.maxAttempts <= 0 {
 		return 0
 	}
-	if c.fallbackPolicy.MaxAttempts > candidateCount {
-		return candidateCount
-	}
-	return c.fallbackPolicy.MaxAttempts
+	return min(c.maxAttempts, candidateCount)
 }
 
 func (c *Client) allowsFallback(err *RuntimeError) bool {
-	if !c.strictFallback {
+	if !c.failClosed {
 		return true
 	}
 	if err == nil || err.ProviderDispatched {

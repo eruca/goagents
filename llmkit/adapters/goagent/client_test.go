@@ -489,7 +489,7 @@ func TestClientDiscardsLateResponseAfterRequestCancellation(t *testing.T) {
 	}
 }
 
-func TestRuntimeClientDoesNotFallbackForProviderErrorsByDefault(t *testing.T) {
+func TestFailClosedDoesNotFallbackWithoutRetryableClasses(t *testing.T) {
 	tests := []struct {
 		name string
 		err  error
@@ -506,13 +506,14 @@ func TestRuntimeClientDoesNotFallbackForProviderErrorsByDefault(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			local := &fakeProviderClient{err: tt.err}
 			cloud := &fakeProviderClient{response: &ports.ChatResponse{Content: "cloud fallback"}}
-			client := NewRuntimeClient(Config{
+			client := NewClient(Config{
 				Candidates: testCandidates(),
 				Providers: map[string]ProviderClient{
 					"local-small":    local,
 					"cloud-advanced": cloud,
 				},
 				ProfileProvider: fixedProfile(simpleProfile()),
+				FallbackPolicy:  FallbackPolicy{FailClosed: true},
 			})
 
 			resp, err := client.Chat(context.Background(), ports.ChatRequest{})
@@ -598,10 +599,10 @@ func TestClientReturnsTypedPostCallError(t *testing.T) {
 	}
 }
 
-func TestRuntimeClientFallsBackOnlyForExplicitPreDispatchClass(t *testing.T) {
+func TestFailClosedFallsBackOnlyForExplicitPreDispatchClass(t *testing.T) {
 	local := &fakeProviderClient{err: preDispatchProviderError{err: errors.New("dial rejected before dispatch")}}
 	cloud := &fakeProviderClient{response: &ports.ChatResponse{Content: "cloud fallback"}}
-	client := NewRuntimeClient(Config{
+	client := NewClient(Config{
 		Candidates: testCandidates(),
 		Providers: map[string]ProviderClient{
 			"local-small":    local,
@@ -611,7 +612,8 @@ func TestRuntimeClientFallsBackOnlyForExplicitPreDispatchClass(t *testing.T) {
 		ErrorClassifier: func(error) llmkit.ErrorClass {
 			return llmkit.ErrorClassTransient
 		},
-	}, WithRetryableErrorClasses(llmkit.ErrorClassTransient))
+		FallbackPolicy: FallbackPolicy{FailClosed: true, RetryableErrorClasses: []llmkit.ErrorClass{llmkit.ErrorClassTransient}},
+	})
 
 	resp, err := client.Chat(context.Background(), ports.ChatRequest{})
 	if err != nil {
@@ -625,10 +627,10 @@ func TestRuntimeClientFallsBackOnlyForExplicitPreDispatchClass(t *testing.T) {
 	}
 }
 
-func TestRuntimeClientDoesNotFallbackForDispatchedErrorEvenWhenClassAllowed(t *testing.T) {
+func TestFailClosedDoesNotFallbackForDispatchedErrorEvenWhenClassAllowed(t *testing.T) {
 	local := &fakeProviderClient{err: errors.New("provider failed after dispatch")}
 	cloud := &fakeProviderClient{response: &ports.ChatResponse{Content: "cloud fallback"}}
-	client := NewRuntimeClient(Config{
+	client := NewClient(Config{
 		Candidates: testCandidates(),
 		Providers: map[string]ProviderClient{
 			"local-small":    local,
@@ -638,10 +640,51 @@ func TestRuntimeClientDoesNotFallbackForDispatchedErrorEvenWhenClassAllowed(t *t
 		ErrorClassifier: func(error) llmkit.ErrorClass {
 			return llmkit.ErrorClassTransient
 		},
-	}, WithRetryableErrorClasses(llmkit.ErrorClassTransient))
+		FallbackPolicy: FallbackPolicy{FailClosed: true, RetryableErrorClasses: []llmkit.ErrorClass{llmkit.ErrorClassTransient}},
+	})
 
 	_, err := client.Chat(context.Background(), ports.ChatRequest{})
 	assertRuntimeError(t, err, ErrorStageProvider, llmkit.ErrorClassTransient, true)
+	if len(local.requests) != 1 || len(cloud.requests) != 0 {
+		t.Fatalf("provider calls local=%d cloud=%d, want local only", len(local.requests), len(cloud.requests))
+	}
+}
+
+func TestPreDispatchHookImpliesFailClosedFallback(t *testing.T) {
+	providerDigest := sha256.Sum256([]byte("provider request"))
+	local := &digestProviderClient{
+		fakeProviderClient: fakeProviderClient{err: errors.New("provider failed after dispatch")},
+		digest:             providerDigest,
+	}
+	cloud := &digestProviderClient{
+		fakeProviderClient: fakeProviderClient{response: &ports.ChatResponse{Content: "cloud"}},
+		digest:             providerDigest,
+	}
+	calls := 0
+	client := NewClient(Config{
+		Candidates: testCandidates(),
+		Providers: map[string]ProviderClient{
+			"local-small":    local,
+			"cloud-advanced": cloud,
+		},
+		ProfileProvider: fixedProfile(simpleProfile()),
+		RouteMetadataProvider: fixedRouteMetadata(RouteMetadata{
+			RouteID: "route-implied-fail-closed",
+			TaskID:  "task-implied-fail-closed",
+			Attempt: 1,
+		}),
+		PreDispatch: PreDispatchConfig{
+			MetadataProvider: func(context.Context, ports.ChatRequest) PreDispatchMetadata {
+				calls++
+				return PreDispatchMetadata{ProviderCallIndex: calls, RunRequestSHA256: sha256.Sum256([]byte("run request"))}
+			},
+			Hook: func(context.Context, PreDispatchRequest) error { return nil },
+		},
+	})
+
+	if _, err := client.Chat(context.Background(), ports.ChatRequest{}); err == nil {
+		t.Fatal("Chat() error = nil, want provider failure")
+	}
 	if len(local.requests) != 1 || len(cloud.requests) != 0 {
 		t.Fatalf("provider calls local=%d cloud=%d, want local only", len(local.requests), len(cloud.requests))
 	}
@@ -662,7 +705,7 @@ func TestClientRunsPreDispatchHookWithoutRecorderBeforeHealthAndProvider(t *test
 		events:      &events,
 	}
 	var got PreDispatchRequest
-	client := NewClientWithPreDispatch(Config{
+	client := NewClient(Config{
 		Candidates:      testCandidates()[:1],
 		Providers:       map[string]ProviderClient{"local-small": local},
 		ProfileProvider: fixedProfile(simpleProfile()),
@@ -672,15 +715,16 @@ func TestClientRunsPreDispatchHookWithoutRecorderBeforeHealthAndProvider(t *test
 			Attempt: 2,
 		}),
 		HealthStore: health,
-	}, PreDispatchConfig{
-		MetadataProvider: fixedPreDispatchMetadata(PreDispatchMetadata{
-			ProviderCallIndex: 3,
-			RunRequestSHA256:  runDigest,
-		}),
-		Hook: func(_ context.Context, req PreDispatchRequest) error {
-			events = append(events, "hook")
-			got = req
-			return nil
+		PreDispatch: PreDispatchConfig{
+			MetadataProvider: fixedPreDispatchMetadata(PreDispatchMetadata{
+				ProviderCallIndex: 3,
+				RunRequestSHA256:  runDigest,
+			}),
+			Hook: func(_ context.Context, req PreDispatchRequest) error {
+				events = append(events, "hook")
+				got = req
+				return nil
+			},
 		},
 	})
 
@@ -733,7 +777,7 @@ func TestClientPreDispatchHookFailureStopsBeforeHealthProviderAndFallback(t *tes
 		events:      &events,
 	}
 	hookErr := errors.New("provider claim unavailable")
-	client := NewClientWithPreDispatch(Config{
+	client := NewClient(Config{
 		Candidates: testCandidates(),
 		Providers: map[string]ProviderClient{
 			"local-small":    local,
@@ -749,14 +793,15 @@ func TestClientPreDispatchHookFailureStopsBeforeHealthProviderAndFallback(t *tes
 		ErrorClassifier: func(error) llmkit.ErrorClass {
 			return llmkit.ErrorClassTransient
 		},
-	}, PreDispatchConfig{
-		MetadataProvider: fixedPreDispatchMetadata(PreDispatchMetadata{
-			ProviderCallIndex: 1,
-			RunRequestSHA256:  runDigest,
-		}),
-		Hook: func(context.Context, PreDispatchRequest) error {
-			events = append(events, "hook")
-			return hookErr
+		PreDispatch: PreDispatchConfig{
+			MetadataProvider: fixedPreDispatchMetadata(PreDispatchMetadata{
+				ProviderCallIndex: 1,
+				RunRequestSHA256:  runDigest,
+			}),
+			Hook: func(context.Context, PreDispatchRequest) error {
+				events = append(events, "hook")
+				return hookErr
+			},
 		},
 	})
 
@@ -784,7 +829,7 @@ func TestClientPreDispatchHookRequiresProviderRequestDigester(t *testing.T) {
 	health := llmkit.NewMemoryHealthStore(llmkit.HealthPolicy{})
 	metadataCalls := 0
 	hookCalls := 0
-	client := NewClientWithPreDispatch(Config{
+	client := NewClient(Config{
 		Candidates:      testCandidates()[:1],
 		Providers:       map[string]ProviderClient{"local-small": local},
 		ProfileProvider: fixedProfile(simpleProfile()),
@@ -794,17 +839,18 @@ func TestClientPreDispatchHookRequiresProviderRequestDigester(t *testing.T) {
 			Attempt: 1,
 		}),
 		HealthStore: health,
-	}, PreDispatchConfig{
-		MetadataProvider: func(context.Context, ports.ChatRequest) PreDispatchMetadata {
-			metadataCalls++
-			return PreDispatchMetadata{
-				ProviderCallIndex: 1,
-				RunRequestSHA256:  sha256.Sum256([]byte("run request")),
-			}
-		},
-		Hook: func(context.Context, PreDispatchRequest) error {
-			hookCalls++
-			return nil
+		PreDispatch: PreDispatchConfig{
+			MetadataProvider: func(context.Context, ports.ChatRequest) PreDispatchMetadata {
+				metadataCalls++
+				return PreDispatchMetadata{
+					ProviderCallIndex: 1,
+					RunRequestSHA256:  sha256.Sum256([]byte("run request")),
+				}
+			},
+			Hook: func(context.Context, PreDispatchRequest) error {
+				hookCalls++
+				return nil
+			},
 		},
 	})
 
@@ -849,7 +895,7 @@ func TestClientPreDispatchHookRejectsInvalidHostMetadata(t *testing.T) {
 			}
 			health := llmkit.NewMemoryHealthStore(llmkit.HealthPolicy{})
 			hookCalls := 0
-			client := NewClientWithPreDispatch(Config{
+			client := NewClient(Config{
 				Candidates:      testCandidates()[:1],
 				Providers:       map[string]ProviderClient{"local-small": local},
 				ProfileProvider: fixedProfile(simpleProfile()),
@@ -859,11 +905,12 @@ func TestClientPreDispatchHookRejectsInvalidHostMetadata(t *testing.T) {
 					Attempt: 1,
 				}),
 				HealthStore: health,
-			}, PreDispatchConfig{
-				MetadataProvider: fixedPreDispatchMetadata(tt.metadata),
-				Hook: func(context.Context, PreDispatchRequest) error {
-					hookCalls++
-					return nil
+				PreDispatch: PreDispatchConfig{
+					MetadataProvider: fixedPreDispatchMetadata(tt.metadata),
+					Hook: func(context.Context, PreDispatchRequest) error {
+						hookCalls++
+						return nil
+					},
 				},
 			})
 
@@ -888,7 +935,7 @@ func TestClientPreDispatchHookRejectsMissingProviderRequestDigest(t *testing.T) 
 	}
 	health := llmkit.NewMemoryHealthStore(llmkit.HealthPolicy{})
 	hookCalls := 0
-	client := NewClientWithPreDispatch(Config{
+	client := NewClient(Config{
 		Candidates:      testCandidates()[:1],
 		Providers:       map[string]ProviderClient{"local-small": local},
 		ProfileProvider: fixedProfile(simpleProfile()),
@@ -898,14 +945,15 @@ func TestClientPreDispatchHookRejectsMissingProviderRequestDigest(t *testing.T) 
 			Attempt: 1,
 		}),
 		HealthStore: health,
-	}, PreDispatchConfig{
-		MetadataProvider: fixedPreDispatchMetadata(PreDispatchMetadata{
-			ProviderCallIndex: 1,
-			RunRequestSHA256:  sha256.Sum256([]byte("run request")),
-		}),
-		Hook: func(context.Context, PreDispatchRequest) error {
-			hookCalls++
-			return nil
+		PreDispatch: PreDispatchConfig{
+			MetadataProvider: fixedPreDispatchMetadata(PreDispatchMetadata{
+				ProviderCallIndex: 1,
+				RunRequestSHA256:  sha256.Sum256([]byte("run request")),
+			}),
+			Hook: func(context.Context, PreDispatchRequest) error {
+				hookCalls++
+				return nil
+			},
 		},
 	})
 
@@ -936,7 +984,7 @@ func TestClientPreDispatchHookUsesHostCallIndexesAcrossFallback(t *testing.T) {
 	var attempts []int
 	routeMetadataCalls := 0
 	dispatchMetadataCalls := 0
-	client := NewRuntimeClient(Config{
+	client := NewClient(Config{
 		Candidates: testCandidates(),
 		Providers: map[string]ProviderClient{
 			"local-small":    local,
@@ -954,20 +1002,22 @@ func TestClientPreDispatchHookUsesHostCallIndexesAcrossFallback(t *testing.T) {
 		ErrorClassifier: func(error) llmkit.ErrorClass {
 			return llmkit.ErrorClassTransient
 		},
-	}, WithPreDispatch(PreDispatchConfig{
-		MetadataProvider: func(context.Context, ports.ChatRequest) PreDispatchMetadata {
-			dispatchMetadataCalls++
-			return PreDispatchMetadata{
-				ProviderCallIndex: []int{7, 11}[dispatchMetadataCalls-1],
-				RunRequestSHA256:  sha256.Sum256([]byte("run request")),
-			}
+		PreDispatch: PreDispatchConfig{
+			MetadataProvider: func(context.Context, ports.ChatRequest) PreDispatchMetadata {
+				dispatchMetadataCalls++
+				return PreDispatchMetadata{
+					ProviderCallIndex: []int{7, 11}[dispatchMetadataCalls-1],
+					RunRequestSHA256:  sha256.Sum256([]byte("run request")),
+				}
+			},
+			Hook: func(_ context.Context, req PreDispatchRequest) error {
+				callIndexes = append(callIndexes, req.ProviderCallIndex)
+				attempts = append(attempts, req.Attempt)
+				return nil
+			},
 		},
-		Hook: func(_ context.Context, req PreDispatchRequest) error {
-			callIndexes = append(callIndexes, req.ProviderCallIndex)
-			attempts = append(attempts, req.Attempt)
-			return nil
-		},
-	}), WithRetryableErrorClasses(llmkit.ErrorClassTransient))
+		FallbackPolicy: FallbackPolicy{RetryableErrorClasses: []llmkit.ErrorClass{llmkit.ErrorClassTransient}},
+	})
 
 	resp, err := client.Chat(context.Background(), ports.ChatRequest{})
 	if err != nil {
@@ -999,7 +1049,7 @@ func TestClientPreDispatchHookRejectsNonMonotonicHostCallIndex(t *testing.T) {
 	}
 	metadataCalls := 0
 	hookCalls := 0
-	client := NewRuntimeClient(Config{
+	client := NewClient(Config{
 		Candidates: testCandidates(),
 		Providers: map[string]ProviderClient{
 			"local-small":    local,
@@ -1014,19 +1064,21 @@ func TestClientPreDispatchHookRejectsNonMonotonicHostCallIndex(t *testing.T) {
 		ErrorClassifier: func(error) llmkit.ErrorClass {
 			return llmkit.ErrorClassTransient
 		},
-	}, WithPreDispatch(PreDispatchConfig{
-		MetadataProvider: func(context.Context, ports.ChatRequest) PreDispatchMetadata {
-			metadataCalls++
-			return PreDispatchMetadata{
-				ProviderCallIndex: 7,
-				RunRequestSHA256:  sha256.Sum256([]byte("run request")),
-			}
+		PreDispatch: PreDispatchConfig{
+			MetadataProvider: func(context.Context, ports.ChatRequest) PreDispatchMetadata {
+				metadataCalls++
+				return PreDispatchMetadata{
+					ProviderCallIndex: 7,
+					RunRequestSHA256:  sha256.Sum256([]byte("run request")),
+				}
+			},
+			Hook: func(context.Context, PreDispatchRequest) error {
+				hookCalls++
+				return nil
+			},
 		},
-		Hook: func(context.Context, PreDispatchRequest) error {
-			hookCalls++
-			return nil
-		},
-	}), WithRetryableErrorClasses(llmkit.ErrorClassTransient))
+		FallbackPolicy: FallbackPolicy{RetryableErrorClasses: []llmkit.ErrorClass{llmkit.ErrorClassTransient}},
+	})
 
 	resp, err := client.Chat(context.Background(), ports.ChatRequest{})
 	if resp != nil {
@@ -1050,7 +1102,7 @@ func TestClientPreDispatchDigestFailureStopsBeforeHookHealthAndProvider(t *testi
 	health := llmkit.NewMemoryHealthStore(llmkit.HealthPolicy{})
 	metadataCalls := 0
 	hookCalls := 0
-	client := NewClientWithPreDispatch(Config{
+	client := NewClient(Config{
 		Candidates:      testCandidates()[:1],
 		Providers:       map[string]ProviderClient{"local-small": local},
 		ProfileProvider: fixedProfile(simpleProfile()),
@@ -1060,17 +1112,18 @@ func TestClientPreDispatchDigestFailureStopsBeforeHookHealthAndProvider(t *testi
 			Attempt: 1,
 		}),
 		HealthStore: health,
-	}, PreDispatchConfig{
-		MetadataProvider: func(context.Context, ports.ChatRequest) PreDispatchMetadata {
-			metadataCalls++
-			return PreDispatchMetadata{
-				ProviderCallIndex: 1,
-				RunRequestSHA256:  sha256.Sum256([]byte("run request")),
-			}
-		},
-		Hook: func(context.Context, PreDispatchRequest) error {
-			hookCalls++
-			return nil
+		PreDispatch: PreDispatchConfig{
+			MetadataProvider: func(context.Context, ports.ChatRequest) PreDispatchMetadata {
+				metadataCalls++
+				return PreDispatchMetadata{
+					ProviderCallIndex: 1,
+					RunRequestSHA256:  sha256.Sum256([]byte("run request")),
+				}
+			},
+			Hook: func(context.Context, PreDispatchRequest) error {
+				hookCalls++
+				return nil
+			},
 		},
 	})
 
