@@ -53,6 +53,25 @@ func RunStoreConformance(t *testing.T, newStore NewStore) {
 		}
 	})
 
+	t.Run("create never replaces a stored run", func(t *testing.T) {
+		store := newStore(t)
+		creator, ok := store.(workflowkit.CreateStore)
+		if !ok {
+			t.Skip("store does not implement workflowkit.CreateStore")
+		}
+		if err := creator.Create(context.Background(), workflowkit.WorkflowRun{ID: "wf-create", Status: workflowkit.StatusWaitingApproval}); err != nil {
+			t.Fatalf("Create returned error: %v", err)
+		}
+		err := creator.Create(context.Background(), workflowkit.WorkflowRun{ID: "wf-create", Status: workflowkit.StatusPending})
+		if !errors.Is(err, workflowkit.ErrRunExists) {
+			t.Fatalf("second Create error = %v, want ErrRunExists", err)
+		}
+		loaded, err := store.Get(context.Background(), "wf-create")
+		if err != nil || loaded.Status != workflowkit.StatusWaitingApproval {
+			t.Fatalf("Get = %+v, %v; want the first run untouched", loaded, err)
+		}
+	})
+
 	t.Run("update mutates stored copy", func(t *testing.T) {
 		store := newStore(t)
 		if err := store.Save(context.Background(), workflowkit.WorkflowRun{

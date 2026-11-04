@@ -77,6 +77,25 @@ func (s *Store) Save(ctx context.Context, run workflowkit.WorkflowRun) error {
 	return tx.Commit()
 }
 
+func (s *Store) Create(ctx context.Context, run workflowkit.WorkflowRun) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var exists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM workflow_runs WHERE id = ?)`, run.ID).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		return workflowkit.ErrRunExists
+	}
+	if err := saveRun(ctx, tx, run); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func saveRun(ctx context.Context, db runQueryExecer, run workflowkit.WorkflowRun) error {
 	if run.CreatedAt.IsZero() {
 		run.CreatedAt = time.Now()

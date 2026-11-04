@@ -244,6 +244,23 @@ func TestExecutorApproveRejectsNonWaitingRun(t *testing.T) {
 	}
 }
 
+func TestExecutorApproveRejectsApprovalForAnotherRequest(t *testing.T) {
+	store := NewMemoryStore()
+	if err := store.Save(context.Background(), WorkflowRun{ID: "wf-tool", Status: StatusWaitingApproval, ApprovalRef: "agent-approval:cp-1"}); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+	executor := NewExecutor(store, []Step{})
+
+	_, err := executor.Approve(context.Background(), "wf-tool", Approval{ApprovalRef: "approval:wf-tool"})
+	if !errors.Is(err, ErrApprovalMismatch) {
+		t.Fatalf("err = %v, want ErrApprovalMismatch", err)
+	}
+	stored, err := store.Get(context.Background(), "wf-tool")
+	if err != nil || stored.Status != StatusWaitingApproval {
+		t.Fatalf("stored = %+v, %v; want still waiting", stored, err)
+	}
+}
+
 func TestExecutorMarksRunFailedWhenStepReturnsError(t *testing.T) {
 	store := NewMemoryStore()
 	boom := errors.New("boom")

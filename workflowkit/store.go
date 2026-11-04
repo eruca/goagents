@@ -12,11 +12,20 @@ import (
 var ErrRunNotFound = errors.New("workflow run not found")
 var ErrNoRunnableWorkflow = errors.New("no runnable workflow")
 var ErrWorkflowLeaseNotOwned = errors.New("workflow lease not owned")
+var ErrRunExists = errors.New("workflow run already exists")
 
 type Store interface {
 	Save(ctx context.Context, run WorkflowRun) error
 	Get(ctx context.Context, id string) (WorkflowRun, error)
 	Update(ctx context.Context, id string, mutate func(WorkflowRun) (WorkflowRun, error)) (WorkflowRun, error)
+}
+
+// CreateStore adds an insert that never replaces a stored run: Create fails
+// with ErrRunExists when a run with the same id exists. Save is an upsert, so
+// a host that accepts caller-chosen ids must create through Create.
+type CreateStore interface {
+	Store
+	Create(ctx context.Context, run WorkflowRun) error
 }
 
 type WorkflowOrder string
@@ -94,6 +103,26 @@ func (s *MemoryStore) Save(ctx context.Context, run WorkflowRun) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.runs[run.ID] = cloneRun(run)
+	return nil
+}
+
+func (s *MemoryStore) Create(ctx context.Context, run WorkflowRun) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	if run.CreatedAt.IsZero() {
+		run.CreatedAt = s.now()
+	}
+	run.UpdatedAt = s.now()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.runs[run.ID]; exists {
+		return ErrRunExists
+	}
 	s.runs[run.ID] = cloneRun(run)
 	return nil
 }
