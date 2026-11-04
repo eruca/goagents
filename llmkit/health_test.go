@@ -249,6 +249,8 @@ func TestMemoryHealthStoreBacksOffCooldownExponentially(t *testing.T) {
 		if !entry.CooldownUntil.Equal(now.Add(cooldown)) {
 			t.Fatalf("failure %d cooldown until = %v, want %v", i+1, entry.CooldownUntil, now.Add(cooldown))
 		}
+		// The next failure is the recovery probe once the cooldown passed.
+		now = entry.CooldownUntil
 	}
 }
 
@@ -370,5 +372,28 @@ func TestMemoryHealthStoreDegradedProviderRecoversAfterQuietPeriod(t *testing.T)
 	fail()
 	if entry := store.Snapshot().Entries[key]; entry.Availability != ProviderDegraded || entry.FailureStreak != 1 || !entry.CooldownUntil.IsZero() {
 		t.Fatalf("entry after a later failure = %+v, want degraded with a new streak of 1", entry)
+	}
+}
+
+func TestHealthStoreBurstOfFailuresOpensOneCooldown(t *testing.T) {
+	now := time.Date(2026, 5, 6, 9, 0, 0, 0, time.UTC)
+	store := NewMemoryHealthStore(HealthPolicy{
+		FailureCooldownThreshold: 3, CooldownDuration: time.Minute, MaxCooldownDuration: time.Hour,
+		Now: func() time.Time { return now },
+	})
+	candidate := Candidate{AccountAlias: "a", Model: ModelCapability{Alias: "m", Provider: "p"}}
+	for range 10 {
+		if err := store.Acquire(context.Background(), candidate); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 10 {
+		if err := store.RecordOutcome(context.Background(), TaskOutcome{AccountAlias: "a", ModelAlias: "m", Provider: "p", ErrorClass: ErrorClassTimeout}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entry := store.Snapshot().Entries[ProviderHealthKey("a", "m", "p")]
+	if entry.Availability != ProviderUnavailable || !entry.CooldownUntil.Equal(now.Add(time.Minute)) || entry.FailureStreak != 3 {
+		t.Fatalf("entry = %+v, want one base cooldown after ten concurrent failures", entry)
 	}
 }
