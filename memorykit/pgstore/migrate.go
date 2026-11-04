@@ -7,11 +7,12 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/eruca/goagents/memorykit"
 	pgvector "github.com/pgvector/pgvector-go"
 )
 
 const (
-	supportedSchemaVersion = 1
+	supportedSchemaVersion = 2
 	schemaLockSQL          = "SELECT pg_advisory_lock(hashtext('memorykit.schema'))"
 	schemaUnlockSQL        = "SELECT pg_advisory_unlock(hashtext('memorykit.schema'))"
 )
@@ -108,6 +109,15 @@ var migrationV1 = []string{
 VALUES (1, now()) ON CONFLICT (version) DO NOTHING`,
 }
 
+// migrationV2 indexes the Chinese and Japanese grams of each memory, which
+// the 'simple' tsvector cannot segment, so full-text recall can find gram
+// matches through an index instead of scanning every memory in scope.
+// backfillSearchGrams fills the column for memories written before it.
+var migrationV2 = []string{
+	`ALTER TABLE memories ADD COLUMN IF NOT EXISTS search_grams TEXT[] NOT NULL DEFAULT '{}'`,
+	`CREATE INDEX IF NOT EXISTS idx_memories_search_grams ON memories USING GIN (search_grams)`,
+}
+
 func migrate(ctx context.Context, db *sql.DB) (returnErr error) {
 	conn, err := db.Conn(ctx)
 	if err != nil {
@@ -142,8 +152,22 @@ func migrate(ctx context.Context, db *sql.DB) (returnErr error) {
 		"SELECT COALESCE(MAX(version), 0) FROM memorykit_schema_versions").Scan(&version); err != nil {
 		return wrapBackend("migration version", err)
 	}
-	if version != supportedSchemaVersion {
+	if version > supportedSchemaVersion {
 		return wrapBackend("migration version", fmt.Errorf("unsupported schema version %d", version))
+	}
+	if version < 2 {
+		for _, statement := range migrationV2 {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return wrapBackend("migration apply", err)
+			}
+		}
+		if err := backfillSearchGrams(ctx, tx); err != nil {
+			return wrapBackend("migration backfill", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO memorykit_schema_versions(version, applied_at)
+VALUES (2, now()) ON CONFLICT (version) DO NOTHING`); err != nil {
+			return wrapBackend("migration apply", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return wrapBackend("migration commit", err)
@@ -158,4 +182,40 @@ func migrate(ctx context.Context, db *sql.DB) (returnErr error) {
 		return wrapBackend("vector compatibility", errors.New("unexpected vector dimensions"))
 	}
 	return nil
+}
+
+func backfillSearchGrams(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `SELECT id, memory_key, content FROM memories`)
+	if err != nil {
+		return err
+	}
+	grams := map[string][]string{}
+	for rows.Next() {
+		var id, key, content string
+		if err := rows.Scan(&id, &key, &content); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if memoryGrams := searchGrams(key, content); len(memoryGrams) > 0 {
+			grams[id] = memoryGrams
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for id, memoryGrams := range grams {
+		if _, err := tx.ExecContext(ctx, `UPDATE memories SET search_grams = $1 WHERE id = $2`, memoryGrams, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// searchGrams is the search_grams value of a memory, matching the text its
+// search_vector covers.
+func searchGrams(key, content string) []string {
+	return memorykit.IndexGrams(key + " " + content)
 }

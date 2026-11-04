@@ -237,21 +237,24 @@ func (s *Store) Correct(ctx context.Context, request memorykit.CorrectRequest) (
 		return memorykit.Memory{}, wrapBackend("correct transaction", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := lockCommandTarget(ctx, tx, request.Command); err != nil {
+	target, err := lockCommandTarget(ctx, tx, request.Command)
+	if err != nil {
 		return memorykit.Memory{}, err
 	}
 
 	corrected, err := scanMemory(tx.QueryRowContext(ctx, `
 		UPDATE memories SET
 			content = $1, content_hash = $2, valid_from = $3, valid_until = $4,
-			importance = $5, confidence = $6, version = version + 1, updated_at = $7
+			importance = $5, confidence = $6, version = version + 1, updated_at = $7,
+			search_grams = $13
 		WHERE id = $8 AND tenant_id = $9 AND subject_type = $10 AND subject_id = $11
 		  AND version = $12
 		RETURNING `+memoryColumns,
 		request.Content, hashContent(request.Content), request.ValidFrom, nullableTime(request.ValidUntil),
 		request.Importance, request.Confidence, request.Command.Now,
 		request.Command.ID, request.Command.Scope.TenantID, request.Command.Scope.SubjectType,
-		request.Command.Scope.SubjectID, request.Command.ExpectedVersion))
+		request.Command.Scope.SubjectID, request.Command.ExpectedVersion,
+		searchGrams(target.Key, request.Content)))
 	if errors.Is(err, sql.ErrNoRows) {
 		return memorykit.Memory{}, versionUpdateFailure(ctx, tx, request.Command.Scope, request.Command.ID)
 	}
@@ -290,7 +293,8 @@ func (s *Store) Erase(ctx context.Context, command memorykit.VersionedCommand) e
 		return wrapBackend("erase transaction", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := lockCommandTarget(ctx, tx, command); err != nil {
+	target, err := lockCommandTarget(ctx, tx, command)
+	if err != nil {
 		return err
 	}
 
@@ -310,12 +314,13 @@ func (s *Store) Erase(ctx context.Context, command memorykit.VersionedCommand) e
 	erased, err := scanMemory(tx.QueryRowContext(ctx, `
 		UPDATE memories
 		SET content = '', content_hash = '', status = $1,
-			version = version + 1, updated_at = $2
+			version = version + 1, updated_at = $2, search_grams = $8
 		WHERE id = $3 AND tenant_id = $4 AND subject_type = $5 AND subject_id = $6
 		  AND version = $7
 		RETURNING `+memoryColumns,
 		memorykit.StatusInactive, command.Now, command.ID,
-		command.Scope.TenantID, command.Scope.SubjectType, command.Scope.SubjectID, command.ExpectedVersion))
+		command.Scope.TenantID, command.Scope.SubjectType, command.Scope.SubjectID, command.ExpectedVersion,
+		searchGrams(target.Key, "")))
 	if errors.Is(err, sql.ErrNoRows) {
 		return versionUpdateFailure(ctx, tx, command.Scope, command.ID)
 	}
@@ -550,16 +555,16 @@ func insertMemory(ctx context.Context, tx *sql.Tx, memory memorykit.Memory) erro
 	_, err := tx.ExecContext(ctx, `INSERT INTO memories (
 		id, tenant_id, subject_type, subject_id, kind, memory_key, status, content,
 		content_hash, valid_from, valid_until, importance, confidence, source_agent_id,
-		created_by, idempotency_key, version, created_at, updated_at
+		created_by, idempotency_key, version, created_at, updated_at, search_grams
 	) VALUES (
 		$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-		$15, $16, $17, $18, $19
+		$15, $16, $17, $18, $19, $20
 	)`,
 		memory.ID, memory.Scope.TenantID, memory.Scope.SubjectType, memory.Scope.SubjectID,
 		memory.Kind, memory.Key, memory.Status, memory.Content, hashContent(memory.Content),
 		memory.ValidFrom, nullableTime(memory.ValidUntil), memory.Importance, memory.Confidence,
 		memory.SourceAgentID, memory.CreatedBy, memory.IdempotencyKey, memory.Version,
-		memory.CreatedAt, memory.UpdatedAt)
+		memory.CreatedAt, memory.UpdatedAt, searchGrams(memory.Key, memory.Content))
 	return err
 }
 

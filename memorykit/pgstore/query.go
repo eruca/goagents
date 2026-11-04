@@ -85,7 +85,9 @@ func (s *Store) searchExact(ctx context.Context, query memorykit.CandidateQuery)
 
 // searchFullText matches any query term (memorykit.SearchTerms): words against
 // the 'simple' tsvector, Chinese and Japanese grams as substrings, since the
-// default parser does not segment those scripts. Only memories matching more
+// default parser does not segment those scripts. Candidates are found through
+// the GIN indexes on search_vector and search_grams, so only memories sharing
+// a term are scored. Only memories matching more
 // than half as many terms as the best match are kept, so a lone shared word
 // does not earn a high rank, and results rank by matched terms, the same
 // cutoff and order memorystore uses.
@@ -106,6 +108,7 @@ func (s *Store) searchFullText(ctx context.Context, query memorykit.CandidateQue
 			  AND m.valid_from <= $4
 			  AND (m.valid_until IS NULL OR m.valid_until > $4)
 			  AND (cardinality($7::text[]) = 0 OR m.kind = ANY($7::text[]))
+			  AND (m.search_vector @@ $9::tsquery OR m.search_grams && $6::text[])
 		) scored
 		WHERE scored.hits > 0
 		) m
@@ -113,11 +116,21 @@ func (s *Store) searchFullText(ctx context.Context, query memorykit.CandidateQue
 		ORDER BY m.hits DESC, m.importance DESC, m.updated_at DESC, m.id ASC
 		LIMIT $8`,
 		query.Scope.TenantID, query.Scope.SubjectType, query.Scope.SubjectID, query.Now,
-		quotedLexemes(words), grams, kindStrings(query.Kinds), query.FullTextLimit)
+		quotedLexemes(words), grams, kindStrings(query.Kinds), query.FullTextLimit,
+		anyLexeme(words))
 	if err != nil {
 		return nil, wrapBackend("full-text candidates", err)
 	}
 	return scanCandidates(rows, memorykit.ChannelFullText, false)
+}
+
+// anyLexeme is a tsquery matching any of words, or NULL for no words, since
+// PostgreSQL warns about an empty tsquery.
+func anyLexeme(words []string) any {
+	if len(words) == 0 {
+		return nil
+	}
+	return strings.Join(quotedLexemes(words), " | ")
 }
 
 // quotedLexemes quotes each word as a tsquery lexeme, so no word is parsed as

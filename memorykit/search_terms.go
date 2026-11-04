@@ -2,6 +2,7 @@ package memorykit
 
 import (
 	"math"
+	"sort"
 	"strings"
 	"unicode"
 )
@@ -64,6 +65,38 @@ func splitSearchTerms(text string, wordLimit, gramLimit int) (words, grams []str
 	flushWord()
 	flushCJK()
 	return words, grams
+}
+
+// IndexGrams lists, sorted, every Chinese and Japanese character in text and
+// every two-character gram within a run of them: exactly the SearchTerms grams
+// that occur in text as substrings. A store can index them to find gram
+// matches without scanning every memory.
+func IndexGrams(text string) []string {
+	seen := map[string]struct{}{}
+	var run []rune
+	flush := func() {
+		for i := range run {
+			seen[string(run[i])] = struct{}{}
+			if i+1 < len(run) {
+				seen[string(run[i:i+2])] = struct{}{}
+			}
+		}
+		run = run[:0]
+	}
+	for _, r := range text {
+		if unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana) {
+			run = append(run, r)
+			continue
+		}
+		flush()
+	}
+	flush()
+	grams := make([]string, 0, len(seen))
+	for gram := range seen {
+		grams = append(grams, gram)
+	}
+	sort.Strings(grams)
+	return grams
 }
 
 // CountSearchTermHits counts how many query terms a memory matches: words
