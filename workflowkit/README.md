@@ -65,9 +65,11 @@ run, err := executor.Run(ctx, workflowkit.WorkflowRun{
 })
 ```
 
-Steps return `StepResult` values. Returning `waiting_approval`, `failed`, or
-`cancelled` stops the executor and persists the current run. Returning a Go error
-marks the workflow failed.
+Steps return `StepResult` values. An empty status continues to the next step.
+Returning `waiting_approval`, `succeeded`, `failed`, or `cancelled` stops the
+executor and persists the current run; `succeeded` ends the whole workflow as
+succeeded, skipping the remaining steps. Returning a Go error marks the
+workflow failed.
 
 When a step returns `waiting_approval`, include host-owned references instead of
 raw payloads:
@@ -101,6 +103,7 @@ Workflow status transitions are guarded:
 
 ```text
 pending -> running
+running -> pending          (a queued run yielding until a retry is due)
 running -> waiting_approval
 running -> succeeded
 running -> failed

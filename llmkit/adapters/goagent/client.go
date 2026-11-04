@@ -75,7 +75,8 @@ type PreDispatchRequest struct {
 	ProviderRequestSHA256 [sha256.Size]byte
 }
 
-// PreDispatchHook 在路由和请求摘要构造后、health 计数或 Provider 调用前执行。
+// PreDispatchHook 在路由和请求摘要构造后执行：此时 HealthStore 已经 Acquire
+// 了这次调用的名额，Provider 还没有被调用。Hook 返回错误时名额会被释放。
 type PreDispatchHook func(context.Context, PreDispatchRequest) error
 
 // PreDispatchConfig 启用可选的 Provider claim 边界。

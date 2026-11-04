@@ -33,13 +33,15 @@ Valid statuses are:
 - `failed`
 - `cancelled`
 
-`pending` is only an initial workflow status. `succeeded`, `failed`, and
-`cancelled` are terminal.
+`pending` is the initial workflow status, and a queued run returns to it while
+it waits out a retry backoff. `succeeded`, `failed`, and `cancelled` are
+terminal.
 
 Allowed lifecycle transitions:
 
 ```text
 pending -> running
+running -> pending          (a queued run yielding until a retry is due)
 running -> waiting_approval
 running -> succeeded
 running -> failed
