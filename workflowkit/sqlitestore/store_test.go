@@ -344,3 +344,86 @@ CREATE TABLE workflow_runs (
 		t.Fatalf("ClaimRunnable = %s, %v; want the older run with the expired lease", claimed.ID, err)
 	}
 }
+
+func TestStoreSaveWritesOnlyChangedStepRecords(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "workflow.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	run := workflowkit.WorkflowRun{ID: "wf-records", Status: workflowkit.StatusRunning}
+	for i := range 50 {
+		run.StepRecords = append(run.StepRecords, workflowkit.StepRecord{Name: "step", Attempt: i + 1, Status: workflowkit.StatusSucceeded})
+	}
+	if err := store.Save(ctx, run); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+
+	changes := func() int {
+		var n int
+		if err := store.db.QueryRow(`SELECT total_changes()`).Scan(&n); err != nil {
+			t.Fatalf("total_changes: %v", err)
+		}
+		return n
+	}
+	before := changes()
+	updated, err := store.Update(ctx, run.ID, func(current workflowkit.WorkflowRun) (workflowkit.WorkflowRun, error) {
+		current.StepRecords = append(current.StepRecords, workflowkit.StepRecord{Name: "next", Attempt: 1, Status: workflowkit.StatusSucceeded})
+		return current, nil
+	})
+	if err != nil {
+		t.Fatalf("Update returned error: %v", err)
+	}
+	// One upsert of the run row and one inserted record.
+	if got := changes() - before; got != 2 {
+		t.Fatalf("rows changed by appending one record = %d, want 2", got)
+	}
+	if len(updated.StepRecords) != 51 || updated.StepRecords[50].Name != "next" {
+		t.Fatalf("records = %d, last = %+v", len(updated.StepRecords), updated.StepRecords[len(updated.StepRecords)-1])
+	}
+
+	updated.StepRecords = updated.StepRecords[:2]
+	updated.StepRecords[1].Error = "rewritten"
+	if err := store.Save(ctx, updated); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+	loaded, err := store.Get(ctx, run.ID)
+	if err != nil || len(loaded.StepRecords) != 2 || loaded.StepRecords[1].Error != "rewritten" {
+		t.Fatalf("Get = %+v, %v; want the truncated, rewritten records", loaded.StepRecords, err)
+	}
+}
+
+func TestOpenMovesInlineStepRecords(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "workflow.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	// Schema version 3 kept step records inline as a JSON array.
+	if _, err := store.db.Exec(`INSERT INTO workflow_runs (id, status, step_records_json, created_at, updated_at) VALUES ('wf-legacy', 'succeeded', ?, 1, 1)`,
+		`[{"Name":"extract","Status":"succeeded","Attempt":1},{"Name":"review","Status":"failed","Attempt":2,"Error":"boom"}]`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(path)
+	if err != nil {
+		t.Fatalf("reopen returned error: %v", err)
+	}
+	defer store.Close()
+	loaded, err := store.Get(context.Background(), "wf-legacy")
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if len(loaded.StepRecords) != 2 || loaded.StepRecords[0].Name != "extract" || loaded.StepRecords[1].Error != "boom" {
+		t.Fatalf("records = %+v, want both legacy records in order", loaded.StepRecords)
+	}
+	var inline string
+	if err := store.db.QueryRow(`SELECT step_records_json FROM workflow_runs WHERE id = 'wf-legacy'`).Scan(&inline); err != nil || inline != "[]" {
+		t.Fatalf("inline records = %q, %v; want cleared", inline, err)
+	}
+}
