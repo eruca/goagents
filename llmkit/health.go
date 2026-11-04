@@ -243,7 +243,7 @@ func CountsTowardProviderHealth(class ErrorClass) bool {
 	switch class {
 	case ErrorClassCanceled, ErrorClassRequestTooLarge, ErrorClassBudgetExceeded,
 		ErrorClassPolicyBlocked, ErrorClassCapabilityMismatch, ErrorClassPostCall,
-		ErrorClassProviderBusy:
+		ErrorClassProviderBusy, ErrorClassStreamConsumer:
 		return false
 	default:
 		return true

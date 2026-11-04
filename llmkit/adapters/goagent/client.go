@@ -265,12 +265,13 @@ func (c *Client) route(ctx context.Context, req ports.ChatRequest, onDelta func(
 }
 
 // attempt makes one admitted provider call. It owns the health slot
-// acquired for it: the slot is closed by the outcome once the provider was
-// called, or released if the attempt stops before that.
+// acquired for it: the slot is closed by the outcome once one is recorded, or
+// released if the attempt stops before that, including when the provider or
+// the stream callback panics.
 func (c *Client) attempt(ctx context.Context, req ports.ChatRequest, onDelta func(ports.ChatDelta) error, profile llmkit.TaskProfile, decision llmkit.RouteDecision, provider ProviderClient, attemptOffset int, routeMetadata *RouteMetadata, routeMetadataLoaded *bool, lastProviderCallIndex *int) (*ports.ChatResponse, bool, error) {
-	called := false
+	settled := false
 	defer func() {
-		if !called && c.healthStore != nil {
+		if !settled && c.healthStore != nil {
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), providerOutcomeCleanupTimeout)
 			defer cancel()
 			_ = c.healthStore.Release(cleanupCtx, decision.Selected)
@@ -306,15 +307,19 @@ func (c *Client) attempt(ctx context.Context, req ports.ChatRequest, onDelta fun
 		*lastProviderCallIndex = providerCallIndex
 	}
 
-	called = true
 	callStarted := time.Now()
 	delivered := false
 	var resp *ports.ChatResponse
 	var providerErr error
+	var consumerErr error
 	if streams {
 		resp, providerErr = streaming.ChatStream(ctx, req, func(delta ports.ChatDelta) error {
 			delivered = true
-			return onDelta(delta)
+			if err := onDelta(delta); err != nil {
+				consumerErr = err
+				return err
+			}
+			return nil
 		})
 	} else {
 		resp, providerErr = provider.Chat(ctx, req)
@@ -325,7 +330,16 @@ func (c *Client) attempt(ctx context.Context, req ports.ChatRequest, onDelta fun
 		resp = nil
 		providerErr = requestErr
 	}
+	if consumerErr != nil && providerErr != nil {
+		// The caller stopped reading; the provider did not fail.
+		settled = true
+		if err := c.recordOutcomeAfterCall(ctx, profile, decision, trace, latency, nil, newRuntimeError(ErrorStageProvider, llmkit.ErrorClassStreamConsumer, true, consumerErr)); err != nil {
+			return nil, delivered, newRuntimeError(ErrorStagePostCall, llmkit.ErrorClassPostCall, true, err)
+		}
+		return nil, delivered, newRuntimeError(ErrorStageProvider, llmkit.ErrorClassStreamConsumer, true, consumerErr)
+	}
 	if providerErr == nil {
+		settled = true
 		if err := c.recordOutcomeAfterCall(ctx, profile, decision, trace, latency, resp, nil); err != nil {
 			return nil, delivered, newRuntimeError(ErrorStagePostCall, llmkit.ErrorClassPostCall, true, err)
 		}
@@ -338,6 +352,7 @@ func (c *Client) attempt(ctx context.Context, req ports.ChatRequest, onDelta fun
 		}
 		return resp, delivered, nil
 	}
+	settled = true
 	if err := c.recordOutcomeAfterCall(ctx, profile, decision, trace, latency, nil, providerErr); err != nil {
 		return nil, delivered, newRuntimeError(ErrorStagePostCall, llmkit.ErrorClassPostCall, true, err)
 	}
@@ -377,7 +392,12 @@ func (c *Client) recordOutcome(ctx context.Context, profile llmkit.TaskProfile, 
 	}
 	if providerErr != nil {
 		outcome.ErrorCode = "provider_error"
-		if c.errorClassifier != nil {
+		// A class the adapter already assigned, such as a failed stream
+		// consumer, wins over the host's classifier.
+		var runtimeErr *RuntimeError
+		if errors.As(providerErr, &runtimeErr) {
+			outcome.ErrorClass = runtimeErr.Class
+		} else if c.errorClassifier != nil {
 			outcome.ErrorClass = c.errorClassifier(providerErr)
 		}
 	}

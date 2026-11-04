@@ -2,8 +2,11 @@ package llmkit
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -173,10 +176,25 @@ func WriteModelStats(home string, stats ModelStats) error {
 		return err
 	}
 	encoded = append(encoded, '\n')
-	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+	// Write a temporary file and rename it over the old one, so a concurrent
+	// reader never sees a truncated or empty file.
+	tmp, err := os.CreateTemp(clean, modelStatsFile+".*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Chmod(path, 0o600)
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(encoded); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 type modelStatsBuilder struct {
@@ -205,13 +223,19 @@ func (b *modelStatsBuilder) addOutcome(outcome TaskOutcome) {
 	key := modelStatsKey(outcome.TaskType, outcome.AccountAlias, outcome.ModelAlias, outcome.Provider)
 	acc := b.entry(key, outcome.TaskType, outcome.AccountAlias, outcome.ModelAlias, outcome.Provider)
 	acc.entry.OutcomeCount++
-	weight := b.decayWeight(outcome.RecordedAt)
-	acc.entry.RecentOutcomes += weight
 	if outcome.Success {
 		acc.entry.Successes++
 	} else {
 		acc.entry.Failures++
-		acc.entry.RecentFailures += weight
+	}
+	// Reliability reflects the provider: failures the caller caused, such as
+	// a cancellation, are not observations of it.
+	if outcome.Success || CountsTowardProviderHealth(outcome.ErrorClass) {
+		weight := b.decayWeight(outcome.RecordedAt)
+		acc.entry.RecentOutcomes += weight
+		if !outcome.Success {
+			acc.entry.RecentFailures += weight
+		}
 	}
 	// Outcomes that did not report latency or cost must not pull averages toward zero.
 	if outcome.LatencyMillis > 0 {
@@ -308,17 +332,28 @@ func readJSONL(path string, handle func([]byte) error) error {
 	}
 	defer file.Close()
 
-	scanner := bufio.NewScanner(file)
+	// Lines are read whole, however long, and a line that is not valid JSON is
+	// skipped: a crash during an append leaves a partial line, and the next
+	// append continues on it. One damaged record must not make the whole file,
+	// and every route that reads it, unusable.
+	reader := bufio.NewReader(file)
 	lineNumber := 0
-	for scanner.Scan() {
-		lineNumber++
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			lineNumber++
+			line = bytes.TrimSpace(line)
+			if len(line) > 0 && json.Valid(line) {
+				if err := handle(line); err != nil {
+					return fmt.Errorf("%s:%d: %w", path, lineNumber, err)
+				}
+			}
 		}
-		if err := handle(line); err != nil {
-			return fmt.Errorf("%s:%d: %w", path, lineNumber, err)
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
 		}
 	}
-	return scanner.Err()
 }
