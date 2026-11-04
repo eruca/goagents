@@ -122,7 +122,6 @@ func (s *Store) searchFullText(ctx context.Context, query memorykit.CandidateQue
 	return scanCandidates(rows, memorykit.ChannelFullText, false)
 }
 
-
 func (s *Store) searchVector(ctx context.Context, query memorykit.CandidateQuery) ([]memorykit.Candidate, error) {
 	vector := pgvector.NewVector(append([]float32(nil), query.QueryVector...))
 	rows, err := s.db.QueryContext(ctx, `SELECT `+qualifiedMemoryColumns+`,

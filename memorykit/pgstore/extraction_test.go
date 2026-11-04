@@ -225,11 +225,16 @@ func TestExtractionJobFailureRetriesThenScrubsTerminalSource(t *testing.T) {
 		t.Fatalf("retry state = %q/%d/%#v/%q", status, attempts, source, failure)
 	}
 
-	second, err := store.ClaimExtraction(context.Background(), "worker-2", time.Minute, 2, job.CreatedAt.Add(2*time.Second))
+	// The retry waits out the backoff after the first failure.
+	if _, err := store.ClaimExtraction(context.Background(), "worker-2", time.Minute, 2, job.CreatedAt.Add(2*time.Second)); !errors.Is(err, memorykit.ErrNoExtractionJob) {
+		t.Fatalf("claim during backoff = %v, want ErrNoExtractionJob", err)
+	}
+	retryAt := job.CreatedAt.Add(time.Second + defaultExtractionRetryDelay)
+	second, err := store.ClaimExtraction(context.Background(), "worker-2", time.Minute, 2, retryAt)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.FailExtraction(context.Background(), job.ID, second.LeaseOwner, second.Attempts, "candidate_write_failed", 2, job.CreatedAt.Add(3*time.Second)); err != nil {
+	if err := store.FailExtraction(context.Background(), job.ID, second.LeaseOwner, second.Attempts, "candidate_write_failed", 2, retryAt.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	status, attempts, source, failure = extractionJobState(t, store, job.ID)
@@ -449,7 +454,8 @@ func TestExtractionWorkerRetryReusesCandidateWithoutDuplicateRevision(t *testing
 	if !worked || !errors.Is(firstErr, errInjectedCompletion) {
 		t.Fatalf("first RunOnce() = %v, %v, want injected completion error", worked, firstErr)
 	}
-	worker = newWorker(job.CreatedAt.Add(time.Second))
+	// The retry is claimable once the backoff after the failure has passed.
+	worker = newWorker(job.CreatedAt.Add(time.Second + defaultExtractionRetryDelay))
 	worked, err := worker.RunOnce(context.Background())
 	if err != nil || !worked {
 		t.Fatalf("second RunOnce() = %v, %v", worked, err)
@@ -677,4 +683,16 @@ func mustExtractionCandidateID(t *testing.T, jobID string, draft memorykit.Candi
 		t.Fatal(err)
 	}
 	return id
+}
+
+func TestExtractionRetryDelayDoublesUpToTheCeiling(t *testing.T) {
+	cfg := Config{ExtractionRetryDelay: time.Second, ExtractionMaxRetryDelay: 5 * time.Second}
+	for attempt, want := range map[int]time.Duration{1: time.Second, 2: 2 * time.Second, 3: 4 * time.Second, 4: 5 * time.Second, 40: 5 * time.Second} {
+		if got := cfg.extractionRetryDelay(attempt); got != want {
+			t.Errorf("delay after attempt %d = %s, want %s", attempt, got, want)
+		}
+	}
+	if got := (Config{}).extractionRetryDelay(1); got != defaultExtractionRetryDelay {
+		t.Errorf("default delay = %s, want %s", got, defaultExtractionRetryDelay)
+	}
 }

@@ -122,9 +122,13 @@ var migrationV2 = []string{
 // them. Matching query words against the 'simple' tsvector disagreed with
 // memorystore: PostgreSQL keeps dotted keys, paths, and URLs as single
 // tokens, so "vectors" missed the key "storage.vectors".
+//
+// It also adds next_attempt_at, which holds a failed extraction job back
+// until its retry is due, so a brief outage does not use up every attempt.
 var migrationV3 = []string{
 	`ALTER TABLE memories ADD COLUMN IF NOT EXISTS search_words TEXT[] NOT NULL DEFAULT '{}'`,
 	`CREATE INDEX IF NOT EXISTS idx_memories_search_words ON memories USING GIN (search_words)`,
+	`ALTER TABLE memory_extraction_jobs ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ`,
 }
 
 func migrate(ctx context.Context, db *sql.DB) (returnErr error) {

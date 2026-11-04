@@ -105,7 +105,11 @@ Artifact bodies are not valid log/event/error fields.
 - A deterministic trusted projection may create active memory without a model.
 - Model extraction can only propose candidate records. Candidates remain hidden
   from recall until an authorized reviewer activates them.
-- Candidate extraction jobs are durable and leased with bounded retries.
+- Candidate extraction jobs are durable and leased with bounded retries. A
+  failed job waits before it can be claimed again, `pgstore.Config`'s
+  `ExtractionRetryDelay` (default 5s) doubling per failure up to
+  `ExtractionMaxRetryDelay` (default 5m), so a short provider outage does not
+  use up every attempt.
   Deterministic job/candidate identities make retries idempotent.
 
 Explicit write failure is truthful: the tool returns `项目记忆未保存`, marks the
@@ -119,7 +123,8 @@ a content-free degradation event for operator follow-up.
 ## Lifecycle and operations
 
 - **Migration:** opening `pgstore` upgrades older schema versions in place
-  (version 2 adds and backfills `search_grams`, version 3 `search_words`) and
+  (version 2 adds and backfills `search_grams`; version 3 adds and backfills
+  `search_words` and adds the extraction job `next_attempt_at`) and
   fails closed on an
   unavailable extension or a newer, unsupported version.
 - **Embedding rebuild:** delete the affected embedding rows (or let changed
