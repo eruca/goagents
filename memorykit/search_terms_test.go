@@ -44,3 +44,22 @@ func TestCountSearchTermHitsSeesEveryWordOfLongMemory(t *testing.T) {
 		t.Fatalf("gram hits = %d, want 2", hits)
 	}
 }
+
+func TestIndexGramsCoverEverySubstringGram(t *testing.T) {
+	text := "部署 key: 生产环境はテスト"
+	indexed := map[string]bool{}
+	for _, gram := range IndexGrams(text) {
+		indexed[gram] = true
+	}
+	for _, query := range []string{"部署", "生产环境", "環", "はテ", "产", "署生"} {
+		_, grams := SearchTerms(query)
+		for _, gram := range grams {
+			if indexed[gram] != strings.Contains(text, gram) {
+				t.Errorf("gram %q indexed = %v, substring = %v", gram, indexed[gram], strings.Contains(text, gram))
+			}
+		}
+	}
+	if got := IndexGrams("plain ascii"); len(got) != 0 {
+		t.Fatalf("IndexGrams(ascii) = %q, want none", got)
+	}
+}

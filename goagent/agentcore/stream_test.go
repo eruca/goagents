@@ -235,7 +235,8 @@ func TestAgentStreamDiscardEventsDoesNotCancelRunOrSink(t *testing.T) {
 	}
 }
 
-// streamingLLM streams each response's content in fixed-size chunks.
+// streamingLLM streams each response's content in fixed-size chunks, then
+// each tool call as a header piece followed by its arguments.
 type streamingLLM struct {
 	mockLLM
 	chunk       int
@@ -254,6 +255,13 @@ func (s *streamingLLM) ChatStream(ctx context.Context, req ports.ChatRequest, on
 			return nil, err
 		}
 		content = content[n:]
+	}
+	for i, call := range resp.ToolCalls {
+		for _, piece := range []ports.ToolCallDelta{{Index: i, ID: call.ID, Name: call.Name}, {Index: i, Arguments: string(call.Input)}} {
+			if err := onDelta(ports.ChatDelta{ToolCall: &piece}); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return resp, nil
 }
@@ -293,7 +301,17 @@ func TestAgentStreamDeliversModelDeltasBeforeResult(t *testing.T) {
 		t.Fatalf("result = %+v, %v", result, err)
 	}
 	var first, second strings.Builder
+	var toolPieces []ports.ToolCallDelta
+	contentDeltas := 0
 	for _, delta := range deltas {
+		if delta.ToolCall != nil {
+			if delta.Iteration != 0 {
+				t.Fatalf("tool call delta in iteration %d, want 0", delta.Iteration)
+			}
+			toolPieces = append(toolPieces, *delta.ToolCall)
+			continue
+		}
+		contentDeltas++
 		switch delta.Iteration {
 		case 0:
 			first.WriteString(delta.Content)
@@ -303,8 +321,11 @@ func TestAgentStreamDeliversModelDeltasBeforeResult(t *testing.T) {
 			t.Fatalf("delta iteration = %d", delta.Iteration)
 		}
 	}
-	if first.String() != "checking" || second.String() != "final answer" || len(deltas) != 5 {
+	if first.String() != "checking" || second.String() != "final answer" || contentDeltas != 5 {
 		t.Fatalf("deltas = %+v, want chunks of each model call grouped by iteration", deltas)
+	}
+	if len(toolPieces) != 2 || toolPieces[0].ID != "call_1" || toolPieces[0].Name != "lookup" || toolPieces[1].Arguments != "{}" {
+		t.Fatalf("tool call pieces = %+v, want the lookup call header then its arguments", toolPieces)
 	}
 	for _, event := range sink.events {
 		if strings.Contains(event.Message, "final") {

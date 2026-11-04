@@ -41,8 +41,8 @@ func (c *Client) ChatStream(ctx context.Context, req ports.ChatRequest, onDelta 
 		if err != nil {
 			return nil, err
 		}
-		if result.Content != "" {
-			if err := onDelta(ports.ChatDelta{Content: result.Content}); err != nil {
+		for _, delta := range ports.ResponseDeltas(result) {
+			if err := onDelta(delta); err != nil {
 				return nil, err
 			}
 		}
@@ -202,6 +202,14 @@ func (a *streamAssembler) add(data []byte, onDelta func(ports.ChatDelta) error) 
 			merged.Function.Name = call.Function.Name
 		}
 		merged.Function.Arguments += call.Function.Arguments
+		if call.ID == "" && call.Function.Name == "" && call.Function.Arguments == "" {
+			continue
+		}
+		if err := onDelta(ports.ChatDelta{ToolCall: &ports.ToolCallDelta{
+			Index: call.Index, ID: call.ID, Name: call.Function.Name, Arguments: call.Function.Arguments,
+		}}); err != nil {
+			return err
+		}
 	}
 	if delta.Content == "" {
 		return nil

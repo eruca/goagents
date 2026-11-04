@@ -31,8 +31,8 @@ func (s ThinkStage) Run(ctx context.Context, state *RunState) (StageResult, erro
 	if streaming, ok := s.LLM.(ports.StreamingLLMClient); ok && state.onDelta != nil {
 		iteration := state.Iteration
 		resp, err = streaming.ChatStream(ctx, req, func(delta ports.ChatDelta) error {
-			if delta.Content != "" {
-				state.onDelta(ModelDelta{Iteration: iteration, Content: delta.Content})
+			if delta.Content != "" || delta.ToolCall != nil {
+				state.onDelta(ModelDelta{Iteration: iteration, Content: delta.Content, ToolCall: delta.ToolCall})
 			}
 			return nil
 		})

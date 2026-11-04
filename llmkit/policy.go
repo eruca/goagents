@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"sort"
 	"strings"
 	"time"
@@ -50,6 +51,26 @@ type RouteDecision struct {
 // deterministic scoring.
 type RoutePolicy struct {
 	Now func() time.Time
+	// LoadSpread, when set, spreads requests across near-best candidates
+	// instead of always choosing the top one. Selection then depends on a
+	// random draw and is no longer reproducible from the inputs alone; the
+	// decision's Reason records the draw.
+	LoadSpread *LoadSpread
+}
+
+// LoadSpread chooses among the available candidates scoring within
+// ScoreTolerance of the best by power of two choices: it draws two of them at
+// random and keeps the one with fewer requests in flight, the first drawn on
+// a tie. Deterministic selection sends every concurrent request to the top
+// candidate until its concurrency limit fills; two random choices spread the
+// load while still steering away from busy providers.
+type LoadSpread struct {
+	// ScoreTolerance is how many points below the best score a candidate may
+	// be and still share the load. Zero spreads only across tied candidates.
+	ScoreTolerance int
+	// Rand returns a random int in [0, n). It must be safe for concurrent
+	// use. Nil uses math/rand/v2.
+	Rand func(n int) int
 }
 
 // Select returns the best candidate for profile, or a clear error when no
@@ -98,15 +119,44 @@ func (p RoutePolicy) Select(profile TaskProfile, candidates []Candidate) (RouteD
 		return stableCandidateKey(available[i].candidate) < stableCandidateKey(available[j].candidate)
 	})
 
-	best := available[0]
+	best, reason := available[0], available[0].score.Reason
+	if p.LoadSpread != nil {
+		best, reason = p.LoadSpread.choose(available)
+	}
 	return RouteDecision{
 		Selected:       best.candidate,
 		SelectedAlias:  best.candidate.Model.Alias,
 		Score:          best.score.Score,
 		ScoreBreakdown: copyBreakdown(best.score.ScoreBreakdown),
-		Reason:         best.score.Reason,
+		Reason:         reason,
 		Candidates:     scored,
 	}, nil
+}
+
+// choose applies power of two choices to ranked, which is sorted best first.
+func (l LoadSpread) choose(ranked []scoredCandidate) (scoredCandidate, string) {
+	pool := 1
+	for pool < len(ranked) && ranked[pool].score.Score >= ranked[0].score.Score-max(l.ScoreTolerance, 0) {
+		pool++
+	}
+	if pool < 2 {
+		return ranked[0], ranked[0].score.Reason
+	}
+	draw := l.Rand
+	if draw == nil {
+		draw = rand.IntN
+	}
+	first := draw(pool)
+	second := draw(pool - 1)
+	if second >= first {
+		second++
+	}
+	chosen, other := ranked[first], ranked[second]
+	if other.candidate.ProviderInFlight < chosen.candidate.ProviderInFlight {
+		chosen, other = other, chosen
+	}
+	return chosen, fmt.Sprintf("%s; load spread over %d near-best candidates chose it over %s (in flight %d vs %d)",
+		chosen.score.Reason, pool, other.candidate.Model.Alias, chosen.candidate.ProviderInFlight, other.candidate.ProviderInFlight)
 }
 
 type scoredCandidate struct {

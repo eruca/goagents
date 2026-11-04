@@ -2,6 +2,7 @@ package agentcore
 
 import (
 	"context"
+	"github.com/eruca/goagents/goagent/ports"
 	"sync"
 )
 
@@ -26,11 +27,15 @@ type RunStreamEvent struct {
 }
 
 // ModelDelta is a piece of model output streamed while a call runs, when the
-// Agent's LLM implements ports.StreamingLLMClient. Iteration identifies the
-// model call. Deltas reach only the stream, never the Agent's EventSink.
+// Agent's LLM implements ports.StreamingLLMClient: text, a piece of a tool
+// call (see ports.ToolCallDelta), or both. Iteration identifies the model
+// call. Deltas reach only the stream, never the Agent's EventSink. A streamed
+// tool call is what the model asked for; whether it runs is decided after the
+// call completes, by validation, policy, and approval.
 type ModelDelta struct {
 	Iteration int
 	Content   string
+	ToolCall  *ports.ToolCallDelta
 }
 
 type runStreamDone struct {

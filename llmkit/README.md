@@ -1,6 +1,6 @@
 # llmkit
 
-llmkit is an optional routing module for choosing an LLM model/account from host-provided task metadata. It keeps routing decisions deterministic and auditable while leaving provider clients, API keys, prompts, responses, and business workflow ownership in the host application.
+llmkit is an optional routing module for choosing an LLM model/account from host-provided task metadata. It keeps routing decisions deterministic (unless load spreading is enabled) and auditable while leaving provider clients, API keys, prompts, responses, and business workflow ownership in the host application.
 
 ## Configuration Home
 
@@ -207,6 +207,25 @@ quota-exhausted, or cooling down after failures.
 `MemoryHealthStore` is intentionally a single-process implementation. The
 shared-store contract and future host replacement path are documented in
 `../docs/llmkit-healthstore-contract.md`.
+
+### Load Spread
+
+By default `RoutePolicy.Select` is deterministic: equal inputs always choose
+the same top candidate, so concurrent requests all go to it until its
+concurrency limit fills. Setting `RoutePolicy.LoadSpread` trades that
+reproducibility for load spreading. Among the candidates scoring within
+`ScoreTolerance` of the best, it draws two at random and keeps the one with
+fewer requests in flight (power of two choices). In-flight counts come from the
+health snapshot, so without a `HealthStore` the choice is uniform among the
+near-best candidates. The decision's `Reason` names both draws and their load,
+so route traces still explain each choice.
+
+```go
+client := goagentadapter.NewClient(goagentadapter.Config{
+	// ...
+	Policy: llmkit.RoutePolicy{LoadSpread: &llmkit.LoadSpread{ScoreTolerance: 5}},
+})
+```
 
 ## Fallback Policy
 

@@ -127,18 +127,22 @@ workflow listing.
 ## SQLite Store
 
 `sqlitestore` persists workflow state in SQLite and currently uses
-`SchemaVersion = 2`.
+`SchemaVersion = 4`.
 
 The schema version is recorded in `workflowkit_schema` with id `sqlitestore`.
-Until migration helpers are introduced, schema compatibility is limited to the
-current version. Future schema changes must bump `SchemaVersion`, add migration
-tests, and document whether old databases are upgraded in place or require host
-rebuild.
+`Open` upgrades older databases in place: version 3 stored times as integers
+instead of zone-qualified text, and version 4 moved step records from the
+`step_records_json` column into `workflow_step_records`, one row per record, so
+a save writes only the records that changed. Future schema changes must bump
+`SchemaVersion`, add migration tests, and document whether old databases are
+upgraded in place or require host rebuild.
 
 ## Retry
 
 Retries are opt-in. `RetryPolicy.MaxAttempts <= 0` means one attempt.
 
 Only errors marked with `TransientError` are retried. Ordinary Go errors fail
-the workflow immediately. Retry is local to the current process execution; it is
-not a distributed scheduler, delayed queue, or background worker.
+the workflow immediately. `StepRetries` carries the retry budget across claims.
+A run claimed from a queue (it has a lease owner) does not sleep through a
+backoff: it returns to `pending` with `NextAttemptAt` set, and `ClaimRunnable`
+hands it out again once the retry is due. Unleased runs wait in-process.

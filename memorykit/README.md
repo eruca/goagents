@@ -72,8 +72,10 @@ default PostgreSQL parser does not segment, become overlapping two-character
 grams matched as substrings. A memory matches if it shares any term; only
 memories matching more than half as many terms as the best match are kept, and
 results rank by matched terms. `memorystore` and `pgstore` apply the same rule,
-checked by `storetest.RunFullTextRecallConformance`. The query is evaluated per
-scope without the GIN index, which is fine at project-memory scale.
+checked by `storetest.RunFullTextRecallConformance`. `pgstore` keeps each
+memory's characters and two-character grams in an indexed `search_grams`
+column, so candidates come from the GIN indexes on `search_vector` and
+`search_grams` and only memories sharing a term are scored.
 
 On-demand recall uses request-scoped `search_memory` and `read_memory` tools.
 Their schemas contain no Scope fields. `remember_project_memory` is registered
@@ -115,8 +117,9 @@ a content-free degradation event for operator follow-up.
 
 ## Lifecycle and operations
 
-- **Migration:** opening `pgstore` applies only the supported schema version and
-  fails closed on an unavailable extension or incompatible version.
+- **Migration:** opening `pgstore` upgrades older schema versions in place
+  (version 2 adds and backfills `search_grams`) and fails closed on an
+  unavailable extension or a newer, unsupported version.
 - **Embedding rebuild:** delete the affected embedding rows (or let changed
   content hashes become pending), then run `EmbeddingWorker` until
   `PendingEmbeddings` is empty. Exact/full-text recall remains available while

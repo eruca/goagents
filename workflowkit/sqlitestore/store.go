@@ -19,15 +19,18 @@ type Store struct {
 
 type runQueryExecer interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-const SchemaVersion = 3
+const SchemaVersion = 4
 
 // runColumns is the column list every query reads and writes, in scanRun order.
+// Step records live in workflow_step_records, one row each, so a save writes
+// only the records that changed instead of re-encoding the whole history.
 const runColumns = `id, status, input_ref, output_ref, agent_run_id, audit_ref, error,
 	approval_ref, waiting_reason, current_step, completed_steps_json,
-	step_attempts_json, step_records_json, step_retries, next_attempt_at, metadata_json,
+	step_attempts_json, step_retries, next_attempt_at, metadata_json,
 	lease_owner, lease_until, created_at, updated_at`
 
 func Open(path string) (*Store, error) {
@@ -63,7 +66,15 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) Save(ctx context.Context, run workflowkit.WorkflowRun) error {
-	return saveRun(ctx, s.db, run)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := saveRun(ctx, tx, run); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func saveRun(ctx context.Context, db runQueryExecer, run workflowkit.WorkflowRun) error {
@@ -77,7 +88,7 @@ func saveRun(ctx context.Context, db runQueryExecer, run workflowkit.WorkflowRun
 	}
 	_, err = db.ExecContext(ctx, `
 INSERT INTO workflow_runs (`+runColumns+`)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	status=excluded.status,
 	input_ref=excluded.input_ref,
@@ -90,7 +101,6 @@ ON CONFLICT(id) DO UPDATE SET
 	current_step=excluded.current_step,
 	completed_steps_json=excluded.completed_steps_json,
 	step_attempts_json=excluded.step_attempts_json,
-	step_records_json=excluded.step_records_json,
 	step_retries=excluded.step_retries,
 	next_attempt_at=excluded.next_attempt_at,
 	metadata_json=excluded.metadata_json,
@@ -100,9 +110,84 @@ ON CONFLICT(id) DO UPDATE SET
 	updated_at=excluded.updated_at
 `, row.ID, row.Status, row.InputRef, row.OutputRef, row.AgentRunID, row.AuditRef, row.Error,
 		row.ApprovalRef, row.WaitingReason, row.CurrentStep, row.CompletedStepsJSON,
-		row.StepAttemptsJSON, row.StepRecordsJSON, row.StepRetries, dbTime(row.NextAttemptAt), row.MetadataJSON,
+		row.StepAttemptsJSON, row.StepRetries, dbTime(row.NextAttemptAt), row.MetadataJSON,
 		row.LeaseOwner, dbTime(row.LeaseUntil), dbTime(row.CreatedAt), dbTime(row.UpdatedAt))
-	return err
+	if err != nil {
+		return err
+	}
+	return saveStepRecords(ctx, db, run.ID, run.StepRecords)
+}
+
+// saveStepRecords writes the records that differ from the stored ones and
+// drops stored records past the end. Executors only append records, so a save
+// usually inserts one row however long the history is.
+func saveStepRecords(ctx context.Context, db runQueryExecer, runID string, records []workflowkit.StepRecord) error {
+	rows, err := db.QueryContext(ctx, `SELECT record_json FROM workflow_step_records WHERE run_id = ? ORDER BY seq`, runID)
+	if err != nil {
+		return err
+	}
+	var stored []string
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		stored = append(stored, data)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for seq, record := range records {
+		data, err := marshalJSON(record)
+		if err != nil {
+			return err
+		}
+		if seq < len(stored) && stored[seq] == data {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, `
+INSERT INTO workflow_step_records (run_id, seq, record_json) VALUES (?, ?, ?)
+ON CONFLICT(run_id, seq) DO UPDATE SET record_json=excluded.record_json
+`, runID, seq, data); err != nil {
+			return err
+		}
+	}
+	if len(stored) > len(records) {
+		if _, err := db.ExecContext(ctx, `DELETE FROM workflow_step_records WHERE run_id = ? AND seq >= ?`, runID, len(records)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func loadStepRecords(ctx context.Context, db runQueryExecer, run *workflowkit.WorkflowRun) error {
+	rows, err := db.QueryContext(ctx, `SELECT record_json FROM workflow_step_records WHERE run_id = ? ORDER BY seq`, run.ID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var records []workflowkit.StepRecord
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return err
+		}
+		var record workflowkit.StepRecord
+		if err := unmarshalJSON(data, &record); err != nil {
+			return err
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	run.StepRecords = records
+	return nil
 }
 
 type rowScanner interface {
@@ -113,7 +198,7 @@ func scanRun(scanner rowScanner) (workflowkit.WorkflowRun, error) {
 	row := runRow{}
 	if err := scanner.Scan(&row.ID, &row.Status, &row.InputRef, &row.OutputRef, &row.AgentRunID, &row.AuditRef, &row.Error,
 		&row.ApprovalRef, &row.WaitingReason, &row.CurrentStep, &row.CompletedStepsJSON,
-		&row.StepAttemptsJSON, &row.StepRecordsJSON, &row.StepRetries, scanTime(&row.NextAttemptAt), &row.MetadataJSON,
+		&row.StepAttemptsJSON, &row.StepRetries, scanTime(&row.NextAttemptAt), &row.MetadataJSON,
 		&row.LeaseOwner, scanTime(&row.LeaseUntil), scanTime(&row.CreatedAt), scanTime(&row.UpdatedAt)); err != nil {
 		return workflowkit.WorkflowRun{}, err
 	}
@@ -129,7 +214,13 @@ func getRun(ctx context.Context, db runQueryExecer, id string) (workflowkit.Work
 	if errors.Is(err, sql.ErrNoRows) {
 		return workflowkit.WorkflowRun{}, workflowkit.ErrRunNotFound
 	}
-	return run, err
+	if err != nil {
+		return workflowkit.WorkflowRun{}, err
+	}
+	if err := loadStepRecords(ctx, db, &run); err != nil {
+		return workflowkit.WorkflowRun{}, err
+	}
+	return run, nil
 }
 
 func (s *Store) Update(ctx context.Context, id string, mutate func(workflowkit.WorkflowRun) (workflowkit.WorkflowRun, error)) (workflowkit.WorkflowRun, error) {
@@ -201,6 +292,15 @@ func (s *Store) ListWorkflows(ctx context.Context, query workflowkit.WorkflowQue
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	// The store holds one connection, so records load after rows is closed.
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for i := range runs {
+		if err := loadStepRecords(ctx, s.db, &runs[i]); err != nil {
+			return nil, err
+		}
 	}
 	return runs, nil
 }
@@ -446,9 +546,67 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
 	if err := convertTextTimes(ctx, s.db, "workflow_runs", "lease_until", "created_at", "updated_at"); err != nil {
 		return err
 	}
+	if _, err := s.db.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS workflow_step_records (
+	run_id TEXT NOT NULL,
+	seq INTEGER NOT NULL,
+	record_json TEXT NOT NULL,
+	PRIMARY KEY (run_id, seq)
+) WITHOUT ROWID`); err != nil {
+		return err
+	}
+	if err := s.moveInlineStepRecords(ctx); err != nil {
+		return err
+	}
 	// The worker claims the oldest pending run on every poll.
 	_, err = s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS workflow_runs_status_created ON workflow_runs (status, created_at, id)`)
 	return err
+}
+
+// moveInlineStepRecords moves step records that schema version 3 and earlier
+// kept as one JSON array in workflow_runs.step_records_json into
+// workflow_step_records. The column stays, always '[]', so older binaries
+// still read the table.
+func (s *Store) moveInlineStepRecords(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `SELECT id, step_records_json FROM workflow_runs WHERE step_records_json NOT IN ('', '[]', 'null')`)
+	if err != nil {
+		return err
+	}
+	inline := map[string][]workflowkit.StepRecord{}
+	for rows.Next() {
+		var id, data string
+		if err := rows.Scan(&id, &data); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		var records []workflowkit.StepRecord
+		if err := unmarshalJSON(data, &records); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("workflow run %s: %w", id, err)
+		}
+		inline[id] = records
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for id, records := range inline {
+		if err := saveStepRecords(ctx, tx, id, records); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE workflow_runs SET step_records_json = '[]' WHERE id = ?`, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) addColumnIfMissing(ctx context.Context, name string, definition string) error {
@@ -491,7 +649,6 @@ type runRow struct {
 	CurrentStep        string
 	CompletedStepsJSON string
 	StepAttemptsJSON   string
-	StepRecordsJSON    string
 	StepRetries        int
 	NextAttemptAt      time.Time
 	MetadataJSON       string
@@ -507,10 +664,6 @@ func encodeRun(run workflowkit.WorkflowRun) (runRow, error) {
 		return runRow{}, err
 	}
 	stepAttempts, err := marshalJSON(run.StepAttempts)
-	if err != nil {
-		return runRow{}, err
-	}
-	stepRecords, err := marshalJSON(run.StepRecords)
 	if err != nil {
 		return runRow{}, err
 	}
@@ -531,7 +684,6 @@ func encodeRun(run workflowkit.WorkflowRun) (runRow, error) {
 		CurrentStep:        run.CurrentStep,
 		CompletedStepsJSON: completedSteps,
 		StepAttemptsJSON:   stepAttempts,
-		StepRecordsJSON:    stepRecords,
 		StepRetries:        run.StepRetries,
 		NextAttemptAt:      run.NextAttemptAt,
 		MetadataJSON:       metadata,
@@ -551,10 +703,6 @@ func decodeRun(row runRow) (workflowkit.WorkflowRun, error) {
 	if err := unmarshalJSON(row.StepAttemptsJSON, &stepAttempts); err != nil {
 		return workflowkit.WorkflowRun{}, err
 	}
-	var stepRecords []workflowkit.StepRecord
-	if err := unmarshalJSON(row.StepRecordsJSON, &stepRecords); err != nil {
-		return workflowkit.WorkflowRun{}, err
-	}
 	var metadata map[string]any
 	if err := unmarshalJSON(row.MetadataJSON, &metadata); err != nil {
 		return workflowkit.WorkflowRun{}, err
@@ -572,7 +720,6 @@ func decodeRun(row runRow) (workflowkit.WorkflowRun, error) {
 		CurrentStep:    row.CurrentStep,
 		CompletedSteps: completedSteps,
 		StepAttempts:   stepAttempts,
-		StepRecords:    stepRecords,
 		StepRetries:    row.StepRetries,
 		NextAttemptAt:  row.NextAttemptAt,
 		Metadata:       metadata,

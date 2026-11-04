@@ -181,8 +181,8 @@ defer store.Close()
 ```
 
 The SQLite store implements the same `Store` contract as `MemoryStore`. It keeps
-queryable scalar fields in columns and stores step history, metadata, attempts,
-and completed steps as JSON fields. It still stores refs and bounded metadata,
+queryable scalar fields in columns, step history as one row per step record,
+and metadata, attempts, and completed steps as JSON fields. It still stores refs and bounded metadata,
 not raw prompts or full tool payloads. The current SQLite schema is versioned as
 `sqlitestore.SchemaVersion`.
 

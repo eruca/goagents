@@ -278,3 +278,62 @@ func TestRoutePolicyAllowsOneProbeAfterCooldown(t *testing.T) {
 		t.Fatal("Select returned nil error, want candidate held back while its recovery probe is in flight")
 	}
 }
+
+func TestLoadSpreadPrefersLessLoadedNearBestCandidate(t *testing.T) {
+	profile := DefaultTaskProfile()
+	busy := candidate("same-model", CapabilityBalanced, PriceLow, LatencyNormalClass, false)
+	busy.AccountAlias = "account-a"
+	busy.ProviderInFlight = 3
+	idle := busy
+	idle.AccountAlias = "account-b"
+	idle.ProviderInFlight = 0
+	degraded := busy
+	degraded.AccountAlias = "account-c"
+	degraded.ProviderInFlight = 0
+	degraded.ProviderAvailability = ProviderDegraded
+	candidates := []Candidate{busy, idle, degraded}
+
+	// Draws 0 and 0 pick rank 0, the busy account, then rank 1, the idle one.
+	policy := RoutePolicy{LoadSpread: &LoadSpread{ScoreTolerance: 5, Rand: func(int) int { return 0 }}}
+	decision, err := policy.Select(profile, candidates)
+	if err != nil {
+		t.Fatalf("Select returned error: %v", err)
+	}
+	if decision.Selected.AccountAlias != "account-b" || !strings.Contains(decision.Reason, "load spread over 2") {
+		t.Fatalf("Selected = %q, reason = %q; want the idle account by load spread", decision.Selected.AccountAlias, decision.Reason)
+	}
+
+	deterministic, err := RoutePolicy{}.Select(profile, candidates)
+	if err != nil || deterministic.Selected.AccountAlias != "account-a" {
+		t.Fatalf("without LoadSpread selected %q, %v; want the stable top candidate", deterministic.Selected.AccountAlias, err)
+	}
+}
+
+func TestLoadSpreadStaysWithinScoreTolerance(t *testing.T) {
+	profile := DefaultTaskProfile()
+	a := candidate("same-model", CapabilityBalanced, PriceLow, LatencyNormalClass, false)
+	a.AccountAlias = "account-a"
+	b := a
+	b.AccountAlias = "account-b"
+	degraded := a
+	degraded.AccountAlias = "account-c"
+	degraded.ProviderAvailability = ProviderDegraded
+
+	policy := RoutePolicy{LoadSpread: &LoadSpread{ScoreTolerance: 5}}
+	chosen := map[string]int{}
+	for range 200 {
+		decision, err := policy.Select(profile, []Candidate{a, b, degraded})
+		if err != nil {
+			t.Fatalf("Select returned error: %v", err)
+		}
+		chosen[decision.Selected.AccountAlias]++
+	}
+	if chosen["account-c"] != 0 || chosen["account-a"] == 0 || chosen["account-b"] == 0 {
+		t.Fatalf("selections = %v; want both tied accounts and never the degraded one", chosen)
+	}
+
+	only, err := policy.Select(profile, []Candidate{a, degraded})
+	if err != nil || only.Selected.AccountAlias != "account-a" || strings.Contains(only.Reason, "load spread") {
+		t.Fatalf("single near-best candidate: selected %q, reason %q, err %v", only.Selected.AccountAlias, only.Reason, err)
+	}
+}
