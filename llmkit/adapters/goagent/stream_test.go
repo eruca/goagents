@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/eruca/goagents/goagent/ports"
+	"github.com/eruca/goagents/llmkit"
 )
 
 // streamingProviderClient streams its chunks, then fails with err if set.
@@ -164,5 +165,59 @@ func TestClientChatStreamPreDispatchUsesStreamRequestDigest(t *testing.T) {
 	}
 	if got.ProviderRequestSHA256 != local.streamDigest {
 		t.Fatalf("pre-dispatch digest = %x, want the stream body digest", got.ProviderRequestSHA256)
+	}
+}
+
+func TestClientChatStreamConsumerFailureLeavesProviderHealthy(t *testing.T) {
+	local := &streamingProviderClient{chunks: []string{"a", "b"}}
+	health := llmkit.NewMemoryHealthStore(llmkit.HealthPolicy{FailureCooldownThreshold: 1})
+	client := NewClient(Config{
+		Candidates:      testCandidates()[:1],
+		Providers:       map[string]ProviderClient{"local-small": local},
+		ProfileProvider: fixedProfile(simpleProfile()),
+		HealthStore:     health,
+	})
+	disconnected := errors.New("client disconnected")
+	for range 3 {
+		_, err := client.ChatStream(context.Background(), ports.ChatRequest{}, func(ports.ChatDelta) error { return disconnected })
+		if !errors.Is(err, disconnected) {
+			t.Fatalf("ChatStream error = %v, want the consumer's error", err)
+		}
+		var runtimeErr *RuntimeError
+		if !errors.As(err, &runtimeErr) || runtimeErr.Class != llmkit.ErrorClassStreamConsumer {
+			t.Fatalf("ChatStream error = %v, want class %s", err, llmkit.ErrorClassStreamConsumer)
+		}
+	}
+	for _, entry := range health.Snapshot().Entries {
+		if entry.FailureStreak != 0 || entry.Availability == llmkit.ProviderUnavailable || entry.InFlight != 0 {
+			t.Fatalf("health entry = %+v, want a healthy provider with no slot held", entry)
+		}
+	}
+	if _, err := client.ChatStream(context.Background(), ports.ChatRequest{}, func(ports.ChatDelta) error { return nil }); err != nil {
+		t.Fatalf("ChatStream after consumer failures = %v, want success", err)
+	}
+}
+
+func TestClientReleasesSlotWhenProviderPanics(t *testing.T) {
+	local := &fakeProviderClient{chat: func(context.Context, ports.ChatRequest) (*ports.ChatResponse, error) { panic("provider bug") }}
+	health := llmkit.NewMemoryHealthStore(llmkit.HealthPolicy{})
+	candidates := testCandidates()[:1]
+	candidates[0].ProviderMaxConcurrency = 1
+	client := NewClient(Config{
+		Candidates:      candidates,
+		Providers:       map[string]ProviderClient{"local-small": local},
+		ProfileProvider: fixedProfile(simpleProfile()),
+		HealthStore:     health,
+	})
+	for range 2 {
+		func() {
+			defer func() { _ = recover() }()
+			_, _ = client.Chat(context.Background(), ports.ChatRequest{})
+		}()
+	}
+	for _, entry := range health.Snapshot().Entries {
+		if entry.InFlight != 0 {
+			t.Fatalf("in flight after recovered panics = %d, want 0", entry.InFlight)
+		}
 	}
 }

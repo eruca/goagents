@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/eruca/goagents/runkit"
+	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -64,6 +65,10 @@ INSERT INTO approval_checkpoints (
 ) VALUES ($1, $2, $3, $4, $5, 'pending', '', $6, $7, $8)`,
 		checkpoint.ID, checkpoint.RunID, checkpoint.TenantID, checkpoint.DefinitionHash, checkpoint.Ciphertext,
 		checkpoint.ExpiresAt.UTC(), checkpoint.CreatedAt.UTC(), checkpoint.UpdatedAt.UTC())
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		return runkit.ErrCheckpointNotClaimable
+	}
 	return err
 }
 
@@ -199,13 +204,21 @@ WHERE checkpoint_id = $4 AND tenant_id = $5 AND status = 'leased' AND lease_owne
 		return err
 	}
 	if affected != 1 {
+		var exists bool
+		if err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM approval_checkpoints WHERE checkpoint_id = $1 AND tenant_id = $2)`,
+			completion.CheckpointID, completion.TenantID).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return runkit.ErrCheckpointNotFound
+		}
 		return runkit.ErrCheckpointLeaseOwner
 	}
 	return nil
 }
 
 func (s *Store) ExpireCheckpoints(ctx context.Context, now time.Time) (int, error) {
-	result, err := s.db.ExecContext(ctx, `UPDATE approval_checkpoints SET status = 'expired', ciphertext = ''::bytea, lease_owner = '', lease_until = NULL, updated_at = $1 WHERE status IN ('pending', 'leased') AND expires_at <= $1`, requestNow(now))
+	result, err := s.db.ExecContext(ctx, `UPDATE approval_checkpoints SET status = 'expired', ciphertext = ''::bytea, lease_owner = '', lease_until = NULL, updated_at = $1 WHERE expires_at <= $1 AND (status = 'pending' OR (status = 'leased' AND (lease_until IS NULL OR lease_until <= $1)))`, requestNow(now))
 	if err != nil {
 		return 0, err
 	}

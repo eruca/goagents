@@ -9,13 +9,15 @@ import (
 
 func TestWindowMemoryDropsOlderMessagesPastLimit(t *testing.T) {
 	provider := NewWindowMemory(2)
-	err := provider.Save(context.Background(), "session_1", []ports.MemoryMessage{
-		{Role: "user", Content: "one"},
+	if err := provider.Append(context.Background(), "session_1", []ports.MemoryMessage{{Role: "user", Content: "one"}}); err != nil {
+		t.Fatalf("Append returned error: %v", err)
+	}
+	err := provider.Append(context.Background(), "session_1", []ports.MemoryMessage{
 		{Role: "assistant", Content: "two"},
 		{Role: "user", Content: "three"},
 	})
 	if err != nil {
-		t.Fatalf("Save returned error: %v", err)
+		t.Fatalf("Append returned error: %v", err)
 	}
 
 	messages, err := provider.Load(context.Background(), "session_1")

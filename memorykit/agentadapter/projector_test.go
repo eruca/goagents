@@ -1048,3 +1048,25 @@ func TestProjectorTruncatesOversizedQueryKeepingTail(t *testing.T) {
 		t.Fatalf("query tail lost: %q", store.query.Text[len(store.query.Text)-40:])
 	}
 }
+
+func TestProjectorSkipsRecallWithoutUserText(t *testing.T) {
+	t.Parallel()
+	store := &projectorRecallStore{}
+	projector := mustProjector(t, ProjectorConfig{
+		Recall:       newProjectorRecaller(t, store),
+		ResolveScope: func(map[string]any) (memorykit.Scope, error) { return testScope, nil },
+		BuildQuery:   DefaultQueryBuilder,
+	})
+	for name, messages := range map[string][]agentcore.Message{
+		"no user message": {{Role: "assistant", Content: "answer"}},
+		"empty user":      {{Role: "user", Content: ""}},
+	} {
+		result, err := projector.Project(context.Background(), agentcore.ContextProjectionRequest{Messages: messages})
+		if err != nil || result == nil || len(result.Messages) != len(messages) {
+			t.Fatalf("%s: Project = %#v, %v; want the messages passed through without memory", name, result, err)
+		}
+	}
+	if store.query.Text != "" {
+		t.Fatalf("recall ran with %q, want no recall", store.query.Text)
+	}
+}

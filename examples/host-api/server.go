@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -52,11 +53,14 @@ type Config struct {
 type Server struct {
 	// workerID owns this process's queue leases. It is unique per process so
 	// several hosts sharing one database never mistake each other's leases.
-	workerID                string
-	artifacts               artifactkit.Store
-	runs                    runkit.Store
-	runCloser               io.Closer
-	workflows               workflowkit.Store
+	workerID  string
+	artifacts artifactkit.Store
+	runs      runkit.Store
+	runCloser io.Closer
+	workflows workflowkit.Store
+	// creatingWorkflows holds the ids of workflows this process is creating,
+	// so two concurrent requests for one id cannot both write its input.
+	creatingWorkflows       sync.Map
 	workflowCloser          io.Closer
 	queries                 workflowkit.WorkflowQueryStore
 	queue                   workflowkit.QueueLeaseStore
@@ -337,7 +341,14 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("POST /projects/{projectID}/memories/{memoryID}/forget", s.handleForgetMemory)
 		mux.HandleFunc("POST /projects/{projectID}/memories/{memoryID}/erase", s.handleEraseMemory)
 	}
-	return mux
+	return limitRequestBodies(mux)
+}
+
+func limitRequestBodies(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		next.ServeHTTP(w, r)
+	})
 }
 
 func putTextArtifact(ctx context.Context, store artifactkit.Store, ref string, content string) error {
@@ -350,17 +361,26 @@ func putTextArtifact(ctx context.Context, store artifactkit.Store, ref string, c
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, out any) bool {
 	if err := json.NewDecoder(r.Body).Decode(out); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		writeDecodeError(w, err)
 		return false
 	}
 	return true
+}
+
+func writeDecodeError(w http.ResponseWriter, err error) {
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", fmt.Sprintf("request body exceeds %d bytes", tooLarge.Limit))
+		return
+	}
+	writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 }
 
 func decodeJSONStrict(w http.ResponseWriter, r *http.Request, out any) bool {
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(out); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		writeDecodeError(w, err)
 		return false
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
@@ -380,8 +400,32 @@ func writeWorkflowStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "not_found", "workflow not found")
 		return
 	}
-	writeError(w, http.StatusBadRequest, "workflow_error", err.Error())
+	if errors.Is(err, workflowkit.ErrRunExists) {
+		writeWorkflowExists(w)
+		return
+	}
+	if errors.Is(err, workflowkit.ErrApprovalMismatch) {
+		writeError(w, http.StatusConflict, "approval_mismatch", "workflow is not waiting on final approval")
+		return
+	}
+	if errors.Is(err, workflowkit.ErrInvalidTransition) || errors.Is(err, workflowkit.ErrRunPreempted) {
+		writeError(w, http.StatusConflict, "workflow_conflict", "workflow is not in a state that allows this operation")
+		return
+	}
+	writeInternalError(w, "workflow_error", err)
 }
+
+// writeInternalError reports a server-side failure without its error text,
+// which can hold file paths, SQL, or driver details. The error goes to the
+// server log instead.
+func writeInternalError(w http.ResponseWriter, code string, err error) {
+	log.Printf("host-api %s: %v", code, err)
+	writeError(w, http.StatusInternalServerError, code, "internal server error")
+}
+
+// maxRequestBodyBytes bounds every request body. Workflow input is text
+// written to an artifact; larger documents belong behind an artifact ref.
+const maxRequestBodyBytes = 4 << 20
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")

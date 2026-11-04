@@ -44,8 +44,10 @@ type ProviderHealthSnapshot struct {
 
 // HealthPolicy configures the circuit breaker. Reaching
 // FailureCooldownThreshold consecutive provider failures opens it for
-// CooldownDuration; each further failure, such as a failed recovery probe,
-// doubles the cooldown up to MaxCooldownDuration. A degraded provider whose
+// CooldownDuration; each further failure once the cooldown has passed, such
+// as a failed recovery probe, doubles the cooldown up to MaxCooldownDuration.
+// Failures of calls admitted before the circuit opened neither count nor
+// extend it. A degraded provider whose
 // last failure is CooldownDuration old is available again: being ranked below
 // healthy providers, it might otherwise never get the success that clears it.
 type HealthPolicy struct {
@@ -220,6 +222,11 @@ func (s *MemoryHealthStore) RecordOutcome(ctx context.Context, outcome TaskOutco
 		entry.FailureStreak = 0
 		entry.Availability = ProviderAvailable
 		entry.CooldownUntil = time.Time{}
+	} else if entry.Availability == ProviderUnavailable && now.Before(entry.CooldownUntil) {
+		// The circuit is already open: this call was admitted before it
+		// opened. Counting it would stretch one burst of concurrent
+		// failures into the longest cooldown.
+		entry.LastFailureAt = now
 	} else {
 		entry.FailureStreak++
 		entry.LastFailureAt = now
@@ -243,7 +250,7 @@ func CountsTowardProviderHealth(class ErrorClass) bool {
 	switch class {
 	case ErrorClassCanceled, ErrorClassRequestTooLarge, ErrorClassBudgetExceeded,
 		ErrorClassPolicyBlocked, ErrorClassCapabilityMismatch, ErrorClassPostCall,
-		ErrorClassProviderBusy:
+		ErrorClassProviderBusy, ErrorClassStreamConsumer:
 		return false
 	default:
 		return true

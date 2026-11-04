@@ -124,6 +124,9 @@ if err != nil {
 `ReadRouteAudits` joins route traces with matching outcomes by `route_id`.
 It returns only the allowlisted audit fields recorded in JSONL; it does not read
 or reconstruct prompts, responses, headers, or API keys.
+Readers take lines of any length and skip a line that is not valid JSON, such
+as one a crash left half written, so one damaged record never makes the audit
+or stats unreadable.
 
 To make routing use this history, load the generated stats and pass them to the adapter:
 

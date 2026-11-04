@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"context"
 	"errors"
 	"fmt"
 
@@ -21,9 +20,6 @@ func classifyToolError(err error) error {
 	}
 	if isToolInputInvalid(err) || isToolSchemaInvalid(err) || errors.Is(err, ErrToolExecutionFailed) || errors.Is(err, ErrToolTimeout) {
 		return err
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return fmt.Errorf("%w: %w", ErrToolTimeout, err)
 	}
 	return fmt.Errorf("%w: %w", ErrToolExecutionFailed, err)
 }

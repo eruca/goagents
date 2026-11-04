@@ -21,7 +21,11 @@ type Config struct {
 	Routing  RoutingConfig   `yaml:"routing,omitempty" json:"routing,omitempty"`
 }
 
-// AuditConfig controls host-side audit file behavior.
+// AuditConfig is parsed for compatibility but not used: JSONLRecorder always
+// writes route-events.jsonl and outcomes.jsonl under the llmkit home, and
+// recording is enabled by configuring a recorder on the client.
+//
+// Deprecated: the fields have no effect and will be removed.
 type AuditConfig struct {
 	Enabled         bool   `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	RouteEventsFile string `yaml:"route_events_file,omitempty" json:"route_events_file,omitempty"`

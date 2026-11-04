@@ -25,6 +25,9 @@ func RunLifecycleConformance(t *testing.T, newStore func(*testing.T) memorykit.L
 		{"stale expected version conflicts", assertStaleVersionConflicts},
 		{"wrong starting status conflicts without side effects", assertWrongStartingStatusConflicts},
 		{"correct increments version and preserves history", assertCorrectionHistory},
+		{"correct rejects an erased record", assertCorrectRejectsErased},
+		{"expected active guards the superseded record", assertExpectedActiveGuardsSupersede},
+		{"blank source kind or ref is rejected", assertBlankSourceRejected},
 		{"dismiss makes candidate inactive", assertDismissedCandidateInactive},
 		{"forget stops active reads and keeps content history", assertForgetSemantics},
 		{"erase removes content sources and revision snapshots", assertEraseSemantics},
@@ -308,6 +311,65 @@ func assertCorrectionHistory(t *testing.T, store memorykit.LifecycleStore) {
 	}
 }
 
+func assertCorrectRejectsErased(t *testing.T, store memorykit.LifecycleStore) {
+	created, err := store.Create(context.Background(), baseCreate("61111111-1111-1111-1111-111111111112", "project-1", memorykit.StatusActive))
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := memorykit.VersionedCommand{Scope: created.Scope, ID: created.ID, ExpectedVersion: created.Version, Actor: "privacy-admin", Reason: "erase", Now: created.UpdatedAt.Add(time.Minute)}
+	if err := store.Erase(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+	command.ExpectedVersion++
+	command.Now = command.Now.Add(time.Minute)
+	_, err = store.Correct(context.Background(), memorykit.CorrectRequest{
+		Command: command, Content: "resurrected content", ValidFrom: created.ValidFrom, Importance: created.Importance, Confidence: 1,
+	})
+	if !errors.Is(err, memorykit.ErrConflict) {
+		t.Fatalf("Correct after erase error = %v, want ErrConflict", err)
+	}
+	erased, err := store.Get(context.Background(), created.Scope, created.ID)
+	if err != nil || erased.Content != "" {
+		t.Fatalf("erased record = %#v, %v; want its content still removed", erased, err)
+	}
+}
+
+func assertExpectedActiveGuardsSupersede(t *testing.T, store memorykit.LifecycleStore) {
+	first, err := store.Create(context.Background(), baseCreate("61111111-1111-1111-1111-111111111114", "project-1", memorykit.StatusActive))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := baseCreate("61111111-1111-1111-1111-111111111115", "project-1", memorykit.StatusActive)
+	stale.IdempotencyKey = ""
+	stale.ExpectedActive = &memorykit.ActiveExpectation{}
+	if _, err := store.Create(context.Background(), stale); !errors.Is(err, memorykit.ErrActiveMismatch) || !errors.Is(err, memorykit.ErrConflict) {
+		t.Fatalf("Create expecting no active record error = %v, want ErrActiveMismatch", err)
+	}
+	if _, err := store.Get(context.Background(), first.Scope, stale.ID); !errors.Is(err, memorykit.ErrNotFound) {
+		t.Fatalf("rejected create was written: %v", err)
+	}
+	current := stale
+	current.ExpectedActive = &memorykit.ActiveExpectation{ID: first.ID, Version: first.Version}
+	replaced, err := store.Create(context.Background(), current)
+	if err != nil || replaced.Status != memorykit.StatusActive {
+		t.Fatalf("Create expecting the current record = %#v, %v", replaced, err)
+	}
+	superseded, err := store.Get(context.Background(), first.Scope, first.ID)
+	if err != nil || superseded.Status != memorykit.StatusInactive {
+		t.Fatalf("expected record after supersede = %#v, %v", superseded, err)
+	}
+}
+
+func assertBlankSourceRejected(t *testing.T, store memorykit.LifecycleStore) {
+	for _, source := range []memorykit.Source{{Kind: "artifact", Ref: " "}, {Kind: "", Ref: "artifact:x"}} {
+		request := baseCreate("61111111-1111-1111-1111-111111111113", "project-1", memorykit.StatusActive)
+		request.Sources = []memorykit.Source{source}
+		if _, err := store.Create(context.Background(), request); !errors.Is(err, memorykit.ErrInvalidMemory) {
+			t.Fatalf("Create with source %#v error = %v, want ErrInvalidMemory", source, err)
+		}
+	}
+}
+
 func assertDismissedCandidateInactive(t *testing.T, store memorykit.LifecycleStore) {
 	candidate, err := store.Create(context.Background(), baseCreate("71111111-1111-1111-1111-111111111111", "project-1", memorykit.StatusCandidate))
 	if err != nil {
@@ -580,6 +642,8 @@ func RunFullTextRecallConformance(t *testing.T, newStore func(*testing.T) FullTe
 		{"chinese question matches chinese memory", "我们选了哪个数据库？", []string{fullTextChineseDB}},
 		{"more matched terms rank first", "deploy approvals pgvector embeddings", []string{fullTextDeploy, fullTextPgvector}},
 		{"no matching term finds nothing", "kubernetes 天气", []string{}},
+		{"a word inside a dotted key matches", "vectors", []string{fullTextPgvector}},
+		{"a dotted key's first word matches every such key", "storage", []string{fullTextPgvector, fullTextChineseDB}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

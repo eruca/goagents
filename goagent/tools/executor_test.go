@@ -560,3 +560,51 @@ func TestToolErrorWhoseTextMentionsInputIsStillAnExecutionFailure(t *testing.T) 
 		t.Fatalf("classifyToolError = %v, want execution failure, not invalid input", err)
 	}
 }
+
+func TestExecutorStopsAfterFailedCall(t *testing.T) {
+	registry := NewRegistry()
+	ran := map[string]bool{}
+	register := func(name string, mode ExecutionMode, err error) {
+		registry.Register(testTool{
+			spec: Spec{Name: name, Permission: policy.PermissionWrite, ExecutionMode: mode},
+			run: func(ctx context.Context, input json.RawMessage, env Env) (*Result, error) {
+				ran[name] = true
+				if err != nil {
+					return nil, err
+				}
+				return &Result{ForLLM: name}, nil
+			},
+		})
+	}
+	register("first", ExecutionModeSequential, nil)
+	register("broken", ExecutionModeSequential, errors.New("boom"))
+	register("after", ExecutionModeSequential, nil)
+
+	results, err := NewExecutor(registry).Execute(context.Background(), []Call{{Name: "first"}, {Name: "broken"}, {Name: "after"}}, Env{})
+	if err == nil {
+		t.Fatal("Execute error = nil, want the failed call's error")
+	}
+	if ran["after"] {
+		t.Fatal("a call after the failed one ran")
+	}
+	if len(results) != 1 || results[0].Index != 0 || results[0].Result.ForLLM != "first" {
+		t.Fatalf("results = %+v, want only the completed first call", results)
+	}
+}
+
+func TestExecutorReportsRunDeadlineAsRunDeadline(t *testing.T) {
+	registry := NewRegistry()
+	registry.Register(testTool{
+		spec: Spec{Name: "slow"},
+		run: func(ctx context.Context, input json.RawMessage, env Env) (*Result, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err := NewExecutor(registry).Execute(ctx, []Call{{Name: "slow"}}, Env{})
+	if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrToolTimeout) {
+		t.Fatalf("err = %v, want the run's deadline, not ErrToolTimeout", err)
+	}
+}

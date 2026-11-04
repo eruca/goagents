@@ -49,7 +49,7 @@ func (s *Server) handleApproveAgentTool(w http.ResponseWriter, r *http.Request) 
 		}
 		updated, err := s.rejectAgentApprovalWorkflow(r.Context(), run, "agent tool approval rejected")
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "workflow_error", err.Error())
+			writeInternalError(w, "workflow_error", err)
 			return
 		}
 		writeJSON(w, http.StatusOK, workflowToResponse(updated, RunModeSync))
@@ -76,7 +76,7 @@ func (s *Server) handleApproveAgentTool(w http.ResponseWriter, r *http.Request) 
 	if errors.Is(resumeErr, agentcore.ErrApprovalPending) && result != nil && result.Interruption != nil && len(next.Tools) > 0 {
 		updated, err := s.replacePendingAgentApproval(operationCtx, run, approval.CheckpointID, next)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "workflow_error", err.Error())
+			writeInternalError(w, "workflow_error", err)
 			return
 		}
 		pendingShutdown.Clear(next.CheckpointID)

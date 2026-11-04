@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/eruca/goagents/goagent/policy"
 	"github.com/eruca/goagents/goagent/ports"
@@ -60,15 +62,28 @@ type RegisterOptions struct {
 	Permission    policy.Permission
 	ExecutionMode ports.ExecutionMode
 	Timeout       time.Duration
-	MaxLLMChars   int
+	// NamePrefix is prepended to every tool name the server lists, so tools
+	// from different servers and the host's own tools cannot collide. Calls
+	// still reach the server under the name it listed.
+	NamePrefix string
+	// MaxLLMChars and MaxUserChars bound the model-visible and user-visible
+	// result text in characters; zero means unbounded.
+	MaxLLMChars  int
+	MaxUserChars int
 	// TrustServerAnnotations must be set only after host-side server verification.
 	// Untrusted MCP annotations are hints, never an authorization source.
 	TrustServerAnnotations bool
 }
 
+// Registry is where RegisterTools adds tools. Get lets it refuse a name that
+// is already taken instead of silently replacing a host tool.
 type Registry interface {
 	Register(tools.Tool)
+	Get(name string) (tools.Tool, bool)
 }
+
+// toolNamePattern is the name shape LLM providers accept for functions.
+var toolNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 type Tool struct {
 	Client     Client
@@ -77,8 +92,10 @@ type Tool struct {
 }
 
 // RegisterTools lists MCP tools once and registers goagent tool adapters for
-// each descriptor. Hosts can refresh by calling it again with their own registry
-// lifecycle policy.
+// each descriptor. A server chooses its tool names, so every name (after
+// NamePrefix) must match the provider-safe shape, be unique in the listing,
+// and not be registered already; otherwise nothing is registered. Hosts can
+// refresh into a new registry with their own lifecycle policy.
 func RegisterTools(ctx context.Context, registry Registry, client Client, options RegisterOptions) ([]tools.Spec, error) {
 	if registry == nil {
 		return nil, fmt.Errorf("registry is required")
@@ -90,26 +107,38 @@ func RegisterTools(ctx context.Context, registry Registry, client Client, option
 	if err != nil {
 		return nil, err
 	}
-	specs := make([]tools.Spec, 0, len(descriptors))
+	adapted := make([]Tool, 0, len(descriptors))
+	seen := make(map[string]struct{}, len(descriptors))
 	for _, descriptor := range descriptors {
 		tool := Tool{
 			Client:     client,
 			Descriptor: cloneToolDescriptor(descriptor),
 			Options:    options,
 		}
-		spec := tool.Spec()
-		if strings.TrimSpace(spec.Name) == "" {
-			return nil, fmt.Errorf("mcp tool name is required")
+		name := tool.Spec().Name
+		if !toolNamePattern.MatchString(name) {
+			return nil, fmt.Errorf("mcp tool name %q is not a valid tool name", name)
 		}
+		if _, duplicate := seen[name]; duplicate {
+			return nil, fmt.Errorf("mcp server lists tool %q twice", name)
+		}
+		if _, taken := registry.Get(name); taken {
+			return nil, fmt.Errorf("mcp tool %q would replace a registered tool", name)
+		}
+		seen[name] = struct{}{}
+		adapted = append(adapted, tool)
+	}
+	specs := make([]tools.Spec, 0, len(adapted))
+	for _, tool := range adapted {
 		registry.Register(tool)
-		specs = append(specs, spec)
+		specs = append(specs, tool.Spec())
 	}
 	return specs, nil
 }
 
 func (t Tool) Spec() tools.Spec {
 	return tools.Spec{
-		Name:          t.Descriptor.Name,
+		Name:          t.Options.NamePrefix + t.Descriptor.Name,
 		Description:   t.Descriptor.Description,
 		Permission:    t.permission(),
 		ExecutionMode: t.Options.ExecutionMode,
@@ -133,7 +162,7 @@ func (t Tool) Execute(ctx context.Context, input json.RawMessage, env tools.Env)
 	}
 	return &tools.Result{
 		ForLLM:   bounded(modelObservation(*result), t.Options.MaxLLMChars),
-		ForUser:  userVisibleContent(*result),
+		ForUser:  bounded(userVisibleContent(*result), t.Options.MaxUserChars),
 		IsError:  result.IsError,
 		Ref:      result.Ref,
 		Metadata: cloneMetadata(result.Metadata),
@@ -193,14 +222,17 @@ func userVisibleContent(result ToolCallResult) string {
 	return strings.Join(parts, "\n")
 }
 
+// bounded cuts value to maxChars characters, never inside a UTF-8 sequence,
+// marking the cut with "...".
 func bounded(value string, maxChars int) string {
-	if maxChars <= 0 || len(value) <= maxChars {
+	if maxChars <= 0 || utf8.RuneCountInString(value) <= maxChars {
 		return value
 	}
+	runes := []rune(value)
 	if maxChars <= 3 {
-		return value[:maxChars]
+		return string(runes[:maxChars])
 	}
-	return value[:maxChars-3] + "..."
+	return string(runes[:maxChars-3]) + "..."
 }
 
 func cloneToolDescriptor(descriptor ToolDescriptor) ToolDescriptor {

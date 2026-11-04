@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -12,11 +13,20 @@ import (
 var ErrRunNotFound = errors.New("workflow run not found")
 var ErrNoRunnableWorkflow = errors.New("no runnable workflow")
 var ErrWorkflowLeaseNotOwned = errors.New("workflow lease not owned")
+var ErrRunExists = errors.New("workflow run already exists")
 
 type Store interface {
 	Save(ctx context.Context, run WorkflowRun) error
 	Get(ctx context.Context, id string) (WorkflowRun, error)
 	Update(ctx context.Context, id string, mutate func(WorkflowRun) (WorkflowRun, error)) (WorkflowRun, error)
+}
+
+// CreateStore adds an insert that never replaces a stored run: Create fails
+// with ErrRunExists when a run with the same id exists. Save is an upsert, so
+// a host that accepts caller-chosen ids must create through Create.
+type CreateStore interface {
+	Store
+	Create(ctx context.Context, run WorkflowRun) error
 }
 
 type WorkflowOrder string
@@ -52,6 +62,11 @@ type QueueStore interface {
 	ClaimRunnable(ctx context.Context, workerID string, lease time.Duration) (WorkflowRun, error)
 }
 
+// QueueLeaseStore extends and releases claimed leases. ReleaseLease clears
+// the lease of a run that is no longer running. A run still running keeps
+// its lease owner and its lease expires at once instead: the executor stopped
+// without recording an outcome, so QueueRecoveryStore.FailExpiredRunning must
+// still find and fail it.
 type QueueLeaseStore interface {
 	QueueStore
 	ExtendLease(ctx context.Context, id string, workerID string, lease time.Duration) (WorkflowRun, error)
@@ -94,6 +109,26 @@ func (s *MemoryStore) Save(ctx context.Context, run WorkflowRun) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.runs[run.ID] = cloneRun(run)
+	return nil
+}
+
+func (s *MemoryStore) Create(ctx context.Context, run WorkflowRun) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	if run.CreatedAt.IsZero() {
+		run.CreatedAt = s.now()
+	}
+	run.UpdatedAt = s.now()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.runs[run.ID]; exists {
+		return ErrRunExists
+	}
 	s.runs[run.ID] = cloneRun(run)
 	return nil
 }
@@ -189,11 +224,26 @@ func workflowMetadataMatches(run WorkflowRun, equals map[string]string) bool {
 		if !ok {
 			return false
 		}
-		if fmt.Sprint(got) != want {
+		if MetadataValueString(got) != want {
 			return false
 		}
 	}
 	return true
+}
+
+// MetadataValueString is the string WorkflowQuery.MetadataEquals compares a
+// metadata value against. Numbers format the same whether a store kept the
+// original int or decoded JSON into float64, so 1234567 matches "1234567" in
+// every store rather than "1.234567e+06" in some.
+func MetadataValueString(value any) string {
+	switch v := value.(type) {
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case float32:
+		return strconv.FormatFloat(float64(v), 'f', -1, 32)
+	default:
+		return fmt.Sprint(value)
+	}
 }
 
 func (s *MemoryStore) ClaimRunnable(ctx context.Context, workerID string, lease time.Duration) (WorkflowRun, error) {
@@ -300,8 +350,12 @@ func (s *MemoryStore) ReleaseLease(ctx context.Context, id string, workerID stri
 	if run.LeaseOwner != workerID {
 		return WorkflowRun{}, ErrWorkflowLeaseNotOwned
 	}
-	run.LeaseOwner = ""
-	run.LeaseUntil = time.Time{}
+	if run.Status == StatusRunning {
+		run.LeaseUntil = now
+	} else {
+		run.LeaseOwner = ""
+		run.LeaseUntil = time.Time{}
+	}
 	run.UpdatedAt = now
 	s.runs[id] = cloneRun(run)
 	return cloneRun(run), nil
@@ -325,6 +379,8 @@ func (s *MemoryStore) FailExpiredRunning(ctx context.Context, reason string) ([]
 		}
 		run.Status = StatusFailed
 		run.Error = reason
+		run.StepRetries = 0
+		run.NextAttemptAt = time.Time{}
 		run.LeaseOwner = ""
 		run.LeaseUntil = time.Time{}
 		run.UpdatedAt = now

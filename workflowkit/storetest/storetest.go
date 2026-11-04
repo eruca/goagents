@@ -53,6 +53,25 @@ func RunStoreConformance(t *testing.T, newStore NewStore) {
 		}
 	})
 
+	t.Run("create never replaces a stored run", func(t *testing.T) {
+		store := newStore(t)
+		creator, ok := store.(workflowkit.CreateStore)
+		if !ok {
+			t.Skip("store does not implement workflowkit.CreateStore")
+		}
+		if err := creator.Create(context.Background(), workflowkit.WorkflowRun{ID: "wf-create", Status: workflowkit.StatusWaitingApproval}); err != nil {
+			t.Fatalf("Create returned error: %v", err)
+		}
+		err := creator.Create(context.Background(), workflowkit.WorkflowRun{ID: "wf-create", Status: workflowkit.StatusPending})
+		if !errors.Is(err, workflowkit.ErrRunExists) {
+			t.Fatalf("second Create error = %v, want ErrRunExists", err)
+		}
+		loaded, err := store.Get(context.Background(), "wf-create")
+		if err != nil || loaded.Status != workflowkit.StatusWaitingApproval {
+			t.Fatalf("Get = %+v, %v; want the first run untouched", loaded, err)
+		}
+	})
+
 	t.Run("update mutates stored copy", func(t *testing.T) {
 		store := newStore(t)
 		if err := store.Save(context.Background(), workflowkit.WorkflowRun{
@@ -298,6 +317,36 @@ func RunQueueRecoveryStoreConformance(t *testing.T, newStore NewStore) {
 	t.Helper()
 	RunQueueLeaseStoreConformance(t, newStore)
 
+	t.Run("released running workflow is still recovered", func(t *testing.T) {
+		store := queueRecoveryStore(t, newStore)
+		if err := store.Save(context.Background(), workflowkit.WorkflowRun{
+			ID:          "wf-released-running",
+			Status:      workflowkit.StatusRunning,
+			LeaseOwner:  "worker-1",
+			LeaseUntil:  time.Now().Add(time.Hour).UTC(),
+			StepRetries: 2,
+		}); err != nil {
+			t.Fatalf("Save returned error: %v", err)
+		}
+		released, err := store.ReleaseLease(context.Background(), "wf-released-running", "worker-1")
+		if err != nil {
+			t.Fatalf("ReleaseLease returned error: %v", err)
+		}
+		if released.LeaseOwner != "worker-1" {
+			t.Fatalf("released running lease owner = %q, want it kept for recovery", released.LeaseOwner)
+		}
+		failed, err := store.FailExpiredRunning(context.Background(), "worker stopped")
+		if err != nil {
+			t.Fatalf("FailExpiredRunning returned error: %v", err)
+		}
+		if len(failed) != 1 || failed[0].ID != "wf-released-running" || failed[0].Status != workflowkit.StatusFailed {
+			t.Fatalf("failed = %+v, want the released running workflow", failed)
+		}
+		if failed[0].StepRetries != 0 || !failed[0].NextAttemptAt.IsZero() {
+			t.Fatalf("failed run retry state = %d, %s; want reset so a requeue starts a fresh budget", failed[0].StepRetries, failed[0].NextAttemptAt)
+		}
+	})
+
 	t.Run("fail expired running fails only leased running workflows past their lease", func(t *testing.T) {
 		store := queueRecoveryStore(t, newStore)
 		expired := time.Now().Add(-time.Minute).UTC()
@@ -356,6 +405,17 @@ func RunQueueRecoveryStoreConformance(t *testing.T, newStore NewStore) {
 func RunWorkflowQueryStoreConformance(t *testing.T, newStore NewStore) {
 	t.Helper()
 	RunStoreConformance(t, newStore)
+
+	t.Run("list workflows matches numeric metadata as written", func(t *testing.T) {
+		store := workflowQueryStore(t, newStore)
+		if err := store.Save(context.Background(), workflowkit.WorkflowRun{ID: "wf-number", Status: workflowkit.StatusPending, Metadata: map[string]any{"tenant": 1234567}}); err != nil {
+			t.Fatalf("Save returned error: %v", err)
+		}
+		runs, err := store.ListWorkflows(context.Background(), workflowkit.WorkflowQuery{MetadataEquals: map[string]string{"tenant": "1234567"}})
+		if err != nil || len(runs) != 1 {
+			t.Fatalf("ListWorkflows = %d runs, %v; want the numeric match", len(runs), err)
+		}
+	})
 
 	t.Run("list workflows filters by status and limit", func(t *testing.T) {
 		store := workflowQueryStore(t, newStore)

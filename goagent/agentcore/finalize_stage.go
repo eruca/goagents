@@ -11,6 +11,11 @@ import (
 
 var ErrMaxIterations = errors.New("max iterations reached")
 
+// ErrEmptyResponse reports a model response with neither content nor tool
+// calls. Sending the same request again would likely repeat it until
+// ErrMaxIterations, so the run stops at once.
+var ErrEmptyResponse = errors.New("model returned an empty response")
+
 type FinalizeStage struct {
 	OutputFormat    OutputFormat
 	OutputValidator OutputValidator
@@ -21,6 +26,10 @@ func (s FinalizeStage) Name() string {
 }
 
 func (s FinalizeStage) Run(ctx context.Context, state *RunState) (StageResult, error) {
+	if resp := state.LastResponse; resp != nil && resp.Content == "" && len(resp.ToolCalls) == 0 &&
+		len(state.PendingCalls) == 0 && len(state.ToolResults) == 0 {
+		return StageAbort, ErrEmptyResponse
+	}
 	if state.LastResponse == nil || state.LastResponse.Content == "" || len(state.LastResponse.ToolCalls) > 0 || len(state.PendingCalls) > 0 || len(state.ToolResults) > 0 {
 		return StageContinue, nil
 	}
@@ -134,8 +143,9 @@ func (r *ReActRunner) saveMemory(ctx context.Context, state *RunState) error {
 	if r.memoryProvider == nil || state.Input.SessionID == "" || state.Final == nil {
 		return nil
 	}
-	messages := memoryMessages(state.Messages)
-	if err := r.memoryProvider.Save(ctx, state.Input.SessionID, messages); err != nil {
+	// Only this run's messages: the loaded history is already stored.
+	messages := memoryMessages(state.Messages[min(state.memoryMessages, len(state.Messages)):])
+	if err := r.memoryProvider.Append(ctx, state.Input.SessionID, messages); err != nil {
 		return err
 	}
 	state.Emit(ctx, Event{

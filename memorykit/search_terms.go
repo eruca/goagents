@@ -67,6 +67,16 @@ func splitSearchTerms(text string, wordLimit, gramLimit int) (words, grams []str
 	return words, grams
 }
 
+// IndexWords lists, sorted, the distinct words of text exactly as SearchTerms
+// splits them. A store that matches query words against these, rather than
+// against its own tokenizer, finds the same memories as every other store:
+// PostgreSQL's parser, for one, keeps "storage.vectors" as a single token.
+func IndexWords(text string) []string {
+	words, _ := splitSearchTerms(text, math.MaxInt, 0)
+	sort.Strings(words)
+	return words
+}
+
 // IndexGrams lists, sorted, every Chinese and Japanese character in text and
 // every two-character gram within a run of them: exactly the SearchTerms grams
 // that occur in text as substrings. A store can index them to find gram

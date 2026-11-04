@@ -798,7 +798,7 @@ func TestMemoryHandlersRejectUnreachableAdvancedStatusAfterMutation(t *testing.T
 		{operation: "activate", initialStatus: memorykit.StatusCandidate, advancedStatus: memorykit.StatusCandidate, body: `{"expected_version":1,"reason":"activate"}`},
 		{operation: "forget", initialStatus: memorykit.StatusActive, advancedStatus: memorykit.StatusActive, body: `{"expected_version":1,"reason":"forget"}`},
 		{operation: "dismiss", initialStatus: memorykit.StatusCandidate, advancedStatus: memorykit.StatusCandidate, body: `{"expected_version":1,"reason":"dismiss"}`},
-		{operation: "correct", initialStatus: memorykit.StatusInactive, advancedStatus: memorykit.StatusActive, body: `{"expected_version":1,"content":"corrected","valid_from":"2026-07-21T08:00:00Z","reason":"correct","importance":1,"confidence":1}`},
+		{operation: "correct", initialStatus: memorykit.StatusActive, advancedStatus: memorykit.StatusCandidate, body: `{"expected_version":1,"content":"corrected","valid_from":"2026-07-21T08:00:00Z","reason":"correct","importance":1,"confidence":1}`},
 	}
 	for _, test := range tests {
 		t.Run(test.operation, func(t *testing.T) {

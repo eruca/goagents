@@ -65,7 +65,24 @@ func ValidateCreateRequest(request CreateRequest, limits Limits) error {
 		!validMetadata(request.Reason, limits) || !validMetadata(request.IdempotencyKey, limits) {
 		return fmt.Errorf("%w: invalid create request", ErrInvalidMemory)
 	}
+	if expected := request.ExpectedActive; expected != nil &&
+		(request.Status != StatusActive || (expected.ID == "") != (expected.Version == 0) ||
+			(expected.ID != "" && ValidateMemoryID(expected.ID) != nil) || expected.Version < 0) {
+		return fmt.Errorf("%w: invalid expected active memory", ErrInvalidMemory)
+	}
 	return ValidateSources(request.Sources, limits)
+}
+
+// MatchesActive reports whether active, the current active record for a
+// create's kind and key (nil when there is none), is the one expected names.
+func (expected *ActiveExpectation) MatchesActive(active *Memory) bool {
+	if expected == nil {
+		return true
+	}
+	if active == nil {
+		return expected.ID == ""
+	}
+	return active.ID == expected.ID && active.Version == expected.Version
 }
 
 func ValidateCorrectRequest(request CorrectRequest, limits Limits) error {
@@ -138,7 +155,9 @@ func ValidateSources(sources []Source, limits Limits) error {
 	type sourceIdentity struct{ kind, ref string }
 	seen := make(map[sourceIdentity]struct{}, len(sources))
 	for _, source := range sources {
-		if !validMetadata(source.Kind, limits) || !validMetadata(source.Ref, limits) ||
+		// Recall rejects a blank kind or ref, so a write must too.
+		if strings.TrimSpace(source.Kind) == "" || strings.TrimSpace(source.Ref) == "" ||
+			!validMetadata(source.Kind, limits) || !validMetadata(source.Ref, limits) ||
 			!validMetadata(source.EvidenceHash, limits) {
 			return fmt.Errorf("%w: invalid source", ErrInvalidMemory)
 		}
