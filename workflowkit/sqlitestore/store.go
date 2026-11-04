@@ -435,12 +435,15 @@ func (s *Store) ReleaseLease(ctx context.Context, id string, workerID string) (w
 		return workflowkit.WorkflowRun{}, fmt.Errorf("worker id is required")
 	}
 	now := time.Now().UTC()
+	// A run still running keeps its owner and expires now, so recovery fails it.
 	result, err := s.db.ExecContext(ctx, `
 UPDATE workflow_runs
-SET lease_owner = '', lease_until = 0, updated_at = ?
+SET lease_owner = CASE WHEN status = ? THEN lease_owner ELSE '' END,
+    lease_until = CASE WHEN status = ? THEN ? ELSE 0 END,
+    updated_at = ?
 WHERE id = ?
   AND lease_owner = ?
-`, dbTime(now), id, workerID)
+`, string(workflowkit.StatusRunning), string(workflowkit.StatusRunning), dbTime(now), dbTime(now), id, workerID)
 	if err != nil {
 		return workflowkit.WorkflowRun{}, err
 	}
@@ -496,7 +499,7 @@ ORDER BY id ASC
 	for _, id := range ids {
 		if _, err := tx.ExecContext(ctx, `
 UPDATE workflow_runs
-SET status = ?, error = ?, lease_owner = '', lease_until = 0, updated_at = ?
+SET status = ?, error = ?, step_retries = 0, next_attempt_at = 0, lease_owner = '', lease_until = 0, updated_at = ?
 WHERE id = ?
 `, string(workflowkit.StatusFailed), reason, dbTime(now), id); err != nil {
 			return nil, err

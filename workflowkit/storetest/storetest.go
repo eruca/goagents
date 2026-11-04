@@ -317,6 +317,36 @@ func RunQueueRecoveryStoreConformance(t *testing.T, newStore NewStore) {
 	t.Helper()
 	RunQueueLeaseStoreConformance(t, newStore)
 
+	t.Run("released running workflow is still recovered", func(t *testing.T) {
+		store := queueRecoveryStore(t, newStore)
+		if err := store.Save(context.Background(), workflowkit.WorkflowRun{
+			ID:          "wf-released-running",
+			Status:      workflowkit.StatusRunning,
+			LeaseOwner:  "worker-1",
+			LeaseUntil:  time.Now().Add(time.Hour).UTC(),
+			StepRetries: 2,
+		}); err != nil {
+			t.Fatalf("Save returned error: %v", err)
+		}
+		released, err := store.ReleaseLease(context.Background(), "wf-released-running", "worker-1")
+		if err != nil {
+			t.Fatalf("ReleaseLease returned error: %v", err)
+		}
+		if released.LeaseOwner != "worker-1" {
+			t.Fatalf("released running lease owner = %q, want it kept for recovery", released.LeaseOwner)
+		}
+		failed, err := store.FailExpiredRunning(context.Background(), "worker stopped")
+		if err != nil {
+			t.Fatalf("FailExpiredRunning returned error: %v", err)
+		}
+		if len(failed) != 1 || failed[0].ID != "wf-released-running" || failed[0].Status != workflowkit.StatusFailed {
+			t.Fatalf("failed = %+v, want the released running workflow", failed)
+		}
+		if failed[0].StepRetries != 0 || !failed[0].NextAttemptAt.IsZero() {
+			t.Fatalf("failed run retry state = %d, %s; want reset so a requeue starts a fresh budget", failed[0].StepRetries, failed[0].NextAttemptAt)
+		}
+	})
+
 	t.Run("fail expired running fails only leased running workflows past their lease", func(t *testing.T) {
 		store := queueRecoveryStore(t, newStore)
 		expired := time.Now().Add(-time.Minute).UTC()

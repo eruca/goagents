@@ -203,7 +203,11 @@ run, err = queue.ReleaseLease(ctx, run.ID, "worker-1")
 expired, writes `LeaseOwner` and `LeaseUntil`, and returns the claimed run. It
 does not run the workflow. `ExtendLease` refreshes only the current active owner;
 an expired owner cannot revive its lease. `ReleaseLease` clears the current
-owner's lease after execution stops at `waiting_approval` or terminal.
+owner's lease after execution stops at `waiting_approval` or terminal. A run
+still `running` (the executor stopped without recording an outcome, for example
+on cancellation) keeps its owner and its lease expires at once, so
+`FailExpiredRunning` fails it instead of leaving it running forever. Failing or
+cancelling a run resets `StepRetries` and `NextAttemptAt`.
 
 `QueueLeaseStore` still does not start worker goroutines, run heartbeat loops,
 recover stuck workers, or define multi-worker scheduling policy. Those remain
@@ -257,8 +261,13 @@ step := agentstep.New("agent", agent, func(run workflowkit.WorkflowRun) agentcor
 })
 ```
 
-The adapter preserves the agent run ID and maps aborts into a failed workflow
-step. Host applications decide how to persist audit events and full artifacts.
+By default (`agentstep.DefaultResult`) a successful agent run completes the step
+with no status, so the workflow continues to its next step, and records the
+agent run ID, an `agent:` output ref, and a bounded content preview. A failed
+run fails the step and keeps the agent run ID. `WithResultMapper` receives the
+run's error as well as its result, so a mapper can turn
+`agentcore.ErrApprovalPending` into `waiting_approval`. Host applications
+decide how to persist audit events and full artifacts.
 
 ## Verify
 

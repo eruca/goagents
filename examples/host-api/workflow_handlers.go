@@ -414,6 +414,8 @@ func (s *Server) handleRequeueWorkflow(w http.ResponseWriter, r *http.Request) {
 		run.WaitingReason = ""
 		run.LeaseOwner = ""
 		run.LeaseUntil = time.Time{}
+		run.StepRetries = 0
+		run.NextAttemptAt = time.Time{}
 		if run.Metadata == nil {
 			run.Metadata = make(map[string]any)
 		}

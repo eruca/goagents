@@ -3,6 +3,7 @@ package agentstep
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/eruca/goagents/goagent/agentcore"
@@ -34,7 +35,7 @@ func TestAgentStepMapsSuccessfulRun(t *testing.T) {
 	if runner.req.Input != "input:artifact:in" {
 		t.Fatalf("request = %#v", runner.req)
 	}
-	if result.Status != workflowkit.StatusSucceeded || result.AgentRunID != runID.String() || result.OutputRef != "agent:"+runID.String() {
+	if result.Status != "" || result.AgentRunID != runID.String() || result.OutputRef != "agent:"+runID.String() {
 		t.Fatalf("result = %#v", result)
 	}
 	if result.Metadata["content_preview"] != "done" {
@@ -47,13 +48,13 @@ func TestAgentStepUsesCustomResultMapper(t *testing.T) {
 	runner := &fakeRunner{result: &agentcore.RunResult{RunID: runID, Content: "draft update requested"}}
 	step := New("agent", runner, func(run workflowkit.WorkflowRun) agentcore.RunRequest {
 		return agentcore.RunRequest{Input: run.InputRef}
-	}, WithResultMapper(func(run workflowkit.WorkflowRun, result *agentcore.RunResult) workflowkit.StepResult {
+	}, WithResultMapper(func(run workflowkit.WorkflowRun, result *agentcore.RunResult, err error) (workflowkit.StepResult, error) {
 		return workflowkit.StepResult{
 			Status:        workflowkit.StatusWaitingApproval,
 			AgentRunID:    result.RunID.String(),
 			ApprovalRef:   "approval:" + run.ID,
 			WaitingReason: result.Content,
-		}
+		}, nil
 	}))
 
 	mapped, err := step.Run(context.Background(), workflowkit.WorkflowRun{ID: "wf-approval", InputRef: "artifact:in"})
@@ -94,4 +95,47 @@ func TestAgentStepMapsFailedRunWithPartialResult(t *testing.T) {
 	if result.Error != "approval denied: operator rejected" {
 		t.Fatalf("error = %q", result.Error)
 	}
+}
+
+func TestAgentStepDefaultContinuesToNextStep(t *testing.T) {
+	runner := &fakeRunner{result: &agentcore.RunResult{RunID: agentcore.NewRunID(), Content: strings.Repeat("长", 1000)}}
+	published := false
+	executor := workflowkit.NewExecutor(workflowkit.NewMemoryStore(), []workflowkit.Step{
+		New("agent", runner, nil),
+		publishStep{ran: &published},
+	})
+	run, err := executor.Run(context.Background(), workflowkit.WorkflowRun{ID: "wf-continue"})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if run.Status != workflowkit.StatusSucceeded || !published {
+		t.Fatalf("status = %s, published = %v; want the step after the agent to run", run.Status, published)
+	}
+	if preview := run.StepRecords[0].Metadata["content_preview"].(string); len([]rune(preview)) != maxContentPreviewRunes {
+		t.Fatalf("preview runes = %d, want %d", len([]rune(preview)), maxContentPreviewRunes)
+	}
+}
+
+func TestAgentStepMapperSeesPendingApproval(t *testing.T) {
+	runID := agentcore.NewRunID()
+	runner := &fakeRunner{result: &agentcore.RunResult{RunID: runID}, err: agentcore.ErrApprovalPending}
+	step := New("agent", runner, nil, WithResultMapper(func(run workflowkit.WorkflowRun, result *agentcore.RunResult, err error) (workflowkit.StepResult, error) {
+		if errors.Is(err, agentcore.ErrApprovalPending) {
+			return workflowkit.StepResult{Status: workflowkit.StatusWaitingApproval, AgentRunID: result.RunID.String(), ApprovalRef: "tool:" + run.ID}, nil
+		}
+		return DefaultResult(run, result, err)
+	}))
+	result, err := step.Run(context.Background(), workflowkit.WorkflowRun{ID: "wf-pending"})
+	if err != nil || result.Status != workflowkit.StatusWaitingApproval || result.ApprovalRef != "tool:wf-pending" {
+		t.Fatalf("result = %+v, err = %v; want waiting_approval", result, err)
+	}
+}
+
+type publishStep struct{ ran *bool }
+
+func (publishStep) Name() string { return "publish" }
+
+func (s publishStep) Run(context.Context, workflowkit.WorkflowRun) (workflowkit.StepResult, error) {
+	*s.ran = true
+	return workflowkit.StepResult{}, nil
 }

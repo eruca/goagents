@@ -61,6 +61,11 @@ type QueueStore interface {
 	ClaimRunnable(ctx context.Context, workerID string, lease time.Duration) (WorkflowRun, error)
 }
 
+// QueueLeaseStore extends and releases claimed leases. ReleaseLease clears
+// the lease of a run that is no longer running. A run still running keeps
+// its lease owner and its lease expires at once instead: the executor stopped
+// without recording an outcome, so QueueRecoveryStore.FailExpiredRunning must
+// still find and fail it.
 type QueueLeaseStore interface {
 	QueueStore
 	ExtendLease(ctx context.Context, id string, workerID string, lease time.Duration) (WorkflowRun, error)
@@ -329,8 +334,12 @@ func (s *MemoryStore) ReleaseLease(ctx context.Context, id string, workerID stri
 	if run.LeaseOwner != workerID {
 		return WorkflowRun{}, ErrWorkflowLeaseNotOwned
 	}
-	run.LeaseOwner = ""
-	run.LeaseUntil = time.Time{}
+	if run.Status == StatusRunning {
+		run.LeaseUntil = now
+	} else {
+		run.LeaseOwner = ""
+		run.LeaseUntil = time.Time{}
+	}
 	run.UpdatedAt = now
 	s.runs[id] = cloneRun(run)
 	return cloneRun(run), nil
@@ -354,6 +363,8 @@ func (s *MemoryStore) FailExpiredRunning(ctx context.Context, reason string) ([]
 		}
 		run.Status = StatusFailed
 		run.Error = reason
+		run.StepRetries = 0
+		run.NextAttemptAt = time.Time{}
 		run.LeaseOwner = ""
 		run.LeaseUntil = time.Time{}
 		run.UpdatedAt = now

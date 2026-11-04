@@ -184,6 +184,8 @@ func (e *Executor) Cancel(ctx context.Context, id string, reason string) (Workfl
 		}
 		current.Status = StatusCancelled
 		current.Error = reason
+		current.StepRetries = 0
+		current.NextAttemptAt = time.Time{}
 		return current, nil
 	})
 	if err != nil {
