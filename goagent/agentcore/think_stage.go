@@ -1,7 +1,9 @@
 package agentcore
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -48,8 +50,14 @@ func (s ThinkStage) Run(ctx context.Context, state *RunState) (StageResult, erro
 	state.Usage.OutputTokens += resp.Usage.OutputTokens
 	state.PendingCalls = state.PendingCalls[:0]
 	var rejected []Message
-	for _, call := range resp.ToolCalls {
-		if reason := s.rejectToolCall(call); reason != "" {
+	calls, invalidJSON := normalizeToolCallInputs(resp.ToolCalls)
+	resp.ToolCalls = calls
+	for i, call := range resp.ToolCalls {
+		reason := s.rejectToolCall(call)
+		if invalidJSON[i] {
+			reason = fmt.Sprintf("Tool %s returned a recoverable error: the arguments are not valid JSON. Send the arguments as one complete JSON object and try again.", call.Name)
+		}
+		if reason != "" {
 			state.Emit(ctx, Event{Type: EventToolRejected, Metadata: map[string]any{"tool": call.Name}})
 			rejected = append(rejected, Message{Role: "tool", Content: reason, ToolCallID: call.ID})
 			continue
@@ -69,6 +77,28 @@ func (s ThinkStage) Run(ctx context.Context, state *RunState) (StageResult, erro
 		state.Messages = append(state.Messages, Message{Role: "assistant", Content: resp.Content})
 	}
 	return StageContinue, nil
+}
+
+// normalizeToolCallInputs makes every call's arguments valid JSON before they
+// enter run state. Missing arguments, which some providers send as "" for a
+// tool without parameters, become {}. Arguments that are not JSON, such as a
+// truncated object, reject the call and are replaced by {}: run messages and
+// checkpoints are JSON, and a raw invalid argument would make the run
+// impossible to checkpoint for approval.
+// The returned set marks the calls whose arguments were not JSON.
+func normalizeToolCallInputs(calls []ports.ToolCall) ([]ports.ToolCall, map[int]bool) {
+	normalized := make([]ports.ToolCall, len(calls))
+	invalid := map[int]bool{}
+	for i, call := range calls {
+		if len(bytes.TrimSpace(call.Input)) == 0 {
+			call.Input = json.RawMessage(`{}`)
+		} else if !json.Valid(call.Input) {
+			invalid[i] = true
+			call.Input = json.RawMessage(`{}`)
+		}
+		normalized[i] = call
+	}
+	return normalized, invalid
 }
 
 // rejectToolCall returns an observation for a call the model can fix itself:

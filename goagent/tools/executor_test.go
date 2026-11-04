@@ -591,3 +591,20 @@ func TestExecutorStopsAfterFailedCall(t *testing.T) {
 		t.Fatalf("results = %+v, want only the completed first call", results)
 	}
 }
+
+func TestExecutorReportsRunDeadlineAsRunDeadline(t *testing.T) {
+	registry := NewRegistry()
+	registry.Register(testTool{
+		spec: Spec{Name: "slow"},
+		run: func(ctx context.Context, input json.RawMessage, env Env) (*Result, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err := NewExecutor(registry).Execute(ctx, []Call{{Name: "slow"}}, Env{})
+	if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrToolTimeout) {
+		t.Fatalf("err = %v, want the run's deadline, not ErrToolTimeout", err)
+	}
+}

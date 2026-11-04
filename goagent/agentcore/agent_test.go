@@ -80,7 +80,7 @@ func TestAgentSendsPromptBlocksOnce(t *testing.T) {
 }
 
 func TestAgentRespectsMaxIterationsOption(t *testing.T) {
-	llm := &mockLLM{responses: []*ports.ChatResponse{{}}}
+	llm := &mockLLM{responses: []*ports.ChatResponse{loopResponse()}}
 	agent, err := NewAgent(
 		WithLLM(llm),
 		WithMaxIterations(1),
@@ -943,7 +943,7 @@ func TestAgentLoadsMemoryOnceAcrossToolIterations(t *testing.T) {
 }
 
 func TestAgentDoesNotSaveMemoryOnMaxIterations(t *testing.T) {
-	llm := &mockLLM{responses: []*ports.ChatResponse{{}}}
+	llm := &mockLLM{responses: []*ports.ChatResponse{loopResponse()}}
 	memory := &mockMemoryProvider{}
 	agent, err := NewAgent(
 		WithLLM(llm),
@@ -1416,5 +1416,25 @@ func TestNewAgentRejectsToolWithBrokenSchema(t *testing.T) {
 	_, err := NewAgent(WithLLM(&mockLLM{}), WithToolRegistry(registry))
 	if !errors.Is(err, ports.ErrToolSchemaInvalid) || !strings.Contains(err.Error(), `"broken"`) {
 		t.Fatalf("NewAgent error = %v, want ErrToolSchemaInvalid naming the tool", err)
+	}
+}
+
+// loopResponse calls a tool that does not exist. The call is rejected and
+// answered, so the run takes another iteration without finishing.
+func loopResponse() *ports.ChatResponse {
+	return &ports.ChatResponse{ToolCalls: []ports.ToolCall{{ID: "call-loop", Name: "missing_tool", Input: json.RawMessage(`{}`)}}}
+}
+
+func TestAgentAbortsOnEmptyModelResponse(t *testing.T) {
+	llm := &mockLLM{responses: []*ports.ChatResponse{{}}}
+	agent, err := NewAgent(WithLLM(llm), WithMaxIterations(8))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.Run(context.Background(), RunRequest{Input: "hello"}); !errors.Is(err, ErrEmptyResponse) {
+		t.Fatalf("err = %v, want ErrEmptyResponse", err)
+	}
+	if len(llm.requests) != 1 {
+		t.Fatalf("LLM calls = %d, want 1", len(llm.requests))
 	}
 }

@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"reflect"
@@ -133,7 +134,13 @@ func runTool(ctx context.Context, tool Tool, call Call, env Env) (result *Result
 			err = fmt.Errorf("%w: tool %q panicked: %v", ErrToolExecutionFailed, call.Name, recovered)
 		}
 	}()
-	return toolHandler(tool)(toolCtx, call.Input, env)
+	result, err = toolHandler(tool)(toolCtx, call.Input, env)
+	// Only the tool's own Spec.Timeout is a tool timeout; when the run's
+	// context ended, the error stays the run's.
+	if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil && errors.Is(toolCtx.Err(), context.DeadlineExceeded) {
+		err = fmt.Errorf("%w: %w", ErrToolTimeout, err)
+	}
+	return result, err
 }
 
 func executionMode(tool Tool) ports.ExecutionMode {

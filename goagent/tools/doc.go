@@ -7,7 +7,9 @@
 // scheduling: read tools run in parallel by default, while write, exec, empty,
 // and unknown permissions run sequentially unless explicitly marked parallel.
 // Schema validates model-supplied JSON before the tool body runs. Timeout
-// bounds tool and middleware execution.
+// cancels the context passed to the tool and its middleware after that long;
+// a tool must honor ctx for the timeout to stop it. Only that deadline is
+// reported as ErrToolTimeout; a deadline of the whole run is not.
 //
 // Tool results separate model-visible and host-visible output. ForLLM is the
 // observation appended to model context. ForUser is available to host and UI

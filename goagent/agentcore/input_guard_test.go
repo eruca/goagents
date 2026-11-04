@@ -287,3 +287,38 @@ func TestResumedRunAppendsOnlyItsOwnMessagesToMemory(t *testing.T) {
 		}
 	}
 }
+
+func TestToolCallArgumentsAreNormalizedBeforeApproval(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(testAgentTool{
+		spec: tools.Spec{Name: "write", Permission: policy.PermissionWrite, Schema: tools.Schema{JSONSchema: json.RawMessage(`{"type":"object"}`)}},
+		run: func(context.Context, json.RawMessage, tools.Env) (*tools.Result, error) {
+			return &tools.Result{ForLLM: "written"}, nil
+		},
+	})
+	registry.Register(testAgentTool{
+		spec: tools.Spec{Name: "note", Permission: policy.PermissionWrite},
+		run: func(context.Context, json.RawMessage, tools.Env) (*tools.Result, error) {
+			return &tools.Result{ForLLM: "noted"}, nil
+		},
+	})
+	llm := &mockLLM{responses: []*ports.ChatResponse{{ToolCalls: []ports.ToolCall{
+		{ID: "call-empty", Name: "write", Input: json.RawMessage(``)},
+		{ID: "call-broken", Name: "note", Input: json.RawMessage(`{"path":`)},
+	}}}}
+	agent, err := NewAgent(WithLLM(llm), WithToolRegistry(registry), WithToolApprover(pendingToolApprover{}))
+	if err != nil {
+		t.Fatalf("NewAgent: %v", err)
+	}
+	paused, err := agent.RunDetailed(context.Background(), RunRequest{Input: "go", AllowedPermissions: []policy.Permission{policy.PermissionWrite}})
+	if !errors.Is(err, ErrApprovalPending) {
+		t.Fatalf("err = %v, want ErrApprovalPending: an empty argument is {} and a broken one is rejected", err)
+	}
+	pending := paused.Interruption.Checkpoint.PendingCalls
+	if len(pending) != 1 || pending[0].ID != "call-empty" || string(pending[0].Input) != `{}` {
+		t.Fatalf("pending = %+v, want only the empty-argument call with {}", pending)
+	}
+	if _, err := json.Marshal(paused.Interruption.Checkpoint); err != nil {
+		t.Fatalf("checkpoint is not JSON: %v", err)
+	}
+}

@@ -121,7 +121,7 @@ func TestAgentStreamFansOutToConfiguredEventSink(t *testing.T) {
 
 func TestAgentStreamWaitDoesNotDependOnConsumingEvents(t *testing.T) {
 	llm := &mockLLM{responses: []*ports.ChatResponse{
-		{}, {}, {}, {}, {}, {}, {}, {},
+		loopResponse(), loopResponse(), loopResponse(), loopResponse(), loopResponse(), loopResponse(), loopResponse(), loopResponse(),
 	}}
 	agent, err := NewAgent(WithLLM(llm), WithMaxIterations(8))
 	if err != nil {
@@ -159,7 +159,7 @@ func TestAgentStreamWaitDoesNotDependOnConsumingEvents(t *testing.T) {
 func TestAgentStreamPreservesTailEventsWhenConsumedAfterWait(t *testing.T) {
 	recorder := &recordingEventSink{}
 	llm := &mockLLM{responses: []*ports.ChatResponse{
-		{}, {}, {}, {}, {}, {}, {}, {Content: "done"},
+		loopResponse(), loopResponse(), loopResponse(), loopResponse(), loopResponse(), loopResponse(), loopResponse(), {Content: "done"},
 	}}
 	agent, err := NewAgent(WithLLM(llm), WithMaxIterations(8), WithEventSink(recorder))
 	if err != nil {
@@ -205,7 +205,7 @@ func TestAgentStreamPreservesTailEventsWhenConsumedAfterWait(t *testing.T) {
 func TestAgentStreamDiscardEventsDoesNotCancelRunOrSink(t *testing.T) {
 	recorder := &recordingEventSink{}
 	llm := &mockLLM{responses: []*ports.ChatResponse{
-		{}, {}, {}, {}, {}, {}, {}, {Content: "done"},
+		loopResponse(), loopResponse(), loopResponse(), loopResponse(), loopResponse(), loopResponse(), loopResponse(), {Content: "done"},
 	}}
 	agent, err := NewAgent(WithLLM(llm), WithMaxIterations(8), WithEventSink(recorder))
 	if err != nil {
