@@ -53,3 +53,12 @@ func TestProjectNonToolMessageIsClonedUnchanged(t *testing.T) {
 		t.Fatalf("unexpected non-tool projection: %#v", got)
 	}
 }
+
+func TestProjectLeavesProjectedMessageUnchanged(t *testing.T) {
+	msg := contextkit.Message{Role: contextkit.RoleTool, ToolName: "t", Content: "data"}
+	once := Project(msg, Config{MaxResultChars: 100})
+	twice := Project(once, Config{MaxResultChars: 100})
+	if twice.Content != once.Content || twice.Metadata["contextkit.tool_original_chars"] != once.Metadata["contextkit.tool_original_chars"] {
+		t.Fatalf("second projection = %q %v, want the first %q %v", twice.Content, twice.Metadata, once.Content, once.Metadata)
+	}
+}

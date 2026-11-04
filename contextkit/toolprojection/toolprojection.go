@@ -12,9 +12,13 @@ type Config struct {
 	MaxResultChars int
 }
 
+const projectedKey = "contextkit.tool_projected"
+
 func Project(msg contextkit.Message, cfg Config) contextkit.Message {
 	out := cloneMessage(msg)
-	if out.Role != contextkit.RoleTool {
+	// A projected message is returned as is, so feeding a compressor's output
+	// back in, as incremental compression does, never wraps it again.
+	if out.Role != contextkit.RoleTool || out.Metadata[projectedKey] == true {
 		return out
 	}
 
@@ -41,7 +45,7 @@ func Project(msg contextkit.Message, cfg Config) contextkit.Message {
 	lines = append(lines, "result="+budgeted.Content)
 	out.Content = strings.Join(lines, "\n")
 	out.Metadata = ensureMetadata(out.Metadata)
-	out.Metadata["contextkit.tool_projected"] = true
+	out.Metadata[projectedKey] = true
 	if budgeted.Truncated {
 		out.Metadata["contextkit.tool_truncated"] = true
 		out.Metadata["contextkit.tool_omitted_chars"] = budgeted.OmittedChars
