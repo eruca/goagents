@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	supportedSchemaVersion = 2
+	supportedSchemaVersion = 3
 	schemaLockSQL          = "SELECT pg_advisory_lock(hashtext('memorykit.schema'))"
 	schemaUnlockSQL        = "SELECT pg_advisory_unlock(hashtext('memorykit.schema'))"
 )
@@ -118,6 +118,15 @@ var migrationV2 = []string{
 	`CREATE INDEX IF NOT EXISTS idx_memories_search_grams ON memories USING GIN (search_grams)`,
 }
 
+// migrationV3 indexes each memory's words as memorykit.SearchTerms splits
+// them. Matching query words against the 'simple' tsvector disagreed with
+// memorystore: PostgreSQL keeps dotted keys, paths, and URLs as single
+// tokens, so "vectors" missed the key "storage.vectors".
+var migrationV3 = []string{
+	`ALTER TABLE memories ADD COLUMN IF NOT EXISTS search_words TEXT[] NOT NULL DEFAULT '{}'`,
+	`CREATE INDEX IF NOT EXISTS idx_memories_search_words ON memories USING GIN (search_words)`,
+}
+
 func migrate(ctx context.Context, db *sql.DB) (returnErr error) {
 	conn, err := db.Conn(ctx)
 	if err != nil {
@@ -161,11 +170,25 @@ func migrate(ctx context.Context, db *sql.DB) (returnErr error) {
 				return wrapBackend("migration apply", err)
 			}
 		}
-		if err := backfillSearchGrams(ctx, tx); err != nil {
+		if err := backfillSearchTerms(ctx, tx, "search_grams", searchGrams); err != nil {
 			return wrapBackend("migration backfill", err)
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO memorykit_schema_versions(version, applied_at)
 VALUES (2, now()) ON CONFLICT (version) DO NOTHING`); err != nil {
+			return wrapBackend("migration apply", err)
+		}
+	}
+	if version < 3 {
+		for _, statement := range migrationV3 {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return wrapBackend("migration apply", err)
+			}
+		}
+		if err := backfillSearchTerms(ctx, tx, "search_words", searchWords); err != nil {
+			return wrapBackend("migration backfill", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO memorykit_schema_versions(version, applied_at)
+VALUES (3, now()) ON CONFLICT (version) DO NOTHING`); err != nil {
 			return wrapBackend("migration apply", err)
 		}
 	}
@@ -184,20 +207,22 @@ VALUES (2, now()) ON CONFLICT (version) DO NOTHING`); err != nil {
 	return nil
 }
 
-func backfillSearchGrams(ctx context.Context, tx *sql.Tx) error {
+// backfillSearchTerms fills column, a search term array, for memories
+// written before it existed.
+func backfillSearchTerms(ctx context.Context, tx *sql.Tx, column string, terms func(key, content string) []string) error {
 	rows, err := tx.QueryContext(ctx, `SELECT id, memory_key, content FROM memories`)
 	if err != nil {
 		return err
 	}
-	grams := map[string][]string{}
+	values := map[string][]string{}
 	for rows.Next() {
 		var id, key, content string
 		if err := rows.Scan(&id, &key, &content); err != nil {
 			_ = rows.Close()
 			return err
 		}
-		if memoryGrams := searchGrams(key, content); len(memoryGrams) > 0 {
-			grams[id] = memoryGrams
+		if memoryTerms := terms(key, content); len(memoryTerms) > 0 {
+			values[id] = memoryTerms
 		}
 	}
 	if err := rows.Close(); err != nil {
@@ -206,8 +231,8 @@ func backfillSearchGrams(ctx context.Context, tx *sql.Tx) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	for id, memoryGrams := range grams {
-		if _, err := tx.ExecContext(ctx, `UPDATE memories SET search_grams = $1 WHERE id = $2`, memoryGrams, id); err != nil {
+	for id, memoryTerms := range values {
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`UPDATE memories SET %s = $1 WHERE id = $2`, column), memoryTerms, id); err != nil {
 			return err
 		}
 	}
@@ -218,4 +243,9 @@ func backfillSearchGrams(ctx context.Context, tx *sql.Tx) error {
 // search_vector covers.
 func searchGrams(key, content string) []string {
 	return memorykit.IndexGrams(key + " " + content)
+}
+
+// searchWords is the search_words value of a memory.
+func searchWords(key, content string) []string {
+	return memorykit.IndexWords(key + " " + content)
 }

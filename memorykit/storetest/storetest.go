@@ -615,6 +615,8 @@ func RunFullTextRecallConformance(t *testing.T, newStore func(*testing.T) FullTe
 		{"chinese question matches chinese memory", "我们选了哪个数据库？", []string{fullTextChineseDB}},
 		{"more matched terms rank first", "deploy approvals pgvector embeddings", []string{fullTextDeploy, fullTextPgvector}},
 		{"no matching term finds nothing", "kubernetes 天气", []string{}},
+		{"a word inside a dotted key matches", "vectors", []string{fullTextPgvector}},
+		{"a dotted key's first word matches every such key", "storage", []string{fullTextPgvector, fullTextChineseDB}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
 
 	"github.com/eruca/goagents/memorykit"
 	pgvector "github.com/pgvector/pgvector-go"
@@ -84,10 +83,10 @@ func (s *Store) searchExact(ctx context.Context, query memorykit.CandidateQuery)
 }
 
 // searchFullText matches any query term (memorykit.SearchTerms): words against
-// the 'simple' tsvector, Chinese and Japanese grams as substrings, since the
-// default parser does not segment those scripts. Candidates are found through
-// the GIN indexes on search_vector and search_grams, so only memories sharing
-// a term are scored. Only memories matching more
+// the memory's search_words and Chinese and Japanese grams against its
+// search_grams, both split by memorykit the same way memorystore splits them.
+// Candidates are found through the GIN indexes on those columns, so only
+// memories sharing a term are scored. Only memories matching more
 // than half as many terms as the best match are kept, so a lone shared word
 // does not earn a high rank, and results rank by matched terms, the same
 // cutoff and order memorystore uses.
@@ -99,7 +98,7 @@ func (s *Store) searchFullText(ctx context.Context, query memorykit.CandidateQue
 	rows, err := s.db.QueryContext(ctx, `SELECT `+qualifiedMemoryColumns+` FROM (
 		SELECT scored.*, max(scored.hits) OVER () AS best_hits FROM (
 			SELECT m.*,
-			       (SELECT count(*) FROM unnest($5::text[]) AS w WHERE m.search_vector @@ w::tsquery)
+			       (SELECT count(*) FROM unnest($5::text[]) AS w WHERE w = ANY(m.search_words))
 			     + (SELECT count(*) FROM unnest($6::text[]) AS g
 			        WHERE strpos(m.memory_key || ' ' || m.content, g) > 0) AS hits
 			FROM memories m
@@ -108,7 +107,7 @@ func (s *Store) searchFullText(ctx context.Context, query memorykit.CandidateQue
 			  AND m.valid_from <= $4
 			  AND (m.valid_until IS NULL OR m.valid_until > $4)
 			  AND (cardinality($7::text[]) = 0 OR m.kind = ANY($7::text[]))
-			  AND (m.search_vector @@ $9::tsquery OR m.search_grams && $6::text[])
+			  AND (m.search_words && $5::text[] OR m.search_grams && $6::text[])
 		) scored
 		WHERE scored.hits > 0
 		) m
@@ -116,32 +115,13 @@ func (s *Store) searchFullText(ctx context.Context, query memorykit.CandidateQue
 		ORDER BY m.hits DESC, m.importance DESC, m.updated_at DESC, m.id ASC
 		LIMIT $8`,
 		query.Scope.TenantID, query.Scope.SubjectType, query.Scope.SubjectID, query.Now,
-		quotedLexemes(words), grams, kindStrings(query.Kinds), query.FullTextLimit,
-		anyLexeme(words))
+		words, grams, kindStrings(query.Kinds), query.FullTextLimit)
 	if err != nil {
 		return nil, wrapBackend("full-text candidates", err)
 	}
 	return scanCandidates(rows, memorykit.ChannelFullText, false)
 }
 
-// anyLexeme is a tsquery matching any of words, or NULL for no words, since
-// PostgreSQL warns about an empty tsquery.
-func anyLexeme(words []string) any {
-	if len(words) == 0 {
-		return nil
-	}
-	return strings.Join(quotedLexemes(words), " | ")
-}
-
-// quotedLexemes quotes each word as a tsquery lexeme, so no word is parsed as
-// tsquery syntax.
-func quotedLexemes(words []string) []string {
-	quoted := make([]string, len(words))
-	for i, word := range words {
-		quoted[i] = "'" + strings.ReplaceAll(word, "'", "''") + "'"
-	}
-	return quoted
-}
 
 func (s *Store) searchVector(ctx context.Context, query memorykit.CandidateQuery) ([]memorykit.Candidate, error) {
 	vector := pgvector.NewVector(append([]float32(nil), query.QueryVector...))
