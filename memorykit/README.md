@@ -127,7 +127,9 @@ a content-free degradation event for operator follow-up.
 - **Activation:** changes a reviewed candidate to active and supersedes an
   existing active record with the same Scope/kind/key.
 - **Correction:** creates a new revision, replaces content/sources, and
-  invalidates the old embedding by content hash.
+  invalidates the old embedding by content hash. An inactive record (forgotten,
+  dismissed, superseded, or erased) cannot be corrected and returns
+  `ErrConflict`.
 - **Forget:** changes an active record to inactive. It immediately leaves all
   recall paths but retains governed content, sources, and revision audit.
 - **Erase:** keeps an inactive identity/audit tombstone while scrubbing content,

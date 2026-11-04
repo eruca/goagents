@@ -25,6 +25,8 @@ func RunLifecycleConformance(t *testing.T, newStore func(*testing.T) memorykit.L
 		{"stale expected version conflicts", assertStaleVersionConflicts},
 		{"wrong starting status conflicts without side effects", assertWrongStartingStatusConflicts},
 		{"correct increments version and preserves history", assertCorrectionHistory},
+		{"correct rejects an erased record", assertCorrectRejectsErased},
+		{"blank source kind or ref is rejected", assertBlankSourceRejected},
 		{"dismiss makes candidate inactive", assertDismissedCandidateInactive},
 		{"forget stops active reads and keeps content history", assertForgetSemantics},
 		{"erase removes content sources and revision snapshots", assertEraseSemantics},
@@ -305,6 +307,39 @@ func assertCorrectionHistory(t *testing.T, store memorykit.LifecycleStore) {
 	before, err := store.Revisions(context.Background(), memorykit.RevisionQuery{Scope: created.Scope, MemoryID: created.ID, BeforeVersion: corrected.Version, Limit: 10})
 	if err != nil || len(before) != 1 || before[0].Version != created.Version {
 		t.Fatalf("cursor revisions = %#v, %v", before, err)
+	}
+}
+
+func assertCorrectRejectsErased(t *testing.T, store memorykit.LifecycleStore) {
+	created, err := store.Create(context.Background(), baseCreate("61111111-1111-1111-1111-111111111112", "project-1", memorykit.StatusActive))
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := memorykit.VersionedCommand{Scope: created.Scope, ID: created.ID, ExpectedVersion: created.Version, Actor: "privacy-admin", Reason: "erase", Now: created.UpdatedAt.Add(time.Minute)}
+	if err := store.Erase(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+	command.ExpectedVersion++
+	command.Now = command.Now.Add(time.Minute)
+	_, err = store.Correct(context.Background(), memorykit.CorrectRequest{
+		Command: command, Content: "resurrected content", ValidFrom: created.ValidFrom, Importance: created.Importance, Confidence: 1,
+	})
+	if !errors.Is(err, memorykit.ErrConflict) {
+		t.Fatalf("Correct after erase error = %v, want ErrConflict", err)
+	}
+	erased, err := store.Get(context.Background(), created.Scope, created.ID)
+	if err != nil || erased.Content != "" {
+		t.Fatalf("erased record = %#v, %v; want its content still removed", erased, err)
+	}
+}
+
+func assertBlankSourceRejected(t *testing.T, store memorykit.LifecycleStore) {
+	for _, source := range []memorykit.Source{{Kind: "artifact", Ref: " "}, {Kind: "", Ref: "artifact:x"}} {
+		request := baseCreate("61111111-1111-1111-1111-111111111113", "project-1", memorykit.StatusActive)
+		request.Sources = []memorykit.Source{source}
+		if _, err := store.Create(context.Background(), request); !errors.Is(err, memorykit.ErrInvalidMemory) {
+			t.Fatalf("Create with source %#v error = %v, want ErrInvalidMemory", source, err)
+		}
 	}
 }
 

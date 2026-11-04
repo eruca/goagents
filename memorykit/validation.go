@@ -138,7 +138,9 @@ func ValidateSources(sources []Source, limits Limits) error {
 	type sourceIdentity struct{ kind, ref string }
 	seen := make(map[sourceIdentity]struct{}, len(sources))
 	for _, source := range sources {
-		if !validMetadata(source.Kind, limits) || !validMetadata(source.Ref, limits) ||
+		// Recall rejects a blank kind or ref, so a write must too.
+		if strings.TrimSpace(source.Kind) == "" || strings.TrimSpace(source.Ref) == "" ||
+			!validMetadata(source.Kind, limits) || !validMetadata(source.Ref, limits) ||
 			!validMetadata(source.EvidenceHash, limits) {
 			return fmt.Errorf("%w: invalid source", ErrInvalidMemory)
 		}

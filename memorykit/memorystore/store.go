@@ -411,6 +411,11 @@ func (s *Store) Correct(ctx context.Context, request memorykit.CorrectRequest) (
 	if err != nil {
 		return memorykit.Memory{}, err
 	}
+	// An inactive record is forgotten, dismissed, superseded, or erased;
+	// correcting it would bring content back into a tombstone.
+	if memory.Status == memorykit.StatusInactive {
+		return memorykit.Memory{}, memorykit.ErrConflict
+	}
 
 	memory.Content = request.Content
 	memory.ValidFrom = request.ValidFrom
