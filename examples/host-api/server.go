@@ -52,11 +52,14 @@ type Config struct {
 type Server struct {
 	// workerID owns this process's queue leases. It is unique per process so
 	// several hosts sharing one database never mistake each other's leases.
-	workerID                string
-	artifacts               artifactkit.Store
-	runs                    runkit.Store
-	runCloser               io.Closer
-	workflows               workflowkit.Store
+	workerID  string
+	artifacts artifactkit.Store
+	runs      runkit.Store
+	runCloser io.Closer
+	workflows workflowkit.Store
+	// creatingWorkflows holds the ids of workflows this process is creating,
+	// so two concurrent requests for one id cannot both write its input.
+	creatingWorkflows       sync.Map
 	workflowCloser          io.Closer
 	queries                 workflowkit.WorkflowQueryStore
 	queue                   workflowkit.QueueLeaseStore
@@ -378,6 +381,14 @@ func writeApprovalUnauthorized(w http.ResponseWriter) {
 func writeWorkflowStoreError(w http.ResponseWriter, err error) {
 	if errors.Is(err, workflowkit.ErrRunNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "workflow not found")
+		return
+	}
+	if errors.Is(err, workflowkit.ErrRunExists) {
+		writeWorkflowExists(w)
+		return
+	}
+	if errors.Is(err, workflowkit.ErrApprovalMismatch) {
+		writeError(w, http.StatusConflict, "approval_mismatch", "workflow is not waiting on final approval")
 		return
 	}
 	writeError(w, http.StatusBadRequest, "workflow_error", err.Error())

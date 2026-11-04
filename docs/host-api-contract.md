@@ -127,6 +127,8 @@ Common error codes:
 - `llm_audit_error`
 - `run_error`
 - `not_found`
+- `workflow_exists` (`409`)
+- `approval_mismatch` (`409`)
 
 ## POST /workflows
 
@@ -157,7 +159,9 @@ Request:
 
 Fields:
 
-- `id`: required workflow id.
+- `id`: required workflow id. Creation never replaces a stored workflow: an id
+  that already exists returns `409 workflow_exists` and leaves the stored
+  workflow and its input artifact unchanged.
 - `input`: input text written as an artifact.
 - `run_mode`: optional. `sync` is supported and default. `queued` is an
   in-process proof that saves a pending workflow and returns immediately while a
@@ -427,6 +431,11 @@ Response status: `200 OK`.
 Missing, malformed, expired, wrong-issuer, or wrong-audience tokens return
 `401 unauthorized`. `approved_by` is not an accepted request field, so callers
 cannot supply or override the audited identity.
+
+The approval answers only the final-approval request (`approval_ref` of
+`approval:{id}`). A workflow waiting on a tool approval returns
+`409 approval_mismatch`; resolve it through `POST /workflows/{id}/agent-approve`
+first.
 
 Response:
 

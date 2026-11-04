@@ -93,8 +93,12 @@ type modelStatsResponse struct {
 
 func (s *Server) handleGetWorkflowLLMRoutes(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, err := s.workflows.Get(r.Context(), id); err != nil {
+	run, err := s.workflows.Get(r.Context(), id)
+	if err != nil {
 		writeWorkflowStoreError(w, err)
+		return
+	}
+	if _, ok := s.authorizeStoredWorkflow(w, r, run, memoryRead); !ok {
 		return
 	}
 	records, err := llmkit.ReadRouteAudits(s.llmHome, llmkit.AuditFilter{TaskID: id})
