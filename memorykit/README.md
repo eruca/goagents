@@ -84,7 +84,10 @@ only when trusted Host metadata grants explicit write intent. A model write
 takes effect immediately only for a new kind/key or to replace the model's own
 untouched earlier write. If the current active record was written, reviewed,
 or corrected by anyone else, the write is stored as a candidate for review and
-the existing record stays in effect.
+the existing record stays in effect. The check and the write are atomic: the
+create carries `CreateRequest.ExpectedActive`, the active record the check saw,
+and a store fails it with `ErrActiveMismatch` if a person wrote or reviewed one
+in between, after which the decision is made again.
 
 A typed recoverable embedding/vector failure degrades to the remaining
 exact/full-text channels and records only content-free channel/ID metadata.

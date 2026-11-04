@@ -65,7 +65,7 @@ func (s *Store) Create(ctx context.Context, request memorykit.CreateRequest) (me
 		CreatedAt: canonicalTime(request.Now), UpdatedAt: canonicalTime(request.Now),
 	}
 	if memory.Status == memorykit.StatusActive {
-		if err := s.supersedeCurrentActive(ctx, tx, memory, memory.ID, request.Actor, request.Reason, request.Now); err != nil {
+		if err := s.supersedeCurrentActive(ctx, tx, memory, memory.ID, request.Actor, request.Reason, request.Now, request.ExpectedActive); err != nil {
 			return memorykit.Memory{}, err
 		}
 	}
@@ -209,7 +209,7 @@ func (s *Store) Activate(ctx context.Context, command memorykit.VersionedCommand
 	if target.Status != memorykit.StatusCandidate {
 		return memorykit.Memory{}, memorykit.ErrConflict
 	}
-	if err := s.supersedeCurrentActive(ctx, tx, target, target.ID, command.Actor, command.Reason, command.Now); err != nil {
+	if err := s.supersedeCurrentActive(ctx, tx, target, target.ID, command.Actor, command.Reason, command.Now, nil); err != nil {
 		return memorykit.Memory{}, err
 	}
 	activated, err := updateStatus(ctx, tx, command, memorykit.StatusActive)
@@ -480,6 +480,7 @@ func (s *Store) supersedeCurrentActive(
 	target memorykit.Memory,
 	excludeID, actor, reason string,
 	now time.Time,
+	expected *memorykit.ActiveExpectation,
 ) error {
 	active, err := scanMemory(tx.QueryRowContext(ctx, `SELECT `+memoryColumns+` FROM memories
 		WHERE tenant_id = $1 AND subject_type = $2 AND subject_id = $3
@@ -488,10 +489,16 @@ func (s *Store) supersedeCurrentActive(
 		target.Scope.TenantID, target.Scope.SubjectType, target.Scope.SubjectID,
 		target.Kind, target.Key, memorykit.StatusActive, excludeID))
 	if errors.Is(err, sql.ErrNoRows) {
+		if !expected.MatchesActive(nil) {
+			return memorykit.ErrActiveMismatch
+		}
 		return nil
 	}
 	if err != nil {
 		return lifecycleWriteError("lock active memory", err)
+	}
+	if !expected.MatchesActive(&active) {
+		return memorykit.ErrActiveMismatch
 	}
 	command := memorykit.VersionedCommand{
 		Scope: active.Scope, ID: active.ID, ExpectedVersion: active.Version,

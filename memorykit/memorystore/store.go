@@ -120,6 +120,9 @@ func (s *Store) Create(ctx context.Context, request memorykit.CreateRequest) (me
 		UpdatedAt:      request.Now,
 	}
 	if memory.Status == memorykit.StatusActive {
+		if !request.ExpectedActive.MatchesActive(s.activeLocked(memory, memory.ID)) {
+			return memorykit.Memory{}, memorykit.ErrActiveMismatch
+		}
 		s.supersedeActiveLocked(memory, memory.ID, request.Actor, request.Reason, request.Now)
 	}
 	s.memories[memory.ID] = memory
@@ -554,6 +557,16 @@ func (s *Store) commandTargetLocked(command memorykit.VersionedCommand) (memoryk
 		return memorykit.Memory{}, memorykit.ErrConflict
 	}
 	return memory, nil
+}
+
+// activeLocked returns the active record sharing target's kind and key, or nil.
+func (s *Store) activeLocked(target memorykit.Memory, excludeID string) *memorykit.Memory {
+	for id, memory := range s.memories {
+		if id != excludeID && memory.Status == memorykit.StatusActive && sameConflictKey(memory, target) {
+			return &memory
+		}
+	}
+	return nil
 }
 
 // supersedeActiveLocked is called inside the same write lock as the activating mutation.

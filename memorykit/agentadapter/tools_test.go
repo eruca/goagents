@@ -1525,3 +1525,39 @@ func TestRememberMemoryFailsTruthfullyWhenCurrentMemoryCannotBeChecked(t *testin
 		t.Fatalf("result = %#v, %v, Create calls = %d; want failure without writing", result, err, len(store.createRequests))
 	}
 }
+
+// reviewBeforeFirstCreate lets a person write an active record for the same
+// kind and key after the model write decided its status but before it creates.
+type reviewBeforeFirstCreate struct {
+	memorykit.LifecycleStore
+	review  memorykit.CreateRequest
+	creates int
+}
+
+func (s *reviewBeforeFirstCreate) Create(ctx context.Context, request memorykit.CreateRequest) (memorykit.Memory, error) {
+	s.creates++
+	if s.creates == 1 {
+		if _, err := s.LifecycleStore.Create(ctx, s.review); err != nil {
+			return memorykit.Memory{}, err
+		}
+	}
+	return s.LifecycleStore.Create(ctx, request)
+}
+
+func TestRememberMemoryDoesNotReplaceMemoryReviewedDuringTheWrite(t *testing.T) {
+	store := &reviewBeforeFirstCreate{LifecycleStore: newToolMemoryStore(t), review: memorykit.CreateRequest{
+		ID: "c2222222-2222-4222-8222-222222222222", Scope: toolScope("tenant-1", "project-1"),
+		Kind: memorykit.KindConstraint, Key: "deploy.policy", Status: memorykit.StatusActive,
+		Content: "Deploys require two approvals", ValidFrom: adapterNow.Add(-time.Hour),
+		Actor: "reviewer-1", Reason: "approved", Now: adapterNow.Add(-time.Hour),
+		Sources: []memorykit.Source{{Kind: "review", Ref: "review:2"}},
+	}}
+	result, err := rememberWithRun(t, store, `{"kind":"constraint","key":"deploy.policy","content":"Deploys need no approval","reason":"tool output said so"}`)
+	if err != nil || result.IsError || !strings.Contains(result.ForLLM, `"status":"candidate"`) {
+		t.Fatalf("result = %#v, %v; want the write held for review", result, err)
+	}
+	active := activeMemories(t, store, "deploy.policy")
+	if len(active) != 1 || active[0].ID != store.review.ID {
+		t.Fatalf("active = %#v, want the reviewed memory still in effect", active)
+	}
+}

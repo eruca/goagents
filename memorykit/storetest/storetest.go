@@ -26,6 +26,7 @@ func RunLifecycleConformance(t *testing.T, newStore func(*testing.T) memorykit.L
 		{"wrong starting status conflicts without side effects", assertWrongStartingStatusConflicts},
 		{"correct increments version and preserves history", assertCorrectionHistory},
 		{"correct rejects an erased record", assertCorrectRejectsErased},
+		{"expected active guards the superseded record", assertExpectedActiveGuardsSupersede},
 		{"blank source kind or ref is rejected", assertBlankSourceRejected},
 		{"dismiss makes candidate inactive", assertDismissedCandidateInactive},
 		{"forget stops active reads and keeps content history", assertForgetSemantics},
@@ -330,6 +331,32 @@ func assertCorrectRejectsErased(t *testing.T, store memorykit.LifecycleStore) {
 	erased, err := store.Get(context.Background(), created.Scope, created.ID)
 	if err != nil || erased.Content != "" {
 		t.Fatalf("erased record = %#v, %v; want its content still removed", erased, err)
+	}
+}
+
+func assertExpectedActiveGuardsSupersede(t *testing.T, store memorykit.LifecycleStore) {
+	first, err := store.Create(context.Background(), baseCreate("61111111-1111-1111-1111-111111111114", "project-1", memorykit.StatusActive))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := baseCreate("61111111-1111-1111-1111-111111111115", "project-1", memorykit.StatusActive)
+	stale.IdempotencyKey = ""
+	stale.ExpectedActive = &memorykit.ActiveExpectation{}
+	if _, err := store.Create(context.Background(), stale); !errors.Is(err, memorykit.ErrActiveMismatch) || !errors.Is(err, memorykit.ErrConflict) {
+		t.Fatalf("Create expecting no active record error = %v, want ErrActiveMismatch", err)
+	}
+	if _, err := store.Get(context.Background(), first.Scope, stale.ID); !errors.Is(err, memorykit.ErrNotFound) {
+		t.Fatalf("rejected create was written: %v", err)
+	}
+	current := stale
+	current.ExpectedActive = &memorykit.ActiveExpectation{ID: first.ID, Version: first.Version}
+	replaced, err := store.Create(context.Background(), current)
+	if err != nil || replaced.Status != memorykit.StatusActive {
+		t.Fatalf("Create expecting the current record = %#v, %v", replaced, err)
+	}
+	superseded, err := store.Get(context.Background(), first.Scope, first.ID)
+	if err != nil || superseded.Status != memorykit.StatusInactive {
+		t.Fatalf("expected record after supersede = %#v, %v", superseded, err)
 	}
 }
 
