@@ -70,22 +70,22 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 
-	texts := make([]string, len(inputs))
-	for index := range inputs {
-		texts[index] = inputs[index].Content
-	}
-	vectors, err := w.embedder.Embed(ctx, EmbedRequest{
-		ProfileID: w.profileID,
-		Texts:     texts,
-	})
+	vectors, err := w.embed(ctx, inputs)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return 0, ctxErr
 	}
+	var skipped error
 	if err != nil {
-		return 0, err
-	}
-	if err := validateEmbeddingBatch(vectors, len(inputs), w.dimensions); err != nil {
-		return 0, err
+		if IsRecoverable(err) || len(inputs) == 1 {
+			return 0, err
+		}
+		// The batch is the oldest pending memories, so one input the embedder
+		// rejects would fail every run and nothing behind it would ever be
+		// embedded. Embed the inputs one by one and skip those that fail.
+		inputs, vectors, skipped = w.embedEach(ctx, inputs)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return 0, ctxErr
+		}
 	}
 
 	embeddedAt := time.Now().UTC()
@@ -118,7 +118,55 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context) (int, error) {
 		}
 		return stored, err
 	}
-	return stored, nil
+	return stored, skipped
+}
+
+func (w *EmbeddingWorker) embed(ctx context.Context, inputs []EmbeddingInput) ([][]float32, error) {
+	texts := make([]string, len(inputs))
+	for index := range inputs {
+		texts[index] = inputs[index].Content
+	}
+	vectors, err := w.embedder.Embed(ctx, EmbedRequest{ProfileID: w.profileID, Texts: texts})
+	if err != nil {
+		return nil, err
+	}
+	if err := validateEmbeddingBatch(vectors, len(inputs), w.dimensions); err != nil {
+		return nil, err
+	}
+	return vectors, nil
+}
+
+// embedEach embeds inputs one at a time and returns those that succeeded, with
+// an error naming how many were skipped. It stops on a recoverable error,
+// which says the embedder itself is failing.
+func (w *EmbeddingWorker) embedEach(ctx context.Context, inputs []EmbeddingInput) ([]EmbeddingInput, [][]float32, error) {
+	var kept []EmbeddingInput
+	var vectors [][]float32
+	var firstErr error
+	failed := 0
+	for index, input := range inputs {
+		if ctx.Err() != nil {
+			break
+		}
+		vector, err := w.embed(ctx, []EmbeddingInput{input})
+		if err == nil {
+			kept = append(kept, input)
+			vectors = append(vectors, vector[0])
+			continue
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+		if IsRecoverable(err) {
+			failed += len(inputs) - index
+			break
+		}
+		failed++
+	}
+	if failed == 0 {
+		return kept, vectors, nil
+	}
+	return kept, vectors, fmt.Errorf("%d of %d pending memories could not be embedded: %w", failed, len(inputs), firstErr)
 }
 
 func validateEmbeddingBatch(vectors [][]float32, count, dimensions int) error {
