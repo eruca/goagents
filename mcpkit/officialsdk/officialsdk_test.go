@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -271,4 +272,20 @@ func firstText(result *mcpkit.ToolCallResult) string {
 		return ""
 	}
 	return result.Content[0].Text
+}
+
+func TestChildEnvDoesNotInheritHostSecrets(t *testing.T) {
+	t.Setenv("HOST_LLM_API_KEY", "secret")
+	t.Setenv("PATH", "/usr/bin")
+	env := childEnv(StdioConfig{Env: []string{"SERVER_TOKEN=given"}})
+	joined := strings.Join(env, "\n")
+	if strings.Contains(joined, "HOST_LLM_API_KEY") {
+		t.Fatalf("child env = %q, leaked a host secret", env)
+	}
+	if !strings.Contains(joined, "PATH=/usr/bin") || !strings.Contains(joined, "SERVER_TOKEN=given") {
+		t.Fatalf("child env = %q, want PATH and the configured variable", env)
+	}
+	if got := childEnv(StdioConfig{InheritEnv: []string{}}); len(got) != 0 {
+		t.Fatalf("empty InheritEnv child env = %q, want nothing inherited", got)
+	}
 }
