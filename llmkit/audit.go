@@ -87,7 +87,7 @@ const (
 	// failed, for example because its client disconnected, while the provider
 	// was still answering.
 	ErrorClassStreamConsumer ErrorClass = "stream_consumer_error"
-	ErrorClassUnknown      ErrorClass = "unknown"
+	ErrorClassUnknown        ErrorClass = "unknown"
 )
 
 // TaskOutcome is the allowlisted audit record for the result of an LLM task.
