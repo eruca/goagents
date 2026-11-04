@@ -47,6 +47,10 @@ type RunState struct {
 	summary        ExecutionSummary
 	startedAt      time.Time
 	usedToolLookup map[string]struct{}
+	// completedStages records the once-per-run stages that already ran. It is
+	// private so neither RunRequest.Metadata nor a tool can mark a stage, such
+	// as the input guard, done without running it.
+	completedStages map[string]struct{}
 	// onDelta receives streamed model output; nil means the run does not stream.
 	onDelta func(ModelDelta)
 }
@@ -58,6 +62,18 @@ func (s *RunState) Emit(ctx context.Context, event Event) {
 	event.RunID = s.RunID
 	event.Iteration = s.Iteration
 	_ = s.EventSink.Emit(ctx, event)
+}
+
+func (s *RunState) stageDone(key string) bool {
+	_, done := s.completedStages[key]
+	return done
+}
+
+func (s *RunState) markStageDone(key string) {
+	if s.completedStages == nil {
+		s.completedStages = make(map[string]struct{})
+	}
+	s.completedStages[key] = struct{}{}
 }
 
 func (s *RunState) recordLLMCall() {

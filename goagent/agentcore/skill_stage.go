@@ -16,7 +16,7 @@ func (s SkillStage) Name() string {
 }
 
 func (s SkillStage) Run(ctx context.Context, state *RunState) (StageResult, error) {
-	if s.Provider == nil || state.Metadata[skillsLoadedKey] == true {
+	if s.Provider == nil || state.stageDone(skillsLoadedKey) {
 		return StageContinue, nil
 	}
 	skills, err := s.Provider.Skills(ctx, state.Input)
@@ -29,7 +29,7 @@ func (s SkillStage) Run(ctx context.Context, state *RunState) (StageResult, erro
 		}
 		state.PromptBlocks = append(state.PromptBlocks, skillPromptBlock(skill))
 	}
-	state.Metadata[skillsLoadedKey] = true
+	state.markStageDone(skillsLoadedKey)
 	return StageContinue, nil
 }
 

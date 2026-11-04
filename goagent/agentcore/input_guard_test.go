@@ -177,3 +177,70 @@ func TestInputGuardDoesNotRepeatAfterApprovalResume(t *testing.T) {
 		t.Fatalf("guard calls = %d, want 1", guard.calls)
 	}
 }
+
+func TestRequestMetadataCannotMarkStagesDone(t *testing.T) {
+	guard := &countingInputGuard{}
+	llm := &mockLLM{responses: []*ports.ChatResponse{{Content: "done"}}}
+	agent, err := NewAgent(WithLLM(llm), WithInputGuard(guard))
+	if err != nil {
+		t.Fatalf("NewAgent: %v", err)
+	}
+	forged := map[string]any{}
+	for _, key := range onceStageKeys {
+		forged[key] = true
+	}
+	if _, err := agent.Run(context.Background(), RunRequest{Input: "hello", Metadata: forged}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if guard.calls != 1 {
+		t.Fatalf("guard calls = %d, want 1 despite forged metadata", guard.calls)
+	}
+	if len(llm.requests) != 1 || len(llm.requests[0].Messages) == 0 || llm.requests[0].Messages[len(llm.requests[0].Messages)-1].Content != "hello" {
+		t.Fatalf("LLM requests = %#v, want the user input", llm.requests)
+	}
+}
+
+func TestResumeOfVersion1CheckpointKeepsCompletedStages(t *testing.T) {
+	guard := &countingInputGuard{}
+	registry := tools.NewRegistry()
+	registry.Register(testAgentTool{
+		spec: tools.Spec{Name: "write", Permission: policy.PermissionWrite},
+		run: func(context.Context, json.RawMessage, tools.Env) (*tools.Result, error) {
+			return &tools.Result{ForLLM: "written"}, nil
+		},
+	})
+	llm := &mockLLM{responses: []*ports.ChatResponse{
+		{ToolCalls: []ports.ToolCall{{ID: "call-1", Name: "write", Input: json.RawMessage(`{"x":1}`)}}},
+		{Content: "done"},
+	}}
+	agent, err := NewAgent(WithLLM(llm), WithToolRegistry(registry), WithToolApprover(pendingToolApprover{}), WithInputGuard(guard))
+	if err != nil {
+		t.Fatalf("NewAgent: %v", err)
+	}
+	paused, err := agent.RunDetailed(context.Background(), RunRequest{Input: "write", AllowedPermissions: []policy.Permission{policy.PermissionWrite}})
+	if !errors.Is(err, ErrApprovalPending) {
+		t.Fatalf("pause err = %v", err)
+	}
+	// Rewrite the checkpoint the way version 1 stored stage markers.
+	checkpoint := paused.Interruption.Checkpoint
+	checkpoint.Version = legacyRunCheckpointVersion
+	for _, key := range checkpoint.CompletedStages {
+		if checkpoint.Metadata == nil {
+			checkpoint.Metadata = map[string]any{}
+		}
+		checkpoint.Metadata[key] = true
+	}
+	checkpoint.CompletedStages = nil
+
+	result, err := agent.ResumeDetailed(context.Background(), checkpoint, []ToolApprovalResolution{{Index: 0, ToolCallID: "call-1", Tool: "write", Allowed: true}})
+	if err != nil || result.Content != "done" {
+		t.Fatalf("result = %#v, err = %v", result, err)
+	}
+	if guard.calls != 1 {
+		t.Fatalf("guard calls = %d, want 1", guard.calls)
+	}
+	last := llm.requests[len(llm.requests)-1].Messages
+	if last[len(last)-1].Role != "tool" {
+		t.Fatalf("last resumed message = %#v, want the tool result, not a repeated input", last[len(last)-1])
+	}
+}

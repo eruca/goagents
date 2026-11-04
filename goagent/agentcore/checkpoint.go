@@ -12,7 +12,24 @@ import (
 	"github.com/eruca/goagents/goagent/tools"
 )
 
-const runCheckpointVersion = 1
+// Version 2 moved the once-per-run stage markers from Metadata to
+// CompletedStages; version 1 checkpoints are still restored.
+const (
+	runCheckpointVersion       = 2
+	legacyRunCheckpointVersion = 1
+)
+
+// onceStageKeys are the stages that run once per run and are skipped after
+// resume. Version 1 checkpoints kept them as true values in Metadata.
+var onceStageKeys = []string{
+	inputGuardValidatedKey,
+	memoryLoadedKey,
+	systemPromptLoadedKey,
+	skillsLoadedKey,
+	toolProviderLoadedKey,
+	outputFormatLoadedKey,
+	contextStageInputAdded,
+}
 
 var (
 	// ErrApprovalPending reports that a host must resolve pending tool calls before execution can continue.
@@ -36,6 +53,11 @@ type CheckpointRequest struct {
 
 // RunCheckpoint is a versioned, JSON-serializable snapshot of a run paused before tool execution.
 // It includes raw user content and tool inputs, so hosts must store it as sensitive data.
+//
+// Resume trusts the checkpoint: its permissions, completed stages, and pending
+// call inputs decide what runs next. Hosts must keep it where callers cannot
+// change it, such as server-side storage sealed with authenticated encryption
+// (runkit/goagentapproval does this), and never accept one back from a client.
 type RunCheckpoint struct {
 	Version            int                 `json:"version"`
 	RunID              string              `json:"run_id"`
@@ -51,6 +73,7 @@ type RunCheckpoint struct {
 	AllowedPermissions []policy.Permission `json:"allowed_permissions"`
 	PendingCalls       []ports.ToolCall    `json:"pending_calls"`
 	PromptBlocks       []prompt.Block      `json:"prompt_blocks"`
+	CompletedStages    []string            `json:"completed_stages,omitempty"`
 }
 
 // ToolApprovalResolution is a host decision for one checkpointed pending call.
@@ -69,7 +92,7 @@ type ToolApprovalInterruption struct {
 }
 
 func (c RunCheckpoint) validate() (RunID, error) {
-	if c.Version != runCheckpointVersion {
+	if c.Version != runCheckpointVersion && c.Version != legacyRunCheckpointVersion {
 		return RunID{}, fmt.Errorf("%w: version %d", ErrInvalidRunCheckpoint, c.Version)
 	}
 	runID, err := RunIDFromString(c.RunID)
@@ -109,6 +132,11 @@ func checkpointFromState(state *RunState) (RunCheckpoint, error) {
 		AllowedPermissions: append([]policy.Permission(nil), state.AllowedPermissions...),
 		PendingCalls:       checkpointToolCalls(state.PendingCalls),
 		PromptBlocks:       append([]prompt.Block(nil), state.PromptBlocks...),
+	}
+	for _, key := range onceStageKeys {
+		if state.stageDone(key) {
+			checkpoint.CompletedStages = append(checkpoint.CompletedStages, key)
+		}
 	}
 	if _, err := checkpoint.validate(); err != nil {
 		return RunCheckpoint{}, err
@@ -202,6 +230,17 @@ func (c RunCheckpoint) restore(eventSink EventSink) (*RunState, error) {
 	state.usedToolLookup = make(map[string]struct{}, len(state.summary.UsedTools))
 	for _, name := range state.summary.UsedTools {
 		state.usedToolLookup[name] = struct{}{}
+	}
+	for _, key := range c.CompletedStages {
+		state.markStageDone(key)
+	}
+	if c.Version == legacyRunCheckpointVersion {
+		for _, key := range onceStageKeys {
+			if state.Metadata[key] == true {
+				state.markStageDone(key)
+			}
+			delete(state.Metadata, key)
+		}
 	}
 	return state, nil
 }

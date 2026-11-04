@@ -271,7 +271,7 @@ if err != nil {
 }
 ```
 
-`RunCheckpoint` contains raw user content and tool inputs. It is not an event payload and must not be sent to ordinary logs, telemetry, or untrusted clients. A resumed batch is atomic: duplicate, missing, swapped, or mismatched resolutions fail before any tool or new LLM call; if any resolution denies, no call in that batch executes. Policy is evaluated again immediately before resumed execution, and `ExecutionSummary.Duration` remains wall-clock time, including an approval wait.
+`RunCheckpoint` contains raw user content and tool inputs. It is not an event payload and must not be sent to ordinary logs, telemetry, or untrusted clients. Resume also trusts it: its allowed permissions, completed stages, and pending call inputs decide what runs next, so a checkpoint accepted back from a client could grant itself permissions or change an approved call. Keep it in server-side storage that callers cannot modify, sealed with authenticated encryption as `runkit/goagentapproval` does. Checkpoints are version 2; version 1 checkpoints still resume. A resumed batch is atomic: duplicate, missing, swapped, or mismatched resolutions fail before any tool or new LLM call; if any resolution denies, no call in that batch executes. Policy is evaluated again immediately before resumed execution, and `ExecutionSummary.Duration` remains wall-clock time, including an approval wait.
 
 Request-scoped tools are recreated through `ToolProvider` before a resume. Providers must therefore return the same valid tools for the checkpoint request while that checkpoint remains resumable.
 
