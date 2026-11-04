@@ -51,6 +51,11 @@ func Project(msg contextkit.Message, cfg Config) contextkit.Message {
 }
 
 func cloneMessage(msg contextkit.Message) contextkit.Message {
+	if len(msg.Images) > 0 {
+		msg.Images = append([]contextkit.Image(nil), msg.Images...)
+	} else {
+		msg.Images = nil
+	}
 	if len(msg.Metadata) == 0 {
 		msg.Metadata = nil
 		return msg

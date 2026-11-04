@@ -3,6 +3,7 @@ package window
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -244,5 +245,219 @@ func TestConfigCanUseProfileFromEnvironment(t *testing.T) {
 	}
 	if got.Profile != contextkit.ProfileDeep {
 		t.Fatalf("unexpected profile: %s", got.Profile)
+	}
+}
+
+// words prices a message as one token per word and ten per image.
+func words(msg contextkit.Message) int {
+	return len(strings.Fields(msg.Content)) + 10*len(msg.Images)
+}
+
+func TestEachBudgetLimitMustHold(t *testing.T) {
+	t.Parallel()
+
+	// Words: u1+a1 = 6, u2+a2 = 4, u3 = 1. Characters: u1+a1 = 26, u2+a2 = 7, u3 = 1.
+	messages := []contextkit.Message{
+		{ID: "u1", Role: contextkit.RoleUser, Content: "a b c d e"},
+		{ID: "a1", Role: contextkit.RoleAssistant, Content: "longanswerhere"},
+		{ID: "u2", Role: contextkit.RoleUser, Content: "g h"},
+		{ID: "a2", Role: contextkit.RoleAssistant, Content: "i j"},
+		{ID: "u3", Role: contextkit.RoleUser, Content: "k"},
+	}
+	cases := []struct {
+		name   string
+		budget contextkit.Budget
+		want   string
+	}{
+		{"tokens bind", contextkit.Budget{MaxChars: 1000, MaxTokens: 6}, "u2,a2,u3"},
+		{"characters bind", contextkit.Budget{MaxChars: 8, MaxTokens: 1000}, "u2,a2,u3"},
+		{"tokens alone", contextkit.Budget{MaxTokens: 11}, "u1,a1,u2,a2,u3"},
+		{"tokens alone, one short", contextkit.Budget{MaxTokens: 10}, "u2,a2,u3"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := New(Config{Budget: tc.budget, Profile: contextkit.ProfileStandard, CountTokens: words})
+			got, err := c.Compress(context.Background(), contextkit.Request{Messages: messages})
+			if err != nil {
+				t.Fatalf("Compress() error = %v", err)
+			}
+			kept := got.Messages
+			if got.Dropped > 0 {
+				kept = kept[1:]
+			}
+			if ids(kept) != tc.want || got.OverBudget {
+				t.Fatalf("kept = %s (over budget %v), want %s", ids(kept), got.OverBudget, tc.want)
+			}
+		})
+	}
+}
+
+func TestTokenBudgetNeedsCounter(t *testing.T) {
+	t.Parallel()
+
+	messages := []contextkit.Message{{ID: "u1", Role: contextkit.RoleUser, Content: "hello"}}
+	if _, err := New(Config{Budget: contextkit.Budget{MaxTokens: 10}}).Compress(context.Background(), contextkit.Request{Messages: messages}); !errors.Is(err, ErrTokenCounterRequired) {
+		t.Fatalf("config token budget error = %v, want ErrTokenCounterRequired", err)
+	}
+	c := New(Config{Budget: contextkit.Budget{MaxChars: 100}})
+	if _, err := c.Compress(context.Background(), contextkit.Request{Messages: messages, Budget: contextkit.Budget{MaxTokens: 10}}); !errors.Is(err, ErrTokenCounterRequired) {
+		t.Fatalf("request token budget error = %v, want ErrTokenCounterRequired", err)
+	}
+}
+
+func TestCharacterBudgetNeverCountsTokens(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	c := New(Config{
+		Budget:      contextkit.Budget{MaxChars: 5},
+		Profile:     contextkit.ProfileStandard,
+		CountTokens: func(contextkit.Message) int { calls++; return 0 },
+	})
+	if _, err := c.Compress(context.Background(), contextkit.Request{Messages: []contextkit.Message{
+		{ID: "u1", Role: contextkit.RoleUser, Content: "first question"},
+		{ID: "u2", Role: contextkit.RoleUser, Content: "next"},
+	}}); err != nil {
+		t.Fatalf("Compress() error = %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("CountTokens calls = %d, want 0 without a token limit", calls)
+	}
+}
+
+func TestRequestBudgetReplacesConfigWhole(t *testing.T) {
+	t.Parallel()
+
+	// The request sets only a token limit, so the config's character limit,
+	// which would drop u1, no longer applies.
+	c := New(Config{Budget: contextkit.Budget{MaxChars: 5}, Profile: contextkit.ProfileStandard, CountTokens: words})
+	got, err := c.Compress(context.Background(), contextkit.Request{
+		Budget: contextkit.Budget{MaxTokens: 100},
+		Messages: []contextkit.Message{
+			{ID: "u1", Role: contextkit.RoleUser, Content: "first question"},
+			{ID: "u2", Role: contextkit.RoleUser, Content: "next"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Compress() error = %v", err)
+	}
+	if got.Dropped != 0 {
+		t.Fatalf("dropped = %d, want 0 under the request budget", got.Dropped)
+	}
+}
+
+func TestTokenBudgetReportsOversizedNewestTurn(t *testing.T) {
+	t.Parallel()
+
+	c := New(Config{Budget: contextkit.Budget{MaxTokens: 15}, Profile: contextkit.ProfileStandard, CountTokens: words})
+	got, err := c.Compress(context.Background(), contextkit.Request{Messages: []contextkit.Message{
+		{ID: "u1", Role: contextkit.RoleUser, Content: "old"},
+		{ID: "u2", Role: contextkit.RoleUser, Content: "look", Images: []contextkit.Image{{ID: "img-1"}, {ID: "img-2"}}},
+	}})
+	if err != nil {
+		t.Fatalf("Compress() error = %v", err)
+	}
+	if !got.OverBudget || got.Dropped != 1 || !strings.HasSuffix(ids(got.Messages), ",u2") {
+		t.Fatalf("result = %#v, want image turn kept over budget", got)
+	}
+}
+
+func TestCountTokensSeesProjectedToolMessages(t *testing.T) {
+	t.Parallel()
+
+	var tool string
+	c := New(Config{
+		Budget:       contextkit.Budget{MaxTokens: 1000},
+		Profile:      contextkit.ProfileStandard,
+		MaxToolChars: 10,
+		CountTokens: func(msg contextkit.Message) int {
+			if msg.Role == contextkit.RoleTool {
+				tool = msg.Content
+			}
+			return words(msg)
+		},
+	})
+	if _, err := c.Compress(context.Background(), contextkit.Request{Messages: []contextkit.Message{
+		{ID: "u1", Role: contextkit.RoleUser, Content: "look it up"},
+		{ID: "a1", Role: contextkit.RoleAssistant, Content: "calling"},
+		{ID: "t1", Role: contextkit.RoleTool, ToolName: "search", Content: strings.Repeat("raw ", 100)},
+	}}); err != nil {
+		t.Fatalf("Compress() error = %v", err)
+	}
+	if !strings.HasPrefix(tool, "tool=search\n") || strings.Count(tool, "raw") > 3 {
+		t.Fatalf("counted tool message = %q, want the bounded projection", tool)
+	}
+}
+
+func TestDroppedImagesReachSummarizerAndRestore(t *testing.T) {
+	t.Parallel()
+
+	summarizer := &fakeSummarizer{}
+	c := New(Config{
+		Budget:      contextkit.Budget{MaxTokens: 15},
+		Profile:     contextkit.ProfileDeep,
+		CountTokens: words,
+		Summarizer:  summarizer,
+	})
+	input := []contextkit.Message{
+		{ID: "u1", Role: contextkit.RoleUser, Content: "what is this", Images: []contextkit.Image{{ID: "img-1"}, {ID: "img-2"}}},
+		{ID: "a1", Role: contextkit.RoleAssistant, Content: "a rash"},
+		{ID: "u2", Role: contextkit.RoleUser, Content: "and now"},
+	}
+	got, err := c.Compress(context.Background(), contextkit.Request{Messages: input})
+	if err != nil {
+		t.Fatalf("Compress() error = %v", err)
+	}
+	if len(summarizer.requests) != 1 || ids(summarizer.requests[0].Collapsed) != "u1,a1" {
+		t.Fatalf("summarize requests = %#v, want u1,a1 collapsed", summarizer.requests)
+	}
+	if images := summarizer.requests[0].Collapsed[0].Images; len(images) != 2 || images[0].ID != "img-1" || images[1].ID != "img-2" {
+		t.Fatalf("collapsed images = %#v, want img-1, img-2", images)
+	}
+
+	// Copies, not aliases: a host editing what it was handed changes nothing else.
+	summarizer.requests[0].Collapsed[0].Images[0].ID = "edited"
+	if input[0].Images[0].ID != "img-1" || got.Collapses[0].Originals[0].Images[0].ID != "img-1" {
+		t.Fatalf("images aliased: input %#v, collapse %#v", input[0].Images, got.Collapses[0].Originals[0].Images)
+	}
+
+	restored := contextkit.RestoreProjection(got.Messages, got.Collapses)
+	if ids(restored) != "u1,a1,u2" || len(restored[0].Images) != 2 {
+		t.Fatalf("restored = %#v, want full history with images", restored)
+	}
+}
+
+func TestPlaceholderCarriesDroppedImageCount(t *testing.T) {
+	t.Parallel()
+
+	c := New(Config{Budget: contextkit.Budget{MaxTokens: 12}, Profile: contextkit.ProfileStandard, CountTokens: words})
+	first, err := c.Compress(context.Background(), contextkit.Request{Messages: []contextkit.Message{
+		{ID: "u1", Role: contextkit.RoleUser, Content: "look", Images: []contextkit.Image{{ID: "img-1"}, {ID: "img-2"}}},
+		{ID: "u2", Role: contextkit.RoleUser, Content: "next"},
+	}})
+	if err != nil {
+		t.Fatalf("first Compress() error = %v", err)
+	}
+	if !strings.Contains(first.Summary, "1 messages omitted (2 images)") {
+		t.Fatalf("first summary = %q, want the image count", first.Summary)
+	}
+
+	var stored []contextkit.Message
+	encoded, _ := json.Marshal(first.Messages)
+	if err := json.Unmarshal(encoded, &stored); err != nil {
+		t.Fatal(err)
+	}
+	stored = append(stored,
+		// 12 tokens: with u4 it overflows, so u2 and u3 both go.
+		contextkit.Message{ID: "u3", Role: contextkit.RoleUser, Content: "look again", Images: []contextkit.Image{{ID: "img-3"}}},
+		contextkit.Message{ID: "u4", Role: contextkit.RoleUser, Content: "last"},
+	)
+	second, err := c.Compress(context.Background(), contextkit.Request{Messages: stored})
+	if err != nil {
+		t.Fatalf("second Compress() error = %v", err)
+	}
+	if !strings.Contains(second.Summary, "3 messages omitted (3 images)") {
+		t.Fatalf("second summary = %q, want counts carried across the JSON round trip", second.Summary)
 	}
 }
