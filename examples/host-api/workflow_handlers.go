@@ -104,12 +104,58 @@ type workflowEventResponse struct {
 }
 
 type agentRunResponse struct {
-	RunID      string                 `json:"run_id"`
-	WorkflowID string                 `json:"workflow_id,omitempty"`
-	TaskID     string                 `json:"task_id,omitempty"`
-	Status     string                 `json:"status"`
-	Summary    runkit.TerminalSummary `json:"summary"`
-	Events     []runkit.RunEvent      `json:"events,omitempty"`
+	RunID      string                  `json:"run_id"`
+	WorkflowID string                  `json:"workflow_id,omitempty"`
+	TaskID     string                  `json:"task_id,omitempty"`
+	Status     string                  `json:"status"`
+	Summary    agentRunSummaryResponse `json:"summary"`
+	Events     []agentRunEventResponse `json:"events,omitempty"`
+}
+
+// agentRunSummaryResponse and agentRunEventResponse give the runkit records
+// the API's snake_case field names; the runkit types have no JSON tags.
+type agentRunSummaryResponse struct {
+	Status       runkit.Status `json:"status,omitempty"`
+	ContentRef   string        `json:"content_ref,omitempty"`
+	AbortReason  string        `json:"abort_reason,omitempty"`
+	InputTokens  int           `json:"input_tokens"`
+	OutputTokens int           `json:"output_tokens"`
+	LLMCalls     int           `json:"llm_calls"`
+	ToolCalls    int           `json:"tool_calls"`
+	UsedTools    []string      `json:"used_tools,omitempty"`
+}
+
+type agentRunEventResponse struct {
+	Sequence   int            `json:"sequence"`
+	Type       string         `json:"type"`
+	Stage      string         `json:"stage,omitempty"`
+	Iteration  int            `json:"iteration"`
+	Message    string         `json:"message,omitempty"`
+	Metadata   map[string]any `json:"metadata,omitempty"`
+	RecordedAt time.Time      `json:"recorded_at"`
+}
+
+func agentRunToResponse(record runkit.RunRecord, events []runkit.RunEvent) agentRunResponse {
+	summary := record.Summary
+	response := agentRunResponse{
+		RunID:      record.RunID,
+		WorkflowID: record.WorkflowID,
+		TaskID:     record.TaskID,
+		Status:     string(record.Status),
+		Summary: agentRunSummaryResponse{
+			Status: summary.Status, ContentRef: summary.ContentRef, AbortReason: summary.AbortReason,
+			InputTokens: summary.InputTokens, OutputTokens: summary.OutputTokens,
+			LLMCalls: summary.LLMCalls, ToolCalls: summary.ToolCalls, UsedTools: summary.UsedTools,
+		},
+		Events: make([]agentRunEventResponse, 0, len(events)),
+	}
+	for _, event := range events {
+		response.Events = append(response.Events, agentRunEventResponse{
+			Sequence: event.Sequence, Type: event.Type, Stage: event.Stage, Iteration: event.Iteration,
+			Message: event.Message, Metadata: event.Metadata, RecordedAt: event.RecordedAt,
+		})
+	}
+	return response
 }
 
 func (s *Server) handleListSkills(w http.ResponseWriter, _ *http.Request) {
@@ -505,14 +551,7 @@ func (s *Server) handleGetAgentRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "run_error", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, agentRunResponse{
-		RunID:      record.RunID,
-		WorkflowID: record.WorkflowID,
-		TaskID:     record.TaskID,
-		Status:     string(record.Status),
-		Summary:    record.Summary,
-		Events:     events,
-	})
+	writeJSON(w, http.StatusOK, agentRunToResponse(record, events))
 }
 
 func workflowToResponse(run workflowkit.WorkflowRun, runMode RunMode) workflowResponse {

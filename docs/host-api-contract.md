@@ -549,14 +549,22 @@ Response:
   "task_id": "wf-review-1",
   "status": "succeeded",
   "summary": {
-    "Status": "succeeded",
-    "ContentRef": "artifact:wf-review-1:agent-output",
-    "InputTokens": 11,
-    "OutputTokens": 13,
-    "LLMCalls": 1,
-    "ToolCalls": 0
+    "status": "succeeded",
+    "content_ref": "artifact:wf-review-1:agent-output",
+    "input_tokens": 11,
+    "output_tokens": 13,
+    "llm_calls": 1,
+    "tool_calls": 0
   },
-  "events": []
+  "events": [
+    {
+      "sequence": 1,
+      "type": "stage.started",
+      "stage": "think",
+      "iteration": 0,
+      "recorded_at": "2026-05-06T01:00:00Z"
+    }
+  ]
 }
 ```
 

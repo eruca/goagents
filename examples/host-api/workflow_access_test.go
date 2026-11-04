@@ -137,3 +137,26 @@ func containsWorkflowID(t *testing.T, response *httptest.ResponseRecorder, id st
 	}
 	return false
 }
+
+func TestAgentRunResponseUsesSnakeCaseFields(t *testing.T) {
+	server, err := NewServer(Config{LLMKitHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(func() { _ = server.Close(context.Background()) })
+	created := doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]any{"id": "wf-agent-run-json", "input": "review"})
+	response := workflowRequestForTest(t, server.Handler(), http.MethodGet, "/agent-runs/"+created.AgentRunID, nil)
+	var raw struct {
+		Summary map[string]any   `json:"summary"`
+		Events  []map[string]any `json:"events"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode: %v; body=%s", err, response.Body.String())
+	}
+	if _, ok := raw.Summary["llm_calls"]; !ok {
+		t.Fatalf("summary = %v, want snake_case fields", raw.Summary)
+	}
+	if len(raw.Events) == 0 || raw.Events[0]["type"] == nil || raw.Events[0]["recorded_at"] == nil {
+		t.Fatalf("events = %v, want snake_case fields", raw.Events)
+	}
+}
