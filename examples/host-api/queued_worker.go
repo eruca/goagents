@@ -261,12 +261,14 @@ func (s *Server) runOneQueuedWorkflow(intakeCtx context.Context, executionCtx co
 		return false, false, nil
 	}
 
-	stopHeartbeat := s.startQueuedLeaseHeartbeat(executionCtx, claimed.ID)
+	runCtx, stopRun := context.WithCancelCause(executionCtx)
+	defer stopRun(nil)
+	stopHeartbeat := s.startQueuedLeaseHeartbeat(executionCtx, claimed.ID, stopRun)
 	defer func() {
 		stopHeartbeat()
 		s.releaseQueuedWorkflowLease(claimed.ID)
 	}()
-	operationCtx := withPendingShutdownTracker(executionCtx, pendingShutdown)
+	operationCtx := withPendingShutdownTracker(runCtx, pendingShutdown)
 	_, err = s.executor.Run(operationCtx, claimed)
 	if err != nil {
 		s.worker.recordWorkflowError(claimed.ID, err)
@@ -308,7 +310,11 @@ func (s *Server) releaseQueuedWorkflowLease(workflowID string) {
 	}
 }
 
-func (s *Server) startQueuedLeaseHeartbeat(ctx context.Context, workflowID string) func() {
+// startQueuedLeaseHeartbeat extends the workflow's lease until stopped. If the
+// lease is gone, because another host reclaimed or failed the workflow, it
+// calls leaseLost: the run's writes would be rejected anyway, and it must not
+// keep calling models or tools for a workflow it no longer owns.
+func (s *Server) startQueuedLeaseHeartbeat(ctx context.Context, workflowID string, leaseLost context.CancelCauseFunc) func() {
 	heartbeatCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
@@ -326,6 +332,10 @@ func (s *Server) startQueuedLeaseHeartbeat(ctx context.Context, workflowID strin
 						return
 					}
 					s.worker.recordHeartbeatError(workflowID, err)
+					if errors.Is(err, workflowkit.ErrWorkflowLeaseNotOwned) || errors.Is(err, workflowkit.ErrRunNotFound) {
+						leaseLost(err)
+						return
+					}
 					continue
 				}
 				s.worker.recordLeaseExtended(workflowID)

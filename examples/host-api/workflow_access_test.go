@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/eruca/goagents/workflowkit"
 )
@@ -158,5 +161,80 @@ func TestAgentRunResponseUsesSnakeCaseFields(t *testing.T) {
 	}
 	if len(raw.Events) == 0 || raw.Events[0]["type"] == nil || raw.Events[0]["recorded_at"] == nil {
 		t.Fatalf("events = %v, want snake_case fields", raw.Events)
+	}
+}
+
+// waitForCancelStep blocks until its context ends and reports that it did.
+type waitForCancelStep struct{ cancelled chan struct{} }
+
+func (waitForCancelStep) Name() string { return "wait_for_cancel" }
+
+func (s waitForCancelStep) Run(ctx context.Context, _ workflowkit.WorkflowRun) (workflowkit.StepResult, error) {
+	select {
+	case <-ctx.Done():
+		close(s.cancelled)
+		return workflowkit.StepResult{}, ctx.Err()
+	case <-time.After(10 * time.Second):
+		return workflowkit.StepResult{}, errors.New("step was never cancelled")
+	}
+}
+
+func TestQueuedWorkerStopsRunWhenLeaseIsLost(t *testing.T) {
+	t.Setenv("HOST_API_QUEUED_LEASE_DURATION", "200ms")
+	server, err := NewServer(Config{RuntimeHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	step := waitForCancelStep{cancelled: make(chan struct{})}
+	server.executor = workflowkit.NewExecutor(server.workflows, []workflowkit.Step{step})
+	ctx, cancel := context.WithCancel(context.Background())
+	stopWorkerOnCleanup(t, server, cancel)
+	server.StartQueuedWorker(ctx)
+	doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]string{
+		"id": "wf-lease-lost", "input": "review", "run_mode": "queued",
+	})
+	waitForWorkflowLeasePresent(t, server.workflows, "wf-lease-lost")
+	// Another host takes the workflow over.
+	if _, err := server.workflows.Update(t.Context(), "wf-lease-lost", func(run workflowkit.WorkflowRun) (workflowkit.WorkflowRun, error) {
+		run.LeaseOwner = "host-api:other"
+		run.LeaseUntil = time.Now().Add(time.Hour)
+		return run, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-step.cancelled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the run kept going after its lease was lost")
+	}
+}
+
+func TestOversizedRequestBodyIsRejected(t *testing.T) {
+	server, err := NewServer(Config{LLMKitHome: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(func() { _ = server.Close(context.Background()) })
+	response := workflowRequestForTest(t, server.Handler(), http.MethodPost, "/workflows", map[string]any{
+		"id": "wf-huge", "input": strings.Repeat("x", maxRequestBodyBytes+1),
+	})
+	if response.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, body=%.200s; want 413", response.Code, response.Body.String())
+	}
+	if _, err := server.workflows.Get(t.Context(), "wf-huge"); err == nil {
+		t.Fatal("oversized workflow was created")
+	}
+}
+
+func TestInternalErrorsDoNotExposeDetails(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	writeWorkflowStoreError(recorder, errors.New("open /srv/runtime/workflow.db: disk I/O error"))
+	if recorder.Code != http.StatusInternalServerError || strings.Contains(recorder.Body.String(), "/srv/runtime") {
+		t.Fatalf("response = %d %s; want a 500 without the internal error", recorder.Code, recorder.Body.String())
+	}
+	recorder = httptest.NewRecorder()
+	writeWorkflowStoreError(recorder, workflowkit.InvalidTransitionError{From: workflowkit.StatusSucceeded, To: workflowkit.StatusRunning, Op: "approve"})
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("invalid transition status = %d, want 409", recorder.Code)
 	}
 }

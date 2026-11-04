@@ -103,7 +103,7 @@ func (s *Server) handleGetWorkflowLLMRoutes(w http.ResponseWriter, r *http.Reque
 	}
 	records, err := llmkit.ReadRouteAudits(s.llmHome, llmkit.AuditFilter{TaskID: id})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "llm_audit_error", err.Error())
+		writeInternalError(w, "llm_audit_error", err)
 		return
 	}
 	routes := make([]llmRouteResponse, 0, len(records))
@@ -119,7 +119,7 @@ func (s *Server) handleGetWorkflowLLMRoutes(w http.ResponseWriter, r *http.Reque
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	stats, err := llmkit.RefreshModelStats(s.llmHome)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "llm_audit_error", err.Error())
+		writeInternalError(w, "llm_audit_error", err)
 		return
 	}
 	models := make([]modelResponse, 0, len(s.models))

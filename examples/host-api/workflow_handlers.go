@@ -247,7 +247,7 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeWorkflowExists(w)
 		return
 	} else if !errors.Is(err, workflowkit.ErrRunNotFound) {
-		writeError(w, http.StatusInternalServerError, "workflow_error", err.Error())
+		writeInternalError(w, "workflow_error", err)
 		return
 	}
 	operationCtx := r.Context()
@@ -266,7 +266,7 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 	inputRef := "artifact:" + req.ID + ":input"
 	if err := putTextArtifact(operationCtx, s.artifacts, inputRef, req.Input); err != nil {
-		writeError(w, http.StatusInternalServerError, "artifact_error", err.Error())
+		writeInternalError(w, "artifact_error", err)
 		return
 	}
 	metadata := map[string]any{
@@ -295,7 +295,7 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 				writeWorkflowExists(w)
 				return
 			}
-			writeError(w, http.StatusInternalServerError, "workflow_error", err.Error())
+			writeInternalError(w, "workflow_error", err)
 			return
 		}
 		s.signalQueuedWorker()
@@ -308,7 +308,7 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "workflow_error", err.Error())
+		writeInternalError(w, "workflow_error", err)
 		return
 	}
 	if identity, ok := pendingShutdown.Snapshot(); ok {
@@ -392,7 +392,7 @@ func (s *Server) handleListWorkflows(w http.ResponseWriter, r *http.Request) {
 	}
 	runs, err := s.queries.ListWorkflows(r.Context(), query)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "workflow_error", err.Error())
+		writeInternalError(w, "workflow_error", err)
 		return
 	}
 	workflows := make([]workflowResponse, 0, len(runs))
@@ -515,7 +515,7 @@ func (s *Server) handleApproveWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.recordBusinessOutcome(r.Context(), id); err != nil {
-		writeError(w, http.StatusInternalServerError, "llm_audit_error", err.Error())
+		writeInternalError(w, "llm_audit_error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, workflowToResponse(run, RunModeSync))
@@ -528,7 +528,7 @@ func (s *Server) handleGetAgentRun(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "not_found", "agent run not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "run_error", err.Error())
+		writeInternalError(w, "run_error", err)
 		return
 	}
 	if s.memory != nil {
@@ -548,7 +548,7 @@ func (s *Server) handleGetAgentRun(w http.ResponseWriter, r *http.Request) {
 	}
 	events, err := s.runs.Events(r.Context(), record.RunID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "run_error", err.Error())
+		writeInternalError(w, "run_error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, agentRunToResponse(record, events))

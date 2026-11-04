@@ -129,6 +129,12 @@ Common error codes:
 - `not_found`
 - `workflow_exists` (`409`)
 - `approval_mismatch` (`409`)
+- `workflow_conflict` (`409`): the workflow's state does not allow the
+  operation, for example approving one that is not waiting
+- `request_too_large` (`413`): request bodies are limited to 4 MiB
+
+A `500` response carries only its code and the message `internal server
+error`; the underlying error is written to the host log, never to the client.
 
 ## POST /workflows
 
