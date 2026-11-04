@@ -184,16 +184,31 @@ WHERE checkpoint_id = ? AND tenant_id = ? AND status = 'leased' AND lease_owner 
 		return err
 	}
 	if affected != 1 {
-		return runkit.ErrCheckpointLeaseOwner
+		return leaseCompletionError(ctx, s.db, completion)
 	}
 	return nil
+}
+
+// leaseCompletionError tells a checkpoint missing for the tenant apart from a
+// lease the caller does not hold.
+func leaseCompletionError(ctx context.Context, db *sql.DB, completion runkit.CheckpointLeaseCompletion) error {
+	var exists bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM approval_checkpoints WHERE checkpoint_id = ? AND tenant_id = ?)`,
+		completion.CheckpointID, completion.TenantID).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return runkit.ErrCheckpointNotFound
+	}
+	return runkit.ErrCheckpointLeaseOwner
 }
 
 func (s *Store) ExpireCheckpoints(ctx context.Context, now time.Time) (int, error) {
 	result, err := s.db.ExecContext(ctx, `
 UPDATE approval_checkpoints
 SET status = 'expired', ciphertext = X'', lease_owner = '', lease_until = NULL, updated_at = ?
-WHERE status IN ('pending', 'leased') AND expires_at <= ?`, requestNow(now), requestNow(now))
+WHERE expires_at <= ?
+  AND (status = 'pending' OR (status = 'leased' AND (lease_until IS NULL OR lease_until <= ?)))`, requestNow(now), requestNow(now), requestNow(now))
 	if err != nil {
 		return 0, err
 	}

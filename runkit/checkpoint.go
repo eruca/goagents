@@ -93,6 +93,12 @@ type PendingCheckpointFailureStore interface {
 }
 
 // CheckpointStore owns atomic state transitions for opaque approval checkpoints.
+//
+// Every implementation reports the same errors, which
+// storetest.RunCheckpointStoreConformance checks: a duplicate CreateCheckpoint
+// is ErrCheckpointNotClaimable; a checkpoint that does not exist for the
+// tenant is ErrCheckpointNotFound; completing or failing a lease the caller
+// does not hold is ErrCheckpointLeaseOwner.
 type CheckpointStore interface {
 	CreateCheckpoint(ctx context.Context, checkpoint ApprovalCheckpoint) error
 	GetCheckpoint(ctx context.Context, checkpointID, tenantID string) (ApprovalCheckpoint, error)
@@ -281,7 +287,7 @@ func (s *MemoryCheckpointStore) ExpireCheckpoints(ctx context.Context, now time.
 	defer s.mu.Unlock()
 	expired := 0
 	for id, checkpoint := range s.checkpoints {
-		if (checkpoint.Status == CheckpointPending || checkpoint.Status == CheckpointLeased) && !checkpoint.ExpiresAt.After(now) {
+		if checkpointExpired(checkpoint, now) {
 			checkpoint.Status = CheckpointExpired
 			checkpoint.Ciphertext = nil
 			checkpoint.LeaseOwner = ""
@@ -292,6 +298,25 @@ func (s *MemoryCheckpointStore) ExpireCheckpoints(ctx context.Context, now time.
 		}
 	}
 	return expired, nil
+}
+
+// checkpointExpired reports whether ExpireCheckpoints expires checkpoint. A
+// pending checkpoint expires at ExpiresAt. A leased one also waits for its
+// lease to end: the approved tool may be running, and its holder must still
+// be able to complete or fail the lease. A leased checkpoint whose holder
+// crashed expires once both have passed, and is never handed out again.
+func checkpointExpired(checkpoint ApprovalCheckpoint, now time.Time) bool {
+	if checkpoint.ExpiresAt.After(now) {
+		return false
+	}
+	switch checkpoint.Status {
+	case CheckpointPending:
+		return true
+	case CheckpointLeased:
+		return !checkpoint.LeaseUntil.After(now)
+	default:
+		return false
+	}
 }
 
 func validateCheckpoint(checkpoint ApprovalCheckpoint) error {

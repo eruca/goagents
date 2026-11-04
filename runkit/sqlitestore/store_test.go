@@ -366,3 +366,14 @@ func TestStoreConnectionSettings(t *testing.T) {
 		t.Fatalf("journal_mode/foreign_keys/busy_timeout = %s/%d/%d, want wal/1/5000", journalMode, foreignKeys, busyTimeout)
 	}
 }
+
+func TestCheckpointStoreConformance(t *testing.T) {
+	storetest.RunCheckpointStoreConformance(t, "", func(t *testing.T) runkit.CheckpointStore {
+		store, err := Open(filepath.Join(t.TempDir(), "runkit.db"))
+		if err != nil {
+			t.Fatalf("Open returned error: %v", err)
+		}
+		t.Cleanup(func() { _ = store.Close() })
+		return store
+	})
+}

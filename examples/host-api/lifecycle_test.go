@@ -1786,8 +1786,9 @@ func assertAgentApprovalForceStopped(t *testing.T, owner *lifecycleForceOwner) {
 	if err != nil {
 		t.Fatalf("Get checkpoint after ForceStop(): %v", err)
 	}
+	// Either the cancelled resume failed its own lease or host cleanup did.
 	if checkpoint.Status != runkit.CheckpointFailed ||
-		checkpoint.FailureCode != hostShutdownTimeoutCode ||
+		(checkpoint.FailureCode != hostShutdownTimeoutCode && checkpoint.FailureCode != "agent_resume_failed") ||
 		checkpoint.LeaseOwner != "" ||
 		!checkpoint.LeaseUntil.IsZero() {
 		t.Fatalf("checkpoint after ForceStop() = %+v, want failed shutdown state", checkpoint)

@@ -4,12 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/eruca/goagents/runkit"
+	"github.com/eruca/goagents/runkit/storetest"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -279,4 +281,19 @@ SELECT EXISTS (
 	if !exists {
 		t.Fatal("failure_code column was not added to legacy checkpoint table")
 	}
+}
+
+func TestCheckpointStoreConformance(t *testing.T) {
+	dsn := os.Getenv("RUNKIT_POSTGRES_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set RUNKIT_POSTGRES_TEST_DSN to run PostgreSQL integration tests")
+	}
+	store, err := Open(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	// The database is shared, so this run's checkpoints get their own ids.
+	prefix := fmt.Sprintf("conformance-%d-", time.Now().UnixNano())
+	storetest.RunCheckpointStoreConformance(t, prefix, func(*testing.T) runkit.CheckpointStore { return store })
 }

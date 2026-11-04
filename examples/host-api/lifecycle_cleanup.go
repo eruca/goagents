@@ -167,13 +167,10 @@ func (s *Server) finalizeAgentApprovalShutdownTracked(
 			if checkpoint.LeaseOwner != leaseOwner {
 				return nil
 			}
-		case runkit.CheckpointConsumed:
-			// A consumed checkpoint cannot be replayed. Continue below so an
-			// incompletely persisted resume is made terminal.
-		case runkit.CheckpointFailed:
-			if checkpoint.FailureCode != hostShutdownTimeoutCode {
-				return nil
-			}
+		case runkit.CheckpointConsumed, runkit.CheckpointFailed:
+			// A consumed or failed checkpoint cannot be replayed. The adapter
+			// fails its own lease when shutdown cancels the resume, so continue
+			// below to make an incompletely persisted resume terminal.
 		default:
 			return nil
 		}
