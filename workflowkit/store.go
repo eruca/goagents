@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -223,11 +224,26 @@ func workflowMetadataMatches(run WorkflowRun, equals map[string]string) bool {
 		if !ok {
 			return false
 		}
-		if fmt.Sprint(got) != want {
+		if MetadataValueString(got) != want {
 			return false
 		}
 	}
 	return true
+}
+
+// MetadataValueString is the string WorkflowQuery.MetadataEquals compares a
+// metadata value against. Numbers format the same whether a store kept the
+// original int or decoded JSON into float64, so 1234567 matches "1234567" in
+// every store rather than "1.234567e+06" in some.
+func MetadataValueString(value any) string {
+	switch v := value.(type) {
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case float32:
+		return strconv.FormatFloat(float64(v), 'f', -1, 32)
+	default:
+		return fmt.Sprint(value)
+	}
 }
 
 func (s *MemoryStore) ClaimRunnable(ctx context.Context, workerID string, lease time.Duration) (WorkflowRun, error) {

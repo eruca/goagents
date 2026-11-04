@@ -330,7 +330,7 @@ func workflowMetadataMatches(run workflowkit.WorkflowRun, equals map[string]stri
 		if !ok {
 			return false
 		}
-		if fmt.Sprint(got) != want {
+		if workflowkit.MetadataValueString(got) != want {
 			return false
 		}
 	}

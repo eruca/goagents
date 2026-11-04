@@ -147,7 +147,10 @@ func (e *Executor) Approve(ctx context.Context, id string, approval Approval) (W
 }
 
 // resumeWaiting checks and leaves waiting_approval in one store update, so
-// concurrent approvals cannot both run the remaining steps.
+// concurrent approvals cannot both run the remaining steps. The resumed run
+// executes in this call, not under the queue lease that paused it: that lease
+// belongs to a worker that may be gone, and keeping it would let
+// FailExpiredRunning fail the run in the middle of a step.
 func (e *Executor) resumeWaiting(ctx context.Context, id string, op string, apply func(*WorkflowRun) error) (WorkflowRun, error) {
 	if e.store == nil {
 		return WorkflowRun{}, ErrRunNotFound
@@ -162,6 +165,8 @@ func (e *Executor) resumeWaiting(ctx context.Context, id string, op string, appl
 			return current, err
 		}
 		current.Status = StatusRunning
+		current.LeaseOwner = ""
+		current.LeaseUntil = time.Time{}
 		return current, nil
 	})
 	if err != nil {

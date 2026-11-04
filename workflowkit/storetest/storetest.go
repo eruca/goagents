@@ -406,6 +406,17 @@ func RunWorkflowQueryStoreConformance(t *testing.T, newStore NewStore) {
 	t.Helper()
 	RunStoreConformance(t, newStore)
 
+	t.Run("list workflows matches numeric metadata as written", func(t *testing.T) {
+		store := workflowQueryStore(t, newStore)
+		if err := store.Save(context.Background(), workflowkit.WorkflowRun{ID: "wf-number", Status: workflowkit.StatusPending, Metadata: map[string]any{"tenant": 1234567}}); err != nil {
+			t.Fatalf("Save returned error: %v", err)
+		}
+		runs, err := store.ListWorkflows(context.Background(), workflowkit.WorkflowQuery{MetadataEquals: map[string]string{"tenant": "1234567"}})
+		if err != nil || len(runs) != 1 {
+			t.Fatalf("ListWorkflows = %d runs, %v; want the numeric match", len(runs), err)
+		}
+	})
+
 	t.Run("list workflows filters by status and limit", func(t *testing.T) {
 		store := workflowQueryStore(t, newStore)
 		base := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
