@@ -309,7 +309,7 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeInternalError(w, "workflow_error", err)
+		writeWorkflowRunError(w, run, err)
 		return
 	}
 	if identity, ok := pendingShutdown.Snapshot(); ok {
@@ -326,6 +326,17 @@ func (s *Server) createWorkflow(ctx context.Context, run workflowkit.WorkflowRun
 		return creator.Create(ctx, run)
 	}
 	return s.workflows.Save(ctx, run)
+}
+
+// writeWorkflowRunError reports an executor error. A failed step leaves its
+// message in the stored workflow's Error, which GET /workflows/{id} already
+// shows, so the response carries it; any other error is internal.
+func writeWorkflowRunError(w http.ResponseWriter, run workflowkit.WorkflowRun, err error) {
+	if run.Status == workflowkit.StatusFailed && run.Error != "" {
+		writeError(w, http.StatusInternalServerError, "workflow_error", run.Error)
+		return
+	}
+	writeInternalError(w, "workflow_error", err)
 }
 
 func writeWorkflowExists(w http.ResponseWriter) {
@@ -511,6 +522,10 @@ func (s *Server) handleApproveWorkflow(w http.ResponseWriter, r *http.Request) {
 			"approval_note": req.Note,
 		},
 	})
+	if err != nil && run.Status == workflowkit.StatusFailed && run.Error != "" {
+		writeWorkflowRunError(w, run, err)
+		return
+	}
 	if err != nil {
 		writeWorkflowStoreError(w, err)
 		return
