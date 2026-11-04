@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"strconv"
@@ -514,9 +515,11 @@ func (s *Server) handleApproveWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeWorkflowStoreError(w, err)
 		return
 	}
+	// The approval is committed. Failing the response now would make a retry
+	// see a finished workflow and report 409, so the outcome audit is best
+	// effort and its failure only logged.
 	if err := s.recordBusinessOutcome(r.Context(), id); err != nil {
-		writeInternalError(w, "llm_audit_error", err)
-		return
+		log.Printf("host-api llm_audit_error: record business outcome for workflow %s: %v", id, err)
 	}
 	writeJSON(w, http.StatusOK, workflowToResponse(run, RunModeSync))
 }
