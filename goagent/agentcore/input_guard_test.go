@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/eruca/goagents/goagent/policy"
@@ -242,5 +243,47 @@ func TestResumeOfVersion1CheckpointKeepsCompletedStages(t *testing.T) {
 	last := llm.requests[len(llm.requests)-1].Messages
 	if last[len(last)-1].Role != "tool" {
 		t.Fatalf("last resumed message = %#v, want the tool result, not a repeated input", last[len(last)-1])
+	}
+}
+
+func TestResumedRunAppendsOnlyItsOwnMessagesToMemory(t *testing.T) {
+	memory := &mockMemoryProvider{loaded: []ports.MemoryMessage{{Role: "user", Content: "earlier"}, {Role: "assistant", Content: "earlier answer"}}}
+	registry := tools.NewRegistry()
+	registry.Register(testAgentTool{
+		spec: tools.Spec{Name: "write", Permission: policy.PermissionWrite},
+		run: func(context.Context, json.RawMessage, tools.Env) (*tools.Result, error) {
+			return &tools.Result{ForLLM: "written"}, nil
+		},
+	})
+	llm := &mockLLM{responses: []*ports.ChatResponse{
+		{ToolCalls: []ports.ToolCall{{ID: "call-1", Name: "write", Input: json.RawMessage(`{}`)}}},
+		{Content: "done"},
+	}}
+	agent, err := NewAgent(WithLLM(llm), WithToolRegistry(registry), WithToolApprover(pendingToolApprover{}), WithMemoryProvider(memory))
+	if err != nil {
+		t.Fatalf("NewAgent: %v", err)
+	}
+	paused, err := agent.RunDetailed(context.Background(), RunRequest{Input: "write it", SessionID: "s1", AllowedPermissions: []policy.Permission{policy.PermissionWrite}})
+	if !errors.Is(err, ErrApprovalPending) {
+		t.Fatalf("pause err = %v", err)
+	}
+	encoded, err := json.Marshal(paused.Interruption.Checkpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var checkpoint RunCheckpoint
+	if err := json.Unmarshal(encoded, &checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.ResumeDetailed(context.Background(), checkpoint, []ToolApprovalResolution{{Index: 0, ToolCallID: "call-1", Tool: "write", Allowed: true}}); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if len(memory.saved) == 0 || memory.saved[0].Content != "write it" {
+		t.Fatalf("appended = %#v, want this run's messages starting with its input", memory.saved)
+	}
+	for _, message := range memory.saved {
+		if strings.HasPrefix(message.Content, "earlier") {
+			t.Fatalf("appended = %#v, want no loaded history", memory.saved)
+		}
 	}
 }

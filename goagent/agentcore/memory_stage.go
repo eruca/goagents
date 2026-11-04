@@ -22,7 +22,9 @@ func (s MemoryLoadStage) Run(ctx context.Context, state *RunState) (StageResult,
 	if err != nil {
 		return StageAbort, err
 	}
-	state.Messages = append(memoryStateMessages(loaded), state.Messages...)
+	history := memoryStateMessages(loaded)
+	state.Messages = append(history, state.Messages...)
+	state.memoryMessages = len(history)
 	state.markStageDone(memoryLoadedKey)
 	state.Emit(ctx, Event{
 		Type: EventMemoryLoaded,

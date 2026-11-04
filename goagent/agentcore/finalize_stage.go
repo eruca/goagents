@@ -134,8 +134,9 @@ func (r *ReActRunner) saveMemory(ctx context.Context, state *RunState) error {
 	if r.memoryProvider == nil || state.Input.SessionID == "" || state.Final == nil {
 		return nil
 	}
-	messages := memoryMessages(state.Messages)
-	if err := r.memoryProvider.Save(ctx, state.Input.SessionID, messages); err != nil {
+	// Only this run's messages: the loaded history is already stored.
+	messages := memoryMessages(state.Messages[min(state.memoryMessages, len(state.Messages)):])
+	if err := r.memoryProvider.Append(ctx, state.Input.SessionID, messages); err != nil {
 		return err
 	}
 	state.Emit(ctx, Event{

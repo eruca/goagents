@@ -95,7 +95,7 @@ Use `WithContextProjector` when a host application needs to compress or reshape 
 
 Pass `RunRequest.RunID` when the caller already has a trace ID; otherwise `Agent.Run` generates a typed `RunID` backed by `github.com/google/uuid` and returns it on `RunResult.RunID`.
 
-When a memory provider is configured and `RunRequest.SessionID` is set, the runner loads session memory before the current input and saves the final message history after a successful run.
+When a memory provider is configured and `RunRequest.SessionID` is set, the runner loads session memory before the current input and appends the run's new messages after a successful run.
 
 Skills are model-facing instructions. Tools are executable actions. Policy decides whether a requested tool action is allowed.
 
@@ -317,7 +317,7 @@ Memory is enabled only when an Agent has a `MemoryProvider` and the request incl
 - Memory loads at most once per run, even across multiple ReAct iterations.
 - Memory saves only after a successful final answer.
 - Memory is not saved when load, policy, tool, or max-iteration errors abort the run.
-- Saved messages include prior loaded messages, current user input, non-silent tool observations, and the final assistant answer.
+- `Append` receives only the run's new messages: current user input, non-silent tool observations, and the final assistant answer. The loaded history is never sent back, so concurrent runs on one session each add their own turn instead of overwriting each other. A resumed run remembers how much history it loaded.
 
 `memory.WindowMemory` is an in-process bounded session store. It is safe for concurrent use, drops older messages past its limit, and does not survive process restart. Summarization, compaction, vector retrieval, and durable storage are extension concerns, not core memory behavior.
 

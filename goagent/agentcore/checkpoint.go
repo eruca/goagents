@@ -74,6 +74,9 @@ type RunCheckpoint struct {
 	PendingCalls       []ports.ToolCall    `json:"pending_calls"`
 	PromptBlocks       []prompt.Block      `json:"prompt_blocks"`
 	CompletedStages    []string            `json:"completed_stages,omitempty"`
+	// MemoryMessages counts the loaded session history at the front of
+	// Messages, which the run does not append to memory again.
+	MemoryMessages int `json:"memory_messages,omitempty"`
 }
 
 // ToolApprovalResolution is a host decision for one checkpointed pending call.
@@ -132,6 +135,7 @@ func checkpointFromState(state *RunState) (RunCheckpoint, error) {
 		AllowedPermissions: append([]policy.Permission(nil), state.AllowedPermissions...),
 		PendingCalls:       checkpointToolCalls(state.PendingCalls),
 		PromptBlocks:       append([]prompt.Block(nil), state.PromptBlocks...),
+		MemoryMessages:     state.memoryMessages,
 	}
 	for _, key := range onceStageKeys {
 		if state.stageDone(key) {
@@ -225,7 +229,8 @@ func (c RunCheckpoint) restore(eventSink EventSink) (*RunState, error) {
 			ToolCalls: c.ToolCalls,
 			UsedTools: append([]string(nil), c.UsedTools...),
 		},
-		startedAt: c.StartedAt,
+		startedAt:      c.StartedAt,
+		memoryMessages: c.MemoryMessages,
 	}
 	state.usedToolLookup = make(map[string]struct{}, len(state.summary.UsedTools))
 	for _, name := range state.summary.UsedTools {

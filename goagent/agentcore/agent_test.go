@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/eruca/goagents/goagent/memory"
 	"github.com/eruca/goagents/goagent/policy"
 	"github.com/eruca/goagents/goagent/ports"
 	"github.com/eruca/goagents/goagent/prompt"
@@ -771,8 +773,8 @@ func TestAgentLoadsAndSavesSessionMemory(t *testing.T) {
 	if memory.savedSessionID != "session_1" {
 		t.Fatalf("saved session = %q", memory.savedSessionID)
 	}
+	// Only this run's messages are appended; the loaded history is stored.
 	wantSaved := []ports.MemoryMessage{
-		{Role: "assistant", Content: "remembered"},
 		{Role: "user", Content: "hello"},
 		{Role: "assistant", Content: "agent answer"},
 	}
@@ -784,6 +786,68 @@ func TestAgentLoadsAndSavesSessionMemory(t *testing.T) {
 			t.Fatalf("saved = %#v", memory.saved)
 		}
 	}
+}
+
+func TestConcurrentRunsOnOneSessionKeepBothTurns(t *testing.T) {
+	window := memory.NewWindowMemory(0)
+	if err := window.Append(context.Background(), "session-shared", []ports.MemoryMessage{{Role: "user", Content: "earlier"}}); err != nil {
+		t.Fatal(err)
+	}
+	// Both runs load the same history before either appends.
+	loaded := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	barrier := &barrierMemory{WindowMemory: window, loaded: loaded, release: release, wait: 2}
+	newAgent := func(answer string) *Agent {
+		agent, err := NewAgent(WithLLM(&mockLLM{responses: []*ports.ChatResponse{{Content: answer}}}), WithMemoryProvider(barrier))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return agent
+	}
+	var wg sync.WaitGroup
+	for _, answer := range []string{"answer A", "answer B"} {
+		wg.Add(1)
+		go func(agent *Agent) {
+			defer wg.Done()
+			if _, err := agent.Run(context.Background(), RunRequest{SessionID: "session-shared", Input: "question"}); err != nil {
+				t.Error(err)
+			}
+		}(newAgent(answer))
+	}
+	<-loaded
+	once.Do(func() { close(release) })
+	wg.Wait()
+
+	stored, err := window.Load(context.Background(), "session-shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := fmt.Sprint(stored)
+	if len(stored) != 5 || !strings.Contains(text, "answer A") || !strings.Contains(text, "answer B") {
+		t.Fatalf("stored = %v, want the earlier message and both runs' turns", stored)
+	}
+}
+
+// barrierMemory holds every Load until wait loads have happened.
+type barrierMemory struct {
+	*memory.WindowMemory
+	mu      sync.Mutex
+	wait    int
+	loaded  chan struct{}
+	release chan struct{}
+}
+
+func (m *barrierMemory) Load(ctx context.Context, sessionID string) ([]ports.MemoryMessage, error) {
+	messages, err := m.WindowMemory.Load(ctx, sessionID)
+	m.mu.Lock()
+	m.wait--
+	if m.wait == 0 {
+		close(m.loaded)
+	}
+	m.mu.Unlock()
+	<-m.release
+	return messages, err
 }
 
 func TestAgentDoesNotSaveAssistantToolCallMessagesToMemory(t *testing.T) {
@@ -1246,7 +1310,7 @@ func (m *mockMemoryProvider) Load(ctx context.Context, sessionID string) ([]port
 	return append([]ports.MemoryMessage(nil), m.loaded...), m.loadErr
 }
 
-func (m *mockMemoryProvider) Save(ctx context.Context, sessionID string, messages []ports.MemoryMessage) error {
+func (m *mockMemoryProvider) Append(ctx context.Context, sessionID string, messages []ports.MemoryMessage) error {
 	m.saveCalls++
 	m.savedSessionID = sessionID
 	m.saved = append([]ports.MemoryMessage(nil), messages...)

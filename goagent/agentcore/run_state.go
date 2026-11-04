@@ -51,6 +51,9 @@ type RunState struct {
 	// private so neither RunRequest.Metadata nor a tool can mark a stage, such
 	// as the input guard, done without running it.
 	completedStages map[string]struct{}
+	// memoryMessages counts the loaded history at the front of Messages, so
+	// the run appends only what came after it.
+	memoryMessages int
 	// onDelta receives streamed model output; nil means the run does not stream.
 	onDelta func(ModelDelta)
 }
