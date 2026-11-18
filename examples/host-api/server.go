@@ -23,7 +23,6 @@ import (
 	runsqlite "github.com/eruca/goagents/runkit/sqlitestore"
 	"github.com/eruca/goagents/skillkit"
 	"github.com/eruca/goagents/workflowkit"
-	workflowsqlite "github.com/eruca/goagents/workflowkit/sqlitestore"
 )
 
 type Config struct {
@@ -40,6 +39,15 @@ type Config struct {
 	// Keychain item. They identify key material but never contain it.
 	AgentApprovalKeychainService string
 	AgentApprovalKeyID           string
+	// AgentApprovalKeyring is a static keyring ("id:base64,..." of 32-byte
+	// keys) used instead of Keychain. AgentApprovalKeyID names its active key.
+	AgentApprovalKeyring string
+	// WorkflowPostgresDSN stores workflows in PostgreSQL instead of the
+	// SQLite file at WorkflowDBPath.
+	WorkflowPostgresDSN string
+	// LLMKitHealthPostgresDSN keeps provider health in PostgreSQL, shared by
+	// every process using it, instead of in this process's memory.
+	LLMKitHealthPostgresDSN string
 	// SkillCatalog is a prebuilt, host-owned snapshot. The HTTP server never
 	// discovers roots itself.
 	SkillCatalog *skillkit.Catalog
@@ -66,7 +74,8 @@ type Server struct {
 	queue                   workflowkit.QueueLeaseStore
 	executor                *workflowkit.Executor
 	executions              *executionRegistry
-	health                  *llmkit.MemoryHealthStore
+	health                  llmkit.HealthStore
+	healthCloser            io.Closer
 	llmHome                 string
 	models                  []llmkit.Candidate
 	providers               map[string]goagentadapter.ProviderClient
@@ -88,6 +97,8 @@ type Server struct {
 	workflowCloseErr        error
 	runClosed               bool
 	runCloseErr             error
+	healthClosed            bool
+	healthCloseErr          error
 }
 
 type RunMode string
@@ -136,10 +147,7 @@ func NewServer(config Config) (*Server, error) {
 	if err := validateMemoryManagementConfig(config.Memory); err != nil {
 		return nil, err
 	}
-	approvalKeychain, err := resolveAgentApprovalKeychainConfig(
-		config.AgentApprovalKeychainService,
-		config.AgentApprovalKeyID,
-	)
+	approvalCipher, approvalKeychain, err := resolveAgentApprovalKeys(config)
 	if err != nil {
 		return nil, err
 	}
@@ -167,21 +175,32 @@ func NewServer(config Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	workflows, err := workflowsqlite.Open(resolved.WorkflowDBPath)
+	workflows, err := openWorkflowStore(resolved)
 	if err != nil {
 		_ = runs.Close()
 		return nil, err
+	}
+	health, healthCloser, err := openHealthStore(resolved)
+	if err != nil {
+		_ = workflows.Close()
+		_ = runs.Close()
+		return nil, err
+	}
+	closeStores := func() {
+		if healthCloser != nil {
+			_ = healthCloser.Close()
+		}
+		_ = workflows.Close()
+		_ = runs.Close()
 	}
 	var memoryConfig *memoryRuntime
 	if config.Memory != nil {
 		memoryConfig, err = newMemoryRuntime(config.Memory, runs, artifacts)
 		if err != nil {
-			_ = workflows.Close()
-			_ = runs.Close()
+			closeStores()
 			return nil, err
 		}
 	}
-	health := llmkit.NewMemoryHealthStore(llmkit.HealthPolicy{})
 	runner := routingAgentRunner{
 		llmkitHome: resolved.LLMKitHome,
 		runs:       runs,
@@ -196,10 +215,9 @@ func NewServer(config Config) (*Server, error) {
 		skillGateContext: config.SkillGateContext,
 		memory:           memoryConfig,
 	}
-	agentApprovals, err := newHostAgentApprovalService(runs, config.AgentApprovalCipher, runner, approvalKeychain)
+	agentApprovals, err := newHostAgentApprovalService(runs, approvalCipher, runner, approvalKeychain)
 	if err != nil {
-		_ = workflows.Close()
-		_ = runs.Close()
+		closeStores()
 		return nil, err
 	}
 	server := &Server{
@@ -212,6 +230,7 @@ func NewServer(config Config) (*Server, error) {
 		queue:                   workflows,
 		executions:              newExecutionRegistry(),
 		health:                  health,
+		healthCloser:            healthCloser,
 		llmHome:                 resolved.LLMKitHome,
 		models:                  models,
 		providers:               providers,
@@ -269,7 +288,14 @@ func (s *Server) Close(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return errors.Join(s.workflowCloseErr, s.runCloseErr, err)
 	}
-	return errors.Join(s.workflowCloseErr, s.runCloseErr)
+	if !s.healthClosed && s.healthCloser != nil {
+		s.healthClosed = true
+		s.healthCloseErr = s.healthCloser.Close()
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(s.workflowCloseErr, s.runCloseErr, s.healthCloseErr, err)
+	}
+	return errors.Join(s.workflowCloseErr, s.runCloseErr, s.healthCloseErr)
 }
 
 func resolveRuntimeConfig(config Config) (Config, error) {

@@ -458,9 +458,46 @@ these environment variables are lookup identifiers, never key material.
 When both raw environment values are exactly empty (`""`), whether unset or
 explicitly set empty, the production defaults apply. In every other case, both
 trimmed values must be non-empty: partial configuration or any whitespace-only
-value, including two whitespace-only values, fails startup. There is still no
-file, environment-variable, or SQLite key fallback. Default unit and
-integration tests inject a cipher and do not access the machine Keychain.
+value, including two whitespace-only values, fails startup. There is no file
+or SQLite key fallback. Default unit and integration tests inject a cipher and
+do not access the machine Keychain.
+
+Instead of Keychain, a host can supply a static keyring in
+`HOST_API_AGENT_APPROVAL_KEYRING` (`id1:base64,id2:base64` of 32-byte keys,
+see `runkit/approvalcrypto.ParseKeyring`), with
+`HOST_API_AGENT_APPROVAL_KEY_ID` naming the active key. The keyring is key
+material: load it from a secret store. It cannot be combined with
+`HOST_API_AGENT_APPROVAL_KEYCHAIN_SERVICE`, and startup fails on a malformed
+keyring or an active key ID it does not contain. Every process that must read
+another's checkpoints needs the same keyring; Keychain creates a separate key
+on each machine.
+
+## Shared backends
+
+Three optional switches move one backend each to storage several processes can
+share. Without them the Host behaves exactly as before.
+
+| Variable | Effect |
+|---|---|
+| `HOST_API_WORKFLOW_POSTGRES_DSN` | workflows, queue leases, and recovery in PostgreSQL (`workflowkit/pgstore`) instead of `workflow.db` |
+| `HOST_API_LLMKIT_HEALTH_POSTGRES_DSN` | provider health and concurrency slots in PostgreSQL (`llmkit/pghealth`) instead of process memory |
+| `HOST_API_AGENT_APPROVAL_KEYRING` | static approval keyring instead of Keychain (see above) |
+
+These switches do **not** make the Host safe to run as several replicas behind
+a load balancer. These remain local to one process or machine:
+
+- artifacts (`artifactkit.FileStore` under the runtime home);
+- agent runs and approval checkpoints (`agent-runs.db`; `runkit/pgstore`
+  exists but is not wired here);
+- llmkit route audit and model statistics (JSONL files under `LLMKIT_HOME`),
+  which `GET /workflows/{id}/llm-routes` reads;
+- the in-process guard that keeps two requests from creating one workflow id;
+- the memory embedding worker, which every process would run on the same rows.
+
+Replica clocks must stay in sync (NTP) to well within the queue lease duration
+and the pghealth lease TTL. `TestHostAPISharedBackendsAcrossProcesses` runs
+two Hosts against one PostgreSQL database when `HOST_API_POSTGRES_TEST_DSN` is
+set (`HOST_API_REQUIRE_POSTGRES=1` turns a missing DSN into a failure).
 
 On an interactive macOS login session, run the optional real-process smoke to
 exercise the actual binary, local OIDC discovery/JWKS verification, SQLite
