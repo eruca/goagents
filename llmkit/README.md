@@ -294,6 +294,131 @@ failed outcomes also record `error_class`, such as `timeout` or
 The typed fallback contract is documented in
 `../docs/plans/2026-05-07-llmkit-host-contract-followups-design.md`.
 
+## Automatic-test quality cascade
+
+The optional `adapters/goagent.CascadeExecutor` registers versioned tasks and
+host-owned automatic verifiers. Existing `Client`, `Config`, `TaskProfile`,
+`ModelStats`, and their fallback behavior remain unchanged.
+
+Register each task as a `CascadeTask` with a `TaskKey` (type, task version,
+frozen test-suite version), explicit `TaskProfile`, and `Verify` callback.
+The callback receives the original request and generated response: return
+`true, nil` only when the acceptance tests pass, `false, nil` when they fail,
+and an error when the test infrastructure cannot determine a result.
+Define tests independently of the model output. A schema check alone cannot
+establish semantic correctness. Execute generated code only in a host-owned
+sandbox; the library never executes generated code or tools.
+
+Register models as `CascadeModel` values, binding candidate/account/provider
+metadata to an immutable `Revision` and its provider client. The revision must
+cover the actual model, prompt and generation settings. The host must change it
+when those settings change; the library cannot detect silent provider updates.
+
+Run `Evaluate` explicitly against the same caller-owned frozen corpus for each
+model. It produces a `QualityEvidence` record with test passed/sample counts,
+task/test/model versions, account/provider identity and an expiry. An invocation
+of this method using real clients makes real provider calls. Evidence persistence
+and reload are host-owned; pass the resulting records as `CascadeConfig.Evidence`
+when constructing the executor. No background evaluation or implicit promotion
+from live traffic occurs.
+
+`QualityPolicy` requires explicit `MinSamples`, `MaxAttempts` and cumulative
+`MaxEstimatedCents`. Qualification requires observed test success **strictly
+greater than 85%**, sufficient samples, matching versions/identity, and unexpired
+evidence. Exactly 85%, missing evidence, and version mismatches are rejected.
+This is an observed proportion, not a statistical confidence bound. Choose a
+representative corpus and sample minimum for the task's risk; improving success
+on the full corpus does not guarantee success on the earlier model's failures.
+
+`Execute` first applies existing capability, privacy, quota, cooldown and
+concurrency filters, then starts with the cheapest qualified model. Cost ties
+prefer greater test success, then a stable alias/account/provider order.
+Failed acceptance tests may escalate only to a remaining model with a strictly
+greater measured success rate and no lower configured cost. Passing tests stop
+immediately. Provider errors, cancellation, broken verifiers and audit failures
+stop without quality escalation. Requests offering tools and responses issuing
+tool calls are rejected by this first generation-only executor; tool side
+effects remain host-owned.
+
+Costs retain the existing integer-cent estimate: configure conservative per-call
+estimates, rounding positive sub-cent costs up. Zero is eligible only with
+`PriceFree`; a zero cumulative budget admits only free models. A prospective
+call exceeding the remaining estimated budget is never dispatched. Evaluation
+also checks its full-corpus estimate before dispatch. These checks cap reserved
+estimates, not invoices or actual token billing; account-level actual-cost
+governance remains host-owned.
+
+Health accounting continues to use provider transport outcomes. Audit
+`BusinessOutcome` and `SuccessSignalTestsPassed` describe acceptance separately;
+old `ModelStats.SuccessRate` remains a transport statistic and is never used
+as quality qualification. `CascadeResult` returns the task key, versioned model
+attempts, estimated cost and only a test-accepted response. Hosts can persist
+this metadata with the versioned evidence without logging input/output text.
+Verifier errors are content-free. Host verifiers, providers,
+recorders and clocks must honor context and be concurrency-safe; configured
+provider limits and deadlines remain host-owned.
+
+Run the complete fixture-only flow from the repository root:
+
+```sh
+go run ./llmkit/examples/quality-cascade
+go test ./llmkit/...
+```
+
+The example evaluates three deterministic arithmetic fixtures, audits the
+verifier, and reports rescue rates and held-out cascade results.
+It uses no credentials or network and makes no claims about real LLM quality.
+
+### Paired rescue evidence and verifier checks
+
+`AuditVerifier` checks a registered verifier against caller-labeled positive
+and negative responses. Both categories are required. False acceptance or false
+rejection returns `ErrVerifierRejected` with the counts; verifier errors/panics
+return `ErrCascadeVerifier` without publishable partial evidence. Production
+acceptance uses the same error/panic boundary. Labels must come from an
+independent trusted oracle, not the model being evaluated. Real knowledge tasks
+need counterexamples for omitted conditions, unsupported claims and incorrect
+source references in addition to malformed output.
+
+`EvaluateCascade` takes a `CascadeEvaluationSet` with qualification cases,
+disjoint validation cases and verifier cases, plus explicit expiry, total
+evaluation budget and `RescuePolicy`. It checks case IDs and exact request
+overlap before any provider call, audits the verifier, and runs each eligible
+model on the same qualification corpus. Canonical SHA-256 binds evidence to
+the corpus. Per-model automatic-test counts produce `QualityEvidence`;
+each ordered model pair produces `RescueEvidence`: failed baseline cases,
+cases rescued by the next model, and the conditional success rate. Zero failed
+baseline cases means rescue ability is unmeasured, not 100%.
+
+Enable paired gating with `CascadeConfig.RescuePolicy` and
+`RescueEvidence`. Upgrades must retain the existing greater-overall-success
+and nondecreasing-cost rules, and additionally satisfy the explicit rescue
+sample/rate minimum. Evidence must match task/test/model/account/provider
+versions, corpus, denominator and expiry. Missing or stale paired evidence
+blocks an upgrade. Cost still ranks first; equal-cost upgrades prefer greater
+rescue success. Without the optional rescue policy, overall-rate routing is
+unchanged. Persist/reload quality and paired evidence together.
+
+After qualification, the evaluator invokes the actual cascade on the held-out
+requests, recording solved/failed counts, attempts, estimated costs, cost per
+solved task, case error categories and p50/p95 end-to-end cascade latency.
+Verifiers or audit failures abort the evaluation; ordinary unsolved/provider
+failures remain explicit failed cases. The evaluation budget reserves the full
+matrix and worst permitted validation calls before dispatch. The report
+distinguishes total evaluation estimates from validation-chain estimates.
+Reports contain IDs, versions, hashes and metrics, never request/response text.
+Pairwise rescue rates do not establish rescue on every multi-stage residual
+intersection; the held-out chain report measures that combined behavior.
+Disjoint exact requests alone do not establish representative or semantically
+independent samples; corpus design and trusted labels remain host-owned.
+
+The executable example now emits this full report using arithmetic fixtures:
+overall rates 90/100, 98/100 and 96/100; rescue on the first model's failures
+80% and 100%. With a fixture rescue minimum of 90%, the 98% model is skipped.
+The held-out 20-case run solves 20/20 with 22 attempts and 4 simulated cents;
+qualification plus validation calls total 304 simulated cents in estimates.
+These are fixture outcomes, not measurements of real providers or billing.
+
 ## API Keys
 
 Do not store plaintext API keys in llmkit config files or audit files. Configuration should reference secret material through environment variable names such as `api_key_env: OPENAI_API_KEY`, account aliases, or a host-owned secret store.
