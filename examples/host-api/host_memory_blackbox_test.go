@@ -96,6 +96,12 @@ func runHostMemoryPostgresBlackBox(t *testing.T) {
 	if durable.Content != blackboxDurableContent || durable.CreatedBy != "agent-a" {
 		t.Fatalf("durable memory = %#v", durable)
 	}
+	// The backlog is host-wide, so a shared database may hold other rows;
+	// assert on the change this test makes.
+	beforeWorkers := readBlackboxWorkerStatus(t, server1, tokenAWriter, projectA, durable.Content, durable.ID, tenantA, profileID)
+	if beforeWorkers.Embedding.Backlog < 1 || beforeWorkers.Embedding.FailureTotal != 0 || beforeWorkers.Extraction.FailureTotal != 0 {
+		t.Fatalf("worker status before embedding = %#v", beforeWorkers)
+	}
 	vector, err := embedder.Embed(t.Context(), memorykit.EmbedRequest{ProfileID: profileID, Texts: []string{durable.Content}})
 	if err != nil || len(vector) != 1 {
 		t.Fatalf("Embed() = %#v, %v", vector, err)
@@ -107,6 +113,11 @@ func runHostMemoryPostgresBlackBox(t *testing.T) {
 		t.Fatalf("PutEmbedding(): %v", err)
 	}
 	assertBlackboxEmbeddingCount(t, db, durable.ID, 1)
+	afterWorkers := readBlackboxWorkerStatus(t, server1, tokenAWriter, projectA, durable.Content, durable.ID, tenantA, profileID)
+	if afterWorkers.Embedding.Backlog != beforeWorkers.Embedding.Backlog-1 {
+		t.Fatalf("embedding backlog after PutEmbedding = %d, want %d",
+			afterWorkers.Embedding.Backlog, beforeWorkers.Embedding.Backlog-1)
+	}
 
 	closeBlackboxServer(t, server1)
 	server1 = nil
@@ -289,6 +300,29 @@ func runHostMemoryPostgresBlackBox(t *testing.T) {
 	if userScope.Code != http.StatusBadRequest {
 		t.Fatalf("user Scope injection status = %d body=%s", userScope.Code, userScope.Body.String())
 	}
+}
+
+// readBlackboxWorkerStatus reads GET /workers/memory and fails if the body
+// contains any of the forbidden values.
+func readBlackboxWorkerStatus(t *testing.T, server *Server, token, projectID string, forbidden ...string) memoryWorkersPayload {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, "/workers/memory?project_id="+projectID, nil)
+	request.Header.Set("Authorization", token)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET /workers/memory = %d, body %s", response.Code, response.Body.String())
+	}
+	for _, value := range append(forbidden, token) {
+		if strings.Contains(response.Body.String(), value) {
+			t.Fatalf("worker status leaked %q: %s", value, response.Body.String())
+		}
+	}
+	var status memoryWorkersPayload
+	if err := json.Unmarshal(response.Body.Bytes(), &status); err != nil {
+		t.Fatalf("decode worker status: %v", err)
+	}
+	return status
 }
 
 func requiredHostMemoryPostgresDSN(t *testing.T) string {

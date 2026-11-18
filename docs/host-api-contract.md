@@ -663,6 +663,52 @@ workflow execution error. `last_heartbeat_error` is present only after a lease
 extension error. These counters reset when the host process restarts; they are
 diagnostics, not durable metrics.
 
+## GET /workers/memory
+
+Registered only when the optional memory runtime is enabled. Returns one
+host-wide, content-free snapshot of the embedding and extraction workers. The
+workers serve every tenant, so the snapshot is not scoped to the caller; the
+route authorizes like the other memory routes, requiring a bearer token with
+`memory.review` on the project named by the required `project_id` query
+parameter. A missing token returns `401`, a missing `project_id` or denied
+capability `403`.
+
+```json
+{
+  "embedding": {
+    "backlog": 1,
+    "success_total": 0,
+    "failure_total": 1,
+    "last_error_class": "provider_failed",
+    "last_transition_time": "2026-07-27T08:00:00Z"
+  },
+  "extraction": {
+    "backlog": 0,
+    "success_total": 1,
+    "failure_total": 0,
+    "last_transition_time": "2026-07-27T08:00:01Z"
+  }
+}
+```
+
+- `backlog` is read exactly from the durable Store per request. For embedding
+  it counts active memories without a current embedding for the configured
+  profile. For extraction it counts jobs with attempts left that are pending,
+  including those waiting out a retry delay, or held by an expired lease; jobs
+  under a live lease are in progress and not counted.
+- `success_total` and `failure_total` count non-idle `RunOnce` results in the
+  current process. Idle runs are excluded, and all process-local fields reset
+  when the Host restarts. A later success does not clear `last_error_class`.
+- Error classes are a fixed low-cardinality enum documented in OpenAPI. Raw
+  errors are never returned.
+- The response carries no memory, query, source or provider text, vector,
+  scope, memory ID, extraction job ID or provider payload.
+- Backlog and counters are read separately; the endpoint does not promise one
+  atomic view of them.
+
+If either backlog read fails, the endpoint returns `503 memory_unavailable`
+without the underlying error.
+
 ## Current Non-Goals
 
 - Fine-grained multi-tenant authorization.

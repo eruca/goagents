@@ -304,6 +304,7 @@ Endpoints:
 - `GET /agent-runs/{id}`
 - `GET /llmkit/models`
 - `GET /workers/queued`
+- `GET /workers/memory` (memory runtime only)
 
 ## Host-owned skills
 
@@ -398,6 +399,12 @@ metadata. It does not create a new workflow id.
 worker loop has been started, the worker id, claim/completion/idle/error counts,
 lease extension and heartbeat error counts, the last workflow id, and the latest
 error. These counters are process-local diagnostics, not durable metrics.
+
+With the memory runtime enabled, `GET /workers/memory?project_id=...` returns
+the embedding and extraction workers' exact durable backlog plus process-local
+success/failure counts, the last error class and the last transition time. It
+requires `memory.review` on that project and never returns memory content or
+raw errors. See `docs/host-api-contract.md`.
 
 `POST /workflows` also accepts optional `task_profile_preset` and
 `task_profile` so a host can describe the task before routing:
