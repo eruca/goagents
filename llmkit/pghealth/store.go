@@ -196,7 +196,7 @@ FROM llmkit_provider_health_leases WHERE account_alias = $1`, account, key).Scan
 // Release gives back the oldest slot this Store holds for the candidate.
 func (s *Store) Release(ctx context.Context, candidate llmkit.Candidate) error {
 	key := llmkit.ProviderHealthKey(candidate.AccountAlias, candidate.Model.Alias, candidate.Model.Provider)
-	if _, err := s.db.ExecContext(ctx, deleteOwnLeaseSQL, s.owner, key); err != nil {
+	if err := s.deleteOwnLease(ctx, s.db, key); err != nil {
 		return wrap("release", err)
 	}
 	s.refreshAfterWrite(ctx)
@@ -223,7 +223,7 @@ func (s *Store) RecordOutcome(ctx context.Context, outcome llmkit.TaskOutcome) e
 	if err != nil {
 		return wrap("record outcome entry", err)
 	}
-	if _, err := tx.ExecContext(ctx, deleteOwnLeaseSQL, s.owner, key); err != nil {
+	if err := s.deleteOwnLease(ctx, tx, key); err != nil {
 		return wrap("record outcome lease", err)
 	}
 	if err := writeEntry(ctx, tx, key, llmkit.ApplyHealthOutcome(s.cfg.Policy, entry, outcome, now)); err != nil {
@@ -284,7 +284,8 @@ func (s *Store) Snapshot() llmkit.ProviderHealthSnapshot {
 
 // deleteOwnLeaseSQL deletes the oldest lease the owner holds for a key.
 // SKIP LOCKED makes concurrent calls of one Store each take a different
-// lease instead of all deleting the same one.
+// lease instead of all deleting the same one; deleteOwnLease retries when
+// every lease it could take is locked.
 const deleteOwnLeaseSQL = `DELETE FROM llmkit_provider_health_leases WHERE lease_id = (
   SELECT lease_id FROM llmkit_provider_health_leases
   WHERE owner = $1 AND key = $2
@@ -388,9 +389,59 @@ func (s *Store) refreshAfterWrite(ctx context.Context) {
 // revived: another replica may already have counted its slot as free.
 func (s *Store) renew(ctx context.Context) error {
 	now := s.now()
+	// SKIP LOCKED keeps renewal from waiting on a lease being deleted; a
+	// lease skipped now is renewed next round, two more before it expires.
 	_, err := s.db.ExecContext(ctx, `UPDATE llmkit_provider_health_leases SET expires_at = $3
-WHERE owner = $1 AND expires_at > $2`, s.owner, now, now.Add(s.cfg.LeaseTTL))
+WHERE lease_id IN (
+  SELECT lease_id FROM llmkit_provider_health_leases
+  WHERE owner = $1 AND expires_at > $2
+  FOR UPDATE SKIP LOCKED)`, s.owner, now, now.Add(s.cfg.LeaseTTL))
 	return wrap("renew", err)
+}
+
+const (
+	leaseRetryMinDelay = 5 * time.Millisecond
+	leaseRetryMaxDelay = 100 * time.Millisecond
+)
+
+type execQuerier interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+// deleteOwnLease deletes the oldest lease this Store holds for key. When
+// every such lease is locked, by a renewal or a concurrent delete, the SKIP
+// LOCKED delete finds none; it then retries while this Store still holds a
+// live lease for key, so the slot is never silently kept, until ctx is done.
+// Holding no live lease for key is not an error.
+func (s *Store) deleteOwnLease(ctx context.Context, q execQuerier, key string) error {
+	delay := leaseRetryMinDelay
+	for {
+		result, err := q.ExecContext(ctx, deleteOwnLeaseSQL, s.owner, key)
+		if err != nil {
+			return err
+		}
+		if deleted, err := result.RowsAffected(); err != nil || deleted > 0 {
+			return err
+		}
+		var held bool
+		if err := q.QueryRowContext(ctx, `SELECT EXISTS (
+  SELECT 1 FROM llmkit_provider_health_leases WHERE owner = $1 AND key = $2 AND expires_at > $3)`,
+			s.owner, key, s.now()).Scan(&held); err != nil {
+			return err
+		}
+		if !held {
+			return nil
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		delay = min(2*delay, leaseRetryMaxDelay)
+	}
 }
 
 // every runs work each interval until ctx is done, giving each run at most

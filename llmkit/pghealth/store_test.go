@@ -303,3 +303,77 @@ func TestOpenRejectsNegativeDurations(t *testing.T) {
 		t.Fatal("Open with an empty DSN succeeded")
 	}
 }
+
+// TestStoreReleasesLeaseLockedByAnotherTransaction holds this Store's only
+// lease for a key locked, as a renewal does, while Release or RecordOutcome
+// runs: the call must wait for the lock and delete the lease, not skip it.
+func TestStoreReleasesLeaseLockedByAnotherTransaction(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name  string
+		close func(*Store, llmkit.Candidate) error
+	}{
+		{"release", func(s *Store, c llmkit.Candidate) error { return s.Release(ctx, c) }},
+		{"record outcome", func(s *Store, c llmkit.Candidate) error {
+			return s.RecordOutcome(ctx, llmkit.TaskOutcome{
+				AccountAlias: c.AccountAlias, ModelAlias: c.Model.Alias, Provider: c.Model.Provider, ErrorClass: llmkit.ErrorClassTimeout,
+			})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dsn := isolatedSchemaDSN(t)
+			clock := newTestClock()
+			store := openStore(t, dsn, Config{Policy: llmkit.HealthPolicy{Now: clock.now}, LeaseTTL: time.Hour})
+			c := testCandidate("acct", "model", 1)
+			key := llmkit.ProviderHealthKey("acct", "model", "test")
+			if err := store.Acquire(ctx, c); err != nil {
+				t.Fatal(err)
+			}
+
+			locker, err := sql.Open("pgx", dsn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer locker.Close()
+			tx, err := locker.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = tx.Rollback() }()
+			var leaseID string
+			if err := tx.QueryRowContext(ctx, `SELECT lease_id FROM llmkit_provider_health_leases WHERE key = $1 FOR UPDATE`, key).Scan(&leaseID); err != nil {
+				t.Fatal(err)
+			}
+
+			done := make(chan error, 1)
+			go func() { done <- tc.close(store, c) }()
+			time.Sleep(200 * time.Millisecond)
+			select {
+			case err := <-done:
+				t.Fatalf("call returned %v while its only lease was locked, want it to wait", err)
+			default:
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("call after the lock was released = %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("call did not return after the lock was released")
+			}
+			var live int
+			if err := locker.QueryRowContext(ctx, `SELECT count(*) FROM llmkit_provider_health_leases WHERE key = $1`, key).Scan(&live); err != nil {
+				t.Fatal(err)
+			}
+			if live != 0 {
+				t.Fatalf("leases left for the key = %d, want 0", live)
+			}
+			if err := store.Acquire(ctx, c); err != nil {
+				t.Fatalf("Acquire after the slot was given back = %v, want admitted", err)
+			}
+		})
+	}
+}
