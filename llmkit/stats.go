@@ -65,44 +65,68 @@ func RefreshModelStats(home string) (*ModelStats, error) {
 	return stats, nil
 }
 
-// BuildModelStats reads audit JSONL files and aggregates route/outcome facts.
+// BuildModelStats reads audit JSONL files and aggregates route/outcome facts
+// with BuildModelStatsFromAudit.
 func BuildModelStats(home string) (*ModelStats, error) {
-	builder := modelStatsBuilder{
-		now:     time.Now().UTC(),
-		entries: make(map[string]*modelStatsAccumulator),
-	}
+	var routes []RouteTrace
 	if err := readJSONL(filepath.Join(home, routeEventsFile), func(line []byte) error {
 		var trace RouteTrace
 		if err := json.Unmarshal(line, &trace); err != nil {
 			return err
 		}
-		builder.addRoute(trace)
+		routes = append(routes, trace)
 		return nil
 	}); err != nil {
 		return nil, err
 	}
-	latestOutcomes := map[string]TaskOutcome{}
+	var outcomes []TaskOutcome
 	if err := readJSONL(filepath.Join(home, outcomesFile), func(line []byte) error {
 		var outcome TaskOutcome
 		if err := json.Unmarshal(line, &outcome); err != nil {
 			return err
 		}
-		if strings.TrimSpace(outcome.RouteID) == "" {
-			builder.addOutcome(outcome)
-			return nil
-		}
-		// A later record for the same attempt, such as a business outcome,
-		// replaces the provider outcome; fallback attempts are kept apart.
-		latestOutcomes[outcomeKey(outcome.RouteID, outcome.Attempt)] = outcome
+		outcomes = append(outcomes, outcome)
 		return nil
 	}); err != nil {
 		return nil, err
 	}
-	for _, outcome := range latestOutcomes {
-		builder.addOutcome(outcome)
-	}
+	return BuildModelStatsFromAudit(time.Now().UTC(), routes, outcomes), nil
+}
 
-	return builder.stats(), nil
+// BuildModelStatsFromAudit aggregates route traces and task outcomes, given
+// in the order they were recorded, into ModelStats generated at now. now is
+// also the reference time for RecentOutcomes and RecentFailures decay.
+//
+// Every route counts as an attempt. Of the outcomes sharing a route_id and
+// attempt, only the last one counts: a later record for the same attempt,
+// such as a business outcome, replaces the provider outcome, while fallback
+// attempts stay apart. Outcomes without a route_id all count. Recorders other
+// than JSONLRecorder use this to produce the same stats as BuildModelStats.
+func BuildModelStatsFromAudit(now time.Time, routes []RouteTrace, outcomes []TaskOutcome) *ModelStats {
+	builder := modelStatsBuilder{
+		now:     now,
+		entries: make(map[string]*modelStatsAccumulator),
+	}
+	for _, trace := range routes {
+		builder.addRoute(trace)
+	}
+	latestOutcomes := map[string]TaskOutcome{}
+	var latestOrder []string
+	for _, outcome := range outcomes {
+		if strings.TrimSpace(outcome.RouteID) == "" {
+			builder.addOutcome(outcome)
+			continue
+		}
+		key := outcomeKey(outcome.RouteID, outcome.Attempt)
+		if _, seen := latestOutcomes[key]; !seen {
+			latestOrder = append(latestOrder, key)
+		}
+		latestOutcomes[key] = outcome
+	}
+	for _, key := range latestOrder {
+		builder.addOutcome(latestOutcomes[key])
+	}
+	return builder.stats()
 }
 
 // LoadModelStats reads model-stats.json from home.
