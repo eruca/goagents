@@ -49,6 +49,7 @@ jobs:
     env:
       MEMORYKIT_REQUIRE_POSTGRES: "1"
       MEMORYKIT_POSTGRES_TEST_DSN: postgres://postgres:postgres@localhost:5432/memorykit_test?sslmode=disable
+      RUNKIT_REQUIRE_POSTGRES: "1"
       RUNKIT_POSTGRES_TEST_DSN: postgres://postgres:postgres@localhost:5432/memorykit_test?sslmode=disable
       LLMKIT_REQUIRE_POSTGRES: "1"
       LLMKIT_POSTGRES_TEST_DSN: postgres://postgres:postgres@localhost:5432/memorykit_test?sslmode=disable
