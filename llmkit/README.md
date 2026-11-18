@@ -324,8 +324,13 @@ from live traffic occurs.
 
 `QualityPolicy` requires explicit `MinSamples`, `MaxAttempts` and cumulative
 `MaxEstimatedCents`. Qualification requires observed test success **strictly
-greater than 85%**, sufficient samples, matching versions/identity, and unexpired
-evidence. Exactly 85%, missing evidence, and version mismatches are rejected.
+greater than `MinSuccessRate`** (zero means `DefaultMinSuccessRate`, 85%),
+sufficient samples, matching versions/identity, and unexpired evidence. A rate
+equal to the threshold, missing evidence, and version mismatches are rejected.
+If local health state (busy, cooldown, quota) keeps a request from being sent,
+`Execute` and `Evaluate` return `ErrCascadeUnavailable`: `Evaluate` publishes
+no evidence rather than counting the case as failed, and `Execute` charges no
+estimated cost for it.
 This is an observed proportion, not a statistical confidence bound. Choose a
 representative corpus and sample minimum for the task's risk; improving success
 on the full corpus does not guarantee success on the earlier model's failures.

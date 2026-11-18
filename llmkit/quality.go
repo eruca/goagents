@@ -2,6 +2,7 @@ package llmkit
 
 import (
 	"errors"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -35,8 +36,23 @@ type QualityCandidate struct {
 
 // QualityPolicy requires explicit sample, attempt and cumulative estimated-cost
 // limits. A zero cost budget admits only explicitly free models.
+// MinSuccessRate is the qualification threshold: a model qualifies only when its
+// observed test success is strictly greater than it. Zero means
+// DefaultMinSuccessRate.
 type QualityPolicy struct {
 	MinSamples, MaxAttempts, MaxEstimatedCents int
+	MinSuccessRate                             float64
+}
+
+// DefaultMinSuccessRate is the qualification threshold used when
+// QualityPolicy.MinSuccessRate is zero.
+const DefaultMinSuccessRate = 0.85
+
+func (p QualityPolicy) minSuccessRate() float64 {
+	if p.MinSuccessRate == 0 {
+		return DefaultMinSuccessRate
+	}
+	return p.MinSuccessRate
 }
 
 var ErrNoQualifiedModel = errors.New("no model qualifies for the task's automatic tests")
@@ -57,7 +73,8 @@ func validQualityLabel(s string) bool {
 }
 
 func (p QualityPolicy) Validate() error {
-	if p.MinSamples <= 0 || p.MaxAttempts <= 0 || p.MaxEstimatedCents < 0 {
+	if p.MinSamples <= 0 || p.MaxAttempts <= 0 || p.MaxEstimatedCents < 0 ||
+		math.IsNaN(p.MinSuccessRate) || p.MinSuccessRate < 0 || p.MinSuccessRate >= 1 {
 		return ErrInvalidQualityConfig
 	}
 	return nil
@@ -76,7 +93,8 @@ func (e QualityEvidence) Validate() error {
 }
 
 // Plan preserves capability/health filters and orders qualified candidates by
-// cost, then test success. Exactly 85% is not qualified.
+// cost, then test success. A success rate equal to the threshold is not
+// qualified.
 func (p QualityPolicy) Plan(task TaskKey, profile TaskProfile, candidates []QualityCandidate, now time.Time) ([]QualityCandidate, error) {
 	if p.Validate() != nil || task.Validate() != nil || now.IsZero() {
 		return nil, ErrInvalidQualityConfig
@@ -87,7 +105,7 @@ func (p QualityPolicy) Plan(task TaskKey, profile TaskProfile, candidates []Qual
 		e, m := c.Evidence, c.Candidate.Model
 		if e.Validate() != nil || e.Task != task || e.ModelRevision != c.ModelRevision ||
 			e.AccountAlias != c.Candidate.AccountAlias || e.ModelAlias != m.Alias || e.Provider != m.Provider ||
-			e.Samples < p.MinSamples || e.SuccessRate() <= 0.85 ||
+			e.Samples < p.MinSamples || e.SuccessRate() <= p.minSuccessRate() ||
 			e.EvaluatedAt.After(now) || !now.Before(e.ExpiresAt) {
 			continue
 		}

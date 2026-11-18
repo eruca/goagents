@@ -355,3 +355,42 @@ func TestCascadeCancellationDuringOutcomeAuditDiscardsAcceptedResponse(t *testin
 		t.Fatalf("audit cancellation leaked response: %+v %v", result, err)
 	}
 }
+
+func TestQualityEvaluationDoesNotCountUndispatchedCasesAsFailures(t *testing.T) {
+	for _, withRecorder := range []bool{false, true} {
+		t.Run(map[bool]string{false: "no-recorder", true: "recorder"}[withRecorder], func(t *testing.T) {
+			config := cascadeConfig()
+			health := llmkit.NewMemoryHealthStore(llmkit.HealthPolicy{})
+			health.Set(llmkit.ProviderHealthEntry{AccountAlias: "account", ModelAlias: "cheap", Provider: "offline",
+				Availability: llmkit.ProviderUnavailable, CooldownUntil: time.Now().Add(time.Hour)})
+			config.HealthStore = health
+			if withRecorder {
+				config.Recorder = &fakeRecorder{}
+			}
+			cases := []QualityCase{{ID: "a", Request: ports.ChatRequest{Messages: []ports.ChatMessage{{Content: "alpha"}}}}}
+			evidence, err := newCascade(t, config).Evaluate(context.Background(), cascadeKey, "cheap", cases, cascadeTime.Add(time.Hour))
+			if !errors.Is(err, ErrCascadeUnavailable) || evidence != (llmkit.QualityEvidence{}) {
+				t.Fatalf("evidence=%+v err=%v, want ErrCascadeUnavailable and no evidence", evidence, err)
+			}
+			if n := len(config.Models[1].Client.(*fakeProviderClient).requests); n != 0 {
+				t.Fatalf("dispatched %d requests to a provider in cooldown", n)
+			}
+		})
+	}
+}
+
+func TestQualityPolicyMinSuccessRate(t *testing.T) {
+	config := cascadeConfig()
+	config.Policy.MinSuccessRate = 0.9
+	result, err := newCascade(t, config).Execute(context.Background(), cascadeKey, "task", ports.ChatRequest{})
+	// cheap (86%) and pricey-weaker (86%) no longer qualify; middle (93%) is the cheapest left.
+	if err != nil || len(result.Attempts) != 1 || result.Attempts[0].ModelAlias != "middle" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	for _, rate := range []float64{-0.1, 1, 1.5} {
+		config.Policy.MinSuccessRate = rate
+		if _, err := NewCascadeExecutor(config); !errors.Is(err, llmkit.ErrInvalidQualityConfig) {
+			t.Fatalf("MinSuccessRate=%v accepted", rate)
+		}
+	}
+}

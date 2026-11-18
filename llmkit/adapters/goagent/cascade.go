@@ -49,10 +49,13 @@ type CascadeResult struct {
 }
 
 var (
-	ErrCascadeExhausted   = errors.New("no remaining stronger model passed the automatic tests")
-	ErrCascadeBudget      = errors.New("quality cascade estimated budget exhausted")
-	ErrCascadeVerifier    = errors.New("automatic test infrastructure failed")
-	ErrCascadeProvider    = errors.New("quality cascade provider call failed")
+	ErrCascadeExhausted = errors.New("no remaining stronger model passed the automatic tests")
+	ErrCascadeBudget    = errors.New("quality cascade estimated budget exhausted")
+	ErrCascadeVerifier  = errors.New("automatic test infrastructure failed")
+	ErrCascadeProvider  = errors.New("quality cascade provider call failed")
+	// ErrCascadeUnavailable means local health state (busy, cooldown, quota)
+	// kept the request from being sent. It says nothing about model quality.
+	ErrCascadeUnavailable = errors.New("quality cascade provider unavailable before dispatch")
 	ErrCascadeAudit       = errors.New("quality cascade audit failed")
 	ErrCascadeUnsupported = errors.New("quality cascade accepts generation-only requests")
 )
@@ -198,6 +201,11 @@ func (c *CascadeExecutor) Execute(ctx context.Context, key llmkit.TaskKey, taskI
 		result.EstimatedCents += cost
 		attempted[model.Candidate.Model.Alias] = true
 		passed, resp, err := c.attempt(ctx, task, model, taskID, len(result.Attempts)+1, req)
+		if errors.Is(err, ErrCascadeUnavailable) {
+			// Nothing was sent, so nothing is charged against the budget.
+			result.EstimatedCents -= cost
+			cost = 0
+		}
 		result.Attempts = append(result.Attempts, CascadeAttempt{ModelAlias: model.Candidate.Model.Alias, ModelRevision: model.Revision, EstimatedCents: cost, TestsPassed: passed})
 		if err != nil {
 			return result, err
@@ -258,8 +266,9 @@ func (c *CascadeExecutor) Evaluate(ctx context.Context, key llmkit.TaskKey, mode
 	evidence.CorpusSHA256 = corpus
 	for _, sample := range cases {
 		passed, _, err := c.attempt(ctx, task, model, sample.ID, 1, sample.Request)
-		// Transport failure counts as a failed corpus case. Infrastructure failure
-		// or cancellation yields no publishable partial evidence.
+		// A dispatched transport failure counts as a failed corpus case. A request
+		// local health state kept from being sent, infrastructure failure or
+		// cancellation yields no publishable partial evidence.
 		if err != nil && !errors.Is(err, ErrCascadeProvider) {
 			return empty, err
 		}
@@ -343,8 +352,14 @@ func (c *CascadeExecutor) attempt(ctx context.Context, task CascadeTask, model C
 		err = ErrCascadeProvider
 		outcome.ErrorCode = "provider_error"
 		var runtimeErr *RuntimeError
-		if errors.As(providerErr, &runtimeErr) && runtimeErr.Stage == ErrorStagePreCall && c.config.Recorder != nil {
-			err = ErrCascadeAudit
+		if errors.As(providerErr, &runtimeErr) && !runtimeErr.ProviderDispatched {
+			switch {
+			case runtimeErr.Class == llmkit.ErrorClassProviderBusy || runtimeErr.Stage == ErrorStageRoute:
+				err = ErrCascadeUnavailable
+				outcome.ErrorCode = "provider_unavailable"
+			case runtimeErr.Stage == ErrorStagePreCall && c.config.Recorder != nil:
+				err = ErrCascadeAudit
+			}
 		}
 	case response == nil:
 		err = ErrCascadeProvider
