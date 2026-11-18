@@ -613,12 +613,21 @@ func TestHostAPIQueuedWorkerFailsRunningWorkflowWithExpiredLease(t *testing.T) {
 	if failed.Error != queuedLeaseExpiredCode || failed.LeaseOwner != "" {
 		t.Fatalf("failed workflow = %+v, want %s with cleared lease", failed, queuedLeaseExpiredCode)
 	}
-	agentRun, err := server.runs.Get(context.Background(), "agent-crashed")
-	if err != nil {
-		t.Fatalf("Get AgentRun returned error: %v", err)
-	}
-	if agentRun.Status != runkit.StatusFailed || agentRun.Summary.AbortReason != queuedLeaseExpiredCode {
-		t.Fatalf("agent run = %+v, want failed with %s", agentRun, queuedLeaseExpiredCode)
+	// The worker fails the workflow first and its agent run right after, so
+	// the run can still read running when the workflow already reads failed.
+	deadline := time.Now().Add(testWaitTimeout)
+	for {
+		agentRun, err := server.runs.Get(context.Background(), "agent-crashed")
+		if err != nil {
+			t.Fatalf("Get AgentRun returned error: %v", err)
+		}
+		if agentRun.Status == runkit.StatusFailed && agentRun.Summary.AbortReason == queuedLeaseExpiredCode {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("agent run = %+v, want failed with %s", agentRun, queuedLeaseExpiredCode)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
