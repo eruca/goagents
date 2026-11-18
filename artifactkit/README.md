@@ -48,6 +48,39 @@ if err != nil {
 content type, metadata, and creation time as JSON. It preserves the same
 copy-on-read/write semantics as `MemoryStore`.
 
+## PostgreSQL Store
+
+Use `pgstore` when several host replicas share one artifact store:
+
+```go
+store, err := pgstore.Open(ctx, "postgres://user:pass@host:5432/app?sslmode=require")
+if err != nil {
+	return err
+}
+defer store.Close()
+```
+
+`pgstore.OpenDB(ctx, db)` uses a caller-owned `*sql.DB` and leaves it open on
+`Close`. Both migrate the schema under a PostgreSQL advisory lock and refuse a
+database migrated by a newer `pgstore.SchemaVersion`.
+
+The store has the same semantics as `FileStore`: `Put` replaces any artifact
+stored under the ref (last writer wins), `Get` of a missing ref returns an
+error wrapping `ErrArtifactNotFound`, and content and metadata are copied on
+the way in and out. Content is stored as `BYTEA` in the `artifacts` table and
+metadata as JSON text, so metadata values read back as their JSON-decoded
+types, as with `FileStore`.
+
+Known limits:
+
+- PostgreSQL `TEXT` cannot hold a NUL byte or invalid UTF-8, so `Put` rejects
+  such refs and `Get` reports them as not found. `FileStore` accepts them.
+- Each artifact is read and written whole in one row; very large payloads
+  belong in object storage with a ref kept here.
+
+Tests run against a real database when `ARTIFACTKIT_POSTGRES_TEST_DSN` is set,
+and fail instead of skipping when `ARTIFACTKIT_REQUIRE_POSTGRES=1`.
+
 ## Boundary
 
 `artifactkit` does not import `goagent`, `workflowkit`, `llmkit`, `contextkit`,
