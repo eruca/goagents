@@ -1,8 +1,8 @@
 # GoAgents Roadmap
 
 - 更新日期：2026-11-18
-- 对应代码：`main` @ `c9c3dcd`（v0.6.0 之后）
-- 状态：草案。"下一阶段"一节的方向和顺序要等维护者确认后才算定稿。
+- 对应代码：`main` @ `8eece4c`（v0.6.0 之后）
+- 状态：维护者已选定先做多副本部署；其 kit 层已完成，host-api 部分见"下一阶段"。
 
 本文以当前 `main` 为准。2026-07 的 memorykit/v0.1.0 产品基线、roadmap 和
 ADR-0001 是在分 kit 发版、旧 CJK 检索方案下写的，已经不适用，原文保留在分支
@@ -37,19 +37,21 @@ ADR-0001 是在分 kit 发版、旧 CJK 检索方案下写的，已经不适用�
 |---|---|---|
 | goagent | 高 | — |
 | memorykit | 高 | 全文检索是词面匹配，分不清词面相同、语义不同的记忆（#9）；还没用真实 embedding 跑过评测集 |
-| workflowkit (+agentstep) | 高 | 只有 SQLite store，没有 PostgreSQL store |
-| llmkit | 高 | HealthStore 只有进程内存实现；没有项目/账户级预算扣减 |
-| runkit | 高 | 审批 checkpoint 密钥来源只有 macOS Keychain |
+| workflowkit (+agentstep) | 高 | — |
+| llmkit | 高 | 没有项目/账户级预算扣减 |
+| runkit | 高 | — |
 | contextkit / ocrs / skillkit / mcpkit | 中 | — |
 | artifactkit / evalkit / hostkit | 基础 | artifactkit 只有 FileStore |
 
-## 下一阶段候选（待决定）
+## 下一阶段
 
-下面三个方向互相独立，需要选定先后顺序：
-
-1. **支持多副本部署**：workflowkit PostgreSQL store；可共享的 llmkit HealthStore
-   实现（契约见 [`docs/llmkit-healthstore-contract.md`](../llmkit-healthstore-contract.md)）；
-   非 macOS 的 checkpoint 密钥来源。这是第 2 项的前提。
+1. **多副本部署**（进行中）。kit 层已完成：`workflowkit/pgstore`（#13）、
+   `llmkit/healthtest` + `llmkit/pghealth`（#14）、`runkit/approvalcrypto`
+   静态 keyring（#12）；host-api 可通过配置开关选用它们（#15）。
+   host-api 要真正多副本运行，还需要：artifact 共享存储（artifactkit 对象存储
+   实现）、agent run 接入已有的 `runkit/pgstore`、llmkit 审计与统计改为共享存储、
+   跨副本的工作流创建去重、embedding worker 改为领取式，以及两个 Host 进程同时
+   运行的黑盒测试。副本之间需要时钟同步。这是第 2 项的前提。
 2. **生产化 host runtime**：原 Week 18 计划中的 wire/client/server、UDS/mTLS、
    Control/Tool Bridge、Host 可执行程序和 OCI 镜像。目前完全没有开始。
 3. **补强基础 kit**：artifactkit 对象存储、evalkit 和 production tracing /
