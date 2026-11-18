@@ -91,7 +91,10 @@ type SourceReader interface {
 }
 
 type ExtractionWorkerConfig struct {
-	Jobs            ExtractionJobStore
+	Jobs ExtractionJobStore
+	// Backlog counts the durable backlog for Snapshot. When nil, Jobs is used
+	// if it implements ExtractionBacklogReader.
+	Backlog         ExtractionBacklogReader
 	Memories        LifecycleStore
 	Reader          SourceReader
 	Extractor       CandidateExtractor
@@ -119,6 +122,7 @@ func (c ExtractionWorkerConfig) Validate() error {
 
 type ExtractionWorker struct {
 	jobs            ExtractionJobStore
+	backlog         ExtractionBacklogReader
 	memories        LifecycleStore
 	reader          SourceReader
 	extractor       CandidateExtractor
@@ -128,14 +132,19 @@ type ExtractionWorker struct {
 	leaseDuration   time.Duration
 	maxAttempts     int
 	now             func() time.Time
+	stats           workerStats
 }
 
 func NewExtractionWorker(config ExtractionWorkerConfig) (*ExtractionWorker, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
+	backlog := config.Backlog
+	if nilInterface(backlog) {
+		backlog, _ = config.Jobs.(ExtractionBacklogReader)
+	}
 	return &ExtractionWorker{
-		jobs: config.Jobs, memories: config.Memories, reader: config.Reader,
+		jobs: config.Jobs, backlog: backlog, memories: config.Memories, reader: config.Reader,
 		extractor: config.Extractor, validateContent: config.ValidateContent,
 		limits: config.Limits, workerID: config.WorkerID, leaseDuration: config.LeaseDuration,
 		maxAttempts: config.MaxAttempts, now: config.Now,
@@ -143,8 +152,46 @@ func NewExtractionWorker(config ExtractionWorkerConfig) (*ExtractionWorker, erro
 }
 
 // RunOnce owns at most one lease. Model-derived output is always persisted as
-// candidate, regardless of confidence or extractor behavior.
+// candidate, regardless of confidence or extractor behavior. A run that finds
+// no claimable job is idle and is not counted by Snapshot; any other run
+// counts as one success or, if it returns an error, one failure.
 func (w *ExtractionWorker) RunOnce(ctx context.Context) (bool, error) {
+	claimed, err := w.runOnce(ctx)
+	if err != nil {
+		w.stats.recordFailure(classifyWorkerError(ctx, err, WorkerErrorClaimFailed), w.now())
+	} else if claimed {
+		w.stats.recordSuccess(w.now())
+	}
+	return claimed, err
+}
+
+// Snapshot returns the worker's content-free status. The process-local
+// counters are read before the durable backlog, so the two are not one atomic
+// view. When the backlog cannot be read, the counters come back with the error.
+func (w *ExtractionWorker) Snapshot(ctx context.Context) (WorkerSnapshot, error) {
+	snapshot := w.stats.snapshot()
+	if err := ctx.Err(); err != nil {
+		return snapshot, err
+	}
+	if nilInterface(w.backlog) {
+		return snapshot, ErrWorkerBacklogUnavailable
+	}
+	query := ExtractionBacklogQuery{Now: w.now(), MaxAttempts: w.maxAttempts}
+	if err := ValidateExtractionBacklogQuery(query); err != nil {
+		return snapshot, err
+	}
+	backlog, err := w.backlog.CountPendingExtractions(ctx, query)
+	if err != nil {
+		return snapshot, err
+	}
+	if backlog < 0 {
+		return snapshot, fmt.Errorf("%w: negative extraction backlog", ErrInvalidMemory)
+	}
+	snapshot.Backlog = backlog
+	return snapshot, nil
+}
+
+func (w *ExtractionWorker) runOnce(ctx context.Context) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
@@ -156,7 +203,7 @@ func (w *ExtractionWorker) RunOnce(ctx context.Context) (bool, error) {
 	job, err := w.jobs.ClaimExtraction(ctx, w.workerID, w.leaseDuration, w.maxAttempts, claimNow)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		if err == nil {
-			return true, w.fail(ctx, job, "source_read_failed", ctxErr, claimNow)
+			return true, w.fail(ctx, job, WorkerErrorSourceReadFailed, ctxErr, claimNow)
 		}
 		return false, ctxErr
 	}
@@ -168,34 +215,34 @@ func (w *ExtractionWorker) RunOnce(ctx context.Context) (bool, error) {
 	}
 
 	if err := validateClaimedExtractionJob(job, w.workerID, w.maxAttempts, claimNow, w.limits); err != nil {
-		return true, w.fail(ctx, job, "candidate_validate_failed", err, claimNow)
+		return true, w.fail(ctx, job, WorkerErrorCandidateValidateFailed, err, claimNow)
 	}
 	text, err := w.reader.ReadSource(ctx, job.Source)
 	if err = contextError(ctx, err); err != nil {
-		return true, w.fail(ctx, job, "source_read_failed", err, claimNow)
+		return true, w.fail(ctx, job, WorkerErrorSourceReadFailed, err, claimNow)
 	}
 	drafts, err := w.extractor.Extract(ctx, ExtractionRequest{
 		Scope: job.Scope, Source: job.Source, SourceAgentID: job.SourceAgentID,
 		ExtractorID: job.ExtractorID, Text: text, Now: job.CreatedAt,
 	})
 	if err = contextError(ctx, err); err != nil {
-		return true, w.fail(ctx, job, "candidate_extract_failed", err, claimNow)
+		return true, w.fail(ctx, job, WorkerErrorCandidateExtractFailed, err, claimNow)
 	}
 	if len(drafts) > w.limits.MaxListItems {
-		return true, w.fail(ctx, job, "candidate_validate_failed",
+		return true, w.fail(ctx, job, WorkerErrorCandidateValidateFailed,
 			fmt.Errorf("%w: extracted candidate count exceeds limit", ErrInvalidMemory), claimNow)
 	}
 	written := make(map[string]struct{}, len(drafts))
 	for _, draft := range drafts {
 		if err := ValidateCandidateDraft(draft, w.limits); err != nil {
-			return true, w.fail(ctx, job, "candidate_validate_failed", err, claimNow)
+			return true, w.fail(ctx, job, WorkerErrorCandidateValidateFailed, err, claimNow)
 		}
 		if err := contextError(ctx, w.validateContent.ValidateMemoryContent(ctx, draft.Content)); err != nil {
-			return true, w.fail(ctx, job, "candidate_validate_failed", err, claimNow)
+			return true, w.fail(ctx, job, WorkerErrorCandidateValidateFailed, err, claimNow)
 		}
 		candidateID, err := ExtractionCandidateID(job.ID, draft)
 		if err != nil {
-			return true, w.fail(ctx, job, "candidate_validate_failed", err, claimNow)
+			return true, w.fail(ctx, job, WorkerErrorCandidateValidateFailed, err, claimNow)
 		}
 		if _, duplicate := written[candidateID]; duplicate {
 			continue
@@ -212,11 +259,11 @@ func (w *ExtractionWorker) RunOnce(ctx context.Context) (bool, error) {
 			Sources:        []Source{job.Source}, Now: claimNow,
 		}
 		if err := ValidateCreateRequest(request, w.limits); err != nil {
-			return true, w.fail(ctx, job, "candidate_validate_failed", err, claimNow)
+			return true, w.fail(ctx, job, WorkerErrorCandidateValidateFailed, err, claimNow)
 		}
 		writeNow, leaseErr := w.leaseTime(job, claimNow)
 		if leaseErr != nil {
-			return true, w.failAt(ctx, job, "candidate_write_failed", leaseErr, writeNow)
+			return true, w.failAt(ctx, job, WorkerErrorCandidateWriteFailed, leaseErr, writeNow)
 		}
 		created, err := w.memories.Create(ctx, request)
 		if errors.Is(err, ErrConflict) {
@@ -225,20 +272,20 @@ func (w *ExtractionWorker) RunOnce(ctx context.Context) (bool, error) {
 			continue
 		}
 		if err = contextError(ctx, err); err != nil {
-			return true, w.fail(ctx, job, "candidate_write_failed", err, writeNow)
+			return true, w.fail(ctx, job, WorkerErrorCandidateWriteFailed, err, writeNow)
 		}
 		if err := validateCreateResult(created, request, w.limits, allowReviewedCandidateLifecycle); err != nil {
-			return true, w.fail(ctx, job, "candidate_write_failed", err, writeNow)
+			return true, w.fail(ctx, job, WorkerErrorCandidateWriteFailed, err, writeNow)
 		}
 	}
 
 	completeNow, clockErr := w.leaseTime(job, claimNow)
 	if clockErr != nil {
-		return true, w.failAt(ctx, job, "candidate_write_failed", clockErr, completeNow)
+		return true, w.failAt(ctx, job, WorkerErrorCandidateWriteFailed, clockErr, completeNow)
 	}
 	err = w.jobs.CompleteExtraction(ctx, job.ID, w.workerID, job.Attempts, completeNow)
 	if err = contextError(ctx, err); err != nil {
-		return true, w.fail(ctx, job, "candidate_write_failed", err, completeNow)
+		return true, w.fail(ctx, job, WorkerErrorCandidateWriteFailed, err, completeNow)
 	}
 	return true, nil
 }
@@ -262,7 +309,7 @@ func ExtractionCandidateID(jobID string, draft CandidateDraft) (string, error) {
 func (w *ExtractionWorker) fail(
 	ctx context.Context,
 	job ExtractionJob,
-	code string,
+	class WorkerErrorClass,
 	workErr error,
 	notBefore time.Time,
 ) error {
@@ -270,21 +317,23 @@ func (w *ExtractionWorker) fail(
 	if clockErr != nil {
 		workErr = errors.Join(workErr, clockErr)
 	}
-	return w.failAt(ctx, job, code, workErr, transitionNow)
+	return w.failAt(ctx, job, class, workErr, transitionNow)
 }
 
+// failAt returns the job to the queue under class, which doubles as the
+// job's durable failure code, and tags the returned error with it.
 func (w *ExtractionWorker) failAt(
 	ctx context.Context,
 	job ExtractionJob,
-	code string,
+	class WorkerErrorClass,
 	workErr error,
 	transitionNow time.Time,
 ) error {
-	transitionErr := w.jobs.FailExtraction(ctx, job.ID, w.workerID, job.Attempts, code, w.maxAttempts, transitionNow)
+	transitionErr := w.jobs.FailExtraction(ctx, job.ID, w.workerID, job.Attempts, string(class), w.maxAttempts, transitionNow)
 	if transitionErr != nil {
-		return errors.Join(workErr, transitionErr)
+		workErr = errors.Join(workErr, transitionErr)
 	}
-	return workErr
+	return withWorkerErrorClass(class, workErr)
 }
 
 func (w *ExtractionWorker) transitionTime(notBefore time.Time) (time.Time, error) {
