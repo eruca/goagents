@@ -128,6 +128,45 @@ Readers take lines of any length and skip a line that is not valid JSON, such
 as one a crash left half written, so one damaged record never makes the audit
 or stats unreadable.
 
+`BuildModelStatsFromAudit(now, routes, outcomes)` is the aggregation behind
+`BuildModelStats`, for records that come from somewhere other than the JSONL
+files. `SanitizeRouteTrace` and `SanitizeTaskOutcome` are the rules
+`JSONLRecorder` applies before writing; another `Recorder` should apply them too.
+
+### Shared audit in PostgreSQL
+
+`llmkit/pgaudit.Store` is a `Recorder` that replicas share, with the same read
+side as the audit files:
+
+```go
+audit, err := pgaudit.Open(ctx, dsn) // or pgaudit.OpenDB(ctx, db)
+if err != nil {
+    return err
+}
+defer audit.Close()
+
+records, err := audit.ReadRouteAudits(ctx, llmkit.AuditFilter{TaskID: workflowID})
+stats, err := audit.BuildModelStats(ctx)
+```
+
+`Open` applies the schema (`llmkit_audit_routes`, `llmkit_audit_outcomes`)
+under an advisory lock and refuses a database a newer version has migrated.
+Records are sanitized like JSONL ones and stored as JSON documents, with
+`task_id`, `route_id` and `attempt` copied into indexed columns. An insertion
+sequence stands in for file append order: it orders `ReadRouteAudits` results
+and picks the latest outcome for a `route_id` and `attempt`. For the same
+records written in the same order, `ReadRouteAudits` and `BuildModelStats`
+return what `llmkit.ReadRouteAudits` and `llmkit.BuildModelStats` return for a
+`JSONLRecorder`.
+
+Known limitation: like the file version, `BuildModelStats` reads every record
+and recomputes the stats on each call. Hosts that consult it often should
+cache the result (as `model-stats.json` does for files). Tables only grow;
+pruning old records is up to the host.
+
+Its tests use the same `LLMKIT_POSTGRES_TEST_DSN` and `LLMKIT_REQUIRE_POSTGRES`
+as `llmkit/pghealth`.
+
 To make routing use this history, load the generated stats and pass them to the adapter:
 
 ```go
@@ -416,7 +455,7 @@ Run the complete fixture-only flow from the repository root:
 ```sh
 go run ./llmkit/examples/quality-cascade
 go test ./llmkit/...
-LLMKIT_POSTGRES_TEST_DSN='postgres://...' go test -p 1 ./llmkit/pghealth
+LLMKIT_POSTGRES_TEST_DSN='postgres://...' go test -p 1 ./llmkit/pghealth ./llmkit/pgaudit
 ```
 
 The example evaluates three deterministic arithmetic fixtures, audits the

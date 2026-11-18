@@ -152,7 +152,7 @@ func (r *JSONLRecorder) RecordRoute(ctx context.Context, trace RouteTrace) error
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return r.appendJSONL(ctx, routeEventsFile, sanitizeRouteTrace(trace))
+	return r.appendJSONL(ctx, routeEventsFile, SanitizeRouteTrace(trace))
 }
 
 // RecordOutcome appends a sanitized task outcome to outcomes.jsonl.
@@ -160,7 +160,7 @@ func (r *JSONLRecorder) RecordOutcome(ctx context.Context, outcome TaskOutcome) 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return r.appendJSONL(ctx, outcomesFile, sanitizeTaskOutcome(outcome))
+	return r.appendJSONL(ctx, outcomesFile, SanitizeTaskOutcome(outcome))
 }
 
 // ReadRouteAudits reads route audit records from home and joins matching
@@ -241,7 +241,12 @@ func (r *JSONLRecorder) appendJSONL(ctx context.Context, name string, record any
 	return nil
 }
 
-func sanitizeRouteTrace(trace RouteTrace) RouteTrace {
+// SanitizeRouteTrace returns the copy of trace a Recorder persists: key-like
+// strings are redacted, surrounding whitespace is trimmed, slices and maps are
+// copied, and a zero RecordedAt is set to the current UTC time. JSONLRecorder
+// applies it before writing; other Recorder implementations should too, so
+// every backend stores the same record.
+func SanitizeRouteTrace(trace RouteTrace) RouteTrace {
 	if trace.RecordedAt.IsZero() {
 		trace.RecordedAt = time.Now().UTC()
 	}
@@ -286,7 +291,9 @@ func sanitizeTaskProfile(profile *TaskProfile) *TaskProfile {
 	return &copied
 }
 
-func sanitizeTaskOutcome(outcome TaskOutcome) TaskOutcome {
+// SanitizeTaskOutcome returns the copy of outcome a Recorder persists, with
+// the same rules as SanitizeRouteTrace.
+func SanitizeTaskOutcome(outcome TaskOutcome) TaskOutcome {
 	if outcome.RecordedAt.IsZero() {
 		outcome.RecordedAt = time.Now().UTC()
 	}
