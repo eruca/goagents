@@ -31,6 +31,9 @@ type hostSettings struct {
 	llmKitHome                   string
 	agentApprovalKeychainService string
 	agentApprovalKeyID           string
+	agentApprovalKeyring         string
+	workflowPostgresDSN          string
+	llmkitHealthPostgresDSN      string
 }
 
 func loadHostSettings(getenv func(string) string) (hostSettings, error) {
@@ -41,6 +44,9 @@ func loadHostSettings(getenv func(string) string) (hostSettings, error) {
 		llmKitHome:                   getenv("LLMKIT_HOME"),
 		agentApprovalKeychainService: getenv(agentApprovalKeychainServiceEnv),
 		agentApprovalKeyID:           getenv(agentApprovalKeyIDEnv),
+		agentApprovalKeyring:         getenv(agentApprovalKeyringEnv),
+		workflowPostgresDSN:          getenv(workflowPostgresDSNEnv),
+		llmkitHealthPostgresDSN:      getenv(llmkitHealthPostgresDSNEnv),
 	}
 	if settings.addr == "" {
 		settings.addr = defaultHostAddr
@@ -56,10 +62,11 @@ func loadHostSettings(getenv func(string) string) (hostSettings, error) {
 	if settings.shutdownTimeout <= 0 {
 		return settings, fmt.Errorf("%s must be positive", hostShutdownTimeoutEnv)
 	}
-	if _, err := resolveAgentApprovalKeychainConfig(
-		settings.agentApprovalKeychainService,
-		settings.agentApprovalKeyID,
-	); err != nil {
+	if _, _, err := resolveAgentApprovalKeys(Config{
+		AgentApprovalKeychainService: settings.agentApprovalKeychainService,
+		AgentApprovalKeyID:           settings.agentApprovalKeyID,
+		AgentApprovalKeyring:         settings.agentApprovalKeyring,
+	}); err != nil {
 		return settings, err
 	}
 	return settings, nil
@@ -91,6 +98,9 @@ func initializeHostConfig(
 		ApprovalAuthenticator:        approvalAuthenticator,
 		AgentApprovalKeychainService: settings.agentApprovalKeychainService,
 		AgentApprovalKeyID:           settings.agentApprovalKeyID,
+		AgentApprovalKeyring:         settings.agentApprovalKeyring,
+		WorkflowPostgresDSN:          settings.workflowPostgresDSN,
+		LLMKitHealthPostgresDSN:      settings.llmkitHealthPostgresDSN,
 		SkillCatalog:                 catalog,
 		SkillGateContext:             skillGate,
 	}, nil

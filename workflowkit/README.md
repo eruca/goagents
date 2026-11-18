@@ -219,6 +219,10 @@ Known limits:
   back in UTC.
 - `ListWorkflows` filters `MetadataEquals` in Go after reading every run with
   the requested status, so a metadata query scans those rows.
+- Lease times come from each replica's own clock. Keep replica clocks in sync
+  (NTP) to well within the lease duration; a replica whose clock runs ahead
+  sees other replicas' leases expire early and can fail or reclaim a run that
+  is still being worked.
 
 ## Queue Lease
 

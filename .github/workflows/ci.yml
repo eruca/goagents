@@ -54,6 +54,8 @@ jobs:
       LLMKIT_POSTGRES_TEST_DSN: postgres://postgres:postgres@localhost:5432/memorykit_test?sslmode=disable
       WORKFLOWKIT_REQUIRE_POSTGRES: "1"
       WORKFLOWKIT_POSTGRES_TEST_DSN: postgres://postgres:postgres@localhost:5432/memorykit_test?sslmode=disable
+      HOST_API_REQUIRE_POSTGRES: "1"
+      HOST_API_POSTGRES_TEST_DSN: postgres://postgres:postgres@localhost:5432/memorykit_test?sslmode=disable
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -61,4 +63,4 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
       - run: go test -race -p 1 ./memorykit/... ./runkit/... ./workflowkit/... ./llmkit/...
-      - run: go test -race -run '^TestHostMemoryPostgresBlackBox$' ./examples/host-api
+      - run: go test -race -run '^(TestHostMemoryPostgresBlackBox|TestHostAPISharedBackendsAcrossProcesses)$' ./examples/host-api
