@@ -105,6 +105,11 @@ func cloneMessages(messages []Message) []Message {
 }
 
 func cloneMessage(msg Message) Message {
+	if len(msg.Images) > 0 {
+		msg.Images = append([]Image(nil), msg.Images...)
+	} else {
+		msg.Images = nil
+	}
 	if len(msg.Metadata) == 0 {
 		msg.Metadata = nil
 		return msg

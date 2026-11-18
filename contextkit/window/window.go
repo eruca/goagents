@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -15,9 +16,14 @@ const (
 	kindKey             = "contextkit.kind"
 	collapseIDKey       = "contextkit.collapse_id"
 	droppedTotalKey     = "contextkit.dropped_total"
+	droppedImagesKey    = "contextkit.dropped_images"
 	kindWindowSummary   = "window_summary"
 	kindCollapseSummary = "collapse_summary"
 )
+
+// ErrTokenCounterRequired reports a MaxTokens budget without CountTokens:
+// guessing tokens from characters could overrun the model's window.
+var ErrTokenCounterRequired = errors.New("contextkit/window: Budget.MaxTokens needs Config.CountTokens")
 
 type Config struct {
 	Budget contextkit.Budget
@@ -28,13 +34,17 @@ type Config struct {
 	// its turn.
 	MinRecent    int
 	MaxToolChars int
-	Summarizer   contextkit.Summarizer
+	// CountTokens prices messages for Budget.MaxTokens and is called only when
+	// that limit is set. It sees tool messages after projection and must count
+	// a message's images.
+	CountTokens contextkit.TokenCounter
+	Summarizer  contextkit.Summarizer
 }
 
 // Compressor keeps the newest whole turns that fit the budget and replaces
 // everything older with one summary message. The budget covers system
-// messages and the kept conversation; the summary is not counted, and a
-// Summarizer receives the budget to size it.
+// messages and the kept conversation, in characters, tokens, or both; the
+// summary is not counted, and a Summarizer receives the budget to size it.
 //
 // Compress is incremental: feed it its previous output plus the new messages
 // and only the newly dropped messages are summarized, together with the
@@ -63,11 +73,16 @@ func (c *Compressor) Compress(ctx context.Context, req contextkit.Request) (*con
 		profile = contextkit.ProfileStandard
 	}
 	budget := effectiveBudget(req.Budget, c.cfg.Budget)
+	if budget.MaxTokens > 0 && c.cfg.CountTokens == nil {
+		return nil, ErrTokenCounterRequired
+	}
 
 	messages := budgetToolMessages(req.Messages, c.cfg.MaxToolChars)
 	system, previous, conversation := split(messages)
-	available := budget.MaxChars - charLen(system)
-	cut := windowStart(conversation, c.cfg.MinRecent, budget.MaxChars > 0, available)
+	costOf := c.coster(budget)
+	base := costOf(system)
+	fits := func(kept cost) bool { return budget.fits(base.add(kept)) }
+	cut, kept := windowStart(conversation, c.cfg.MinRecent, budget.Bounded(), costOf, fits)
 	dropped, recent := conversation[:cut], conversation[cut:]
 
 	result := &contextkit.Result{
@@ -78,7 +93,7 @@ func (c *Compressor) Compress(ctx context.Context, req contextkit.Request) (*con
 	out := append([]contextkit.Message(nil), system...)
 	switch {
 	case len(dropped) > 0:
-		summary, err := c.summarize(ctx, profile, previous, dropped, recent, budget, req.Metadata, result)
+		summary, err := c.summarize(ctx, profile, previous, dropped, recent, budget.Budget, req.Metadata, result)
 		if err != nil {
 			return nil, err
 		}
@@ -91,21 +106,25 @@ func (c *Compressor) Compress(ctx context.Context, req contextkit.Request) (*con
 	out = append(out, recent...)
 
 	result.Messages = out
-	result.OverBudget = budget.MaxChars > 0 && charLen(system)+charLen(recent) > budget.MaxChars
+	result.OverBudget = budget.Bounded() && !fits(kept)
 	return result, nil
 }
 
 // summarize builds the summary message that replaces the previous summary and
 // the newly dropped messages. Deep mode also records a reversible collapse.
 func (c *Compressor) summarize(ctx context.Context, profile contextkit.Profile, previous, dropped, recent []contextkit.Message, budget contextkit.Budget, metadata map[string]any, result *contextkit.Result) (contextkit.Message, error) {
-	total := len(dropped)
+	total, images := len(dropped), imageCount(dropped)
 	for _, msg := range previous {
-		total += droppedTotal(msg)
+		total += metadataInt(msg, droppedTotalKey)
+		images += metadataInt(msg, droppedImagesKey)
 	}
 	summary := contextkit.Message{
 		Role:     contextkit.RoleSystem,
-		Content:  placeholderSummary(total, dropped),
+		Content:  placeholderSummary(total, images, dropped),
 		Metadata: map[string]any{kindKey: kindWindowSummary, droppedTotalKey: total},
+	}
+	if images > 0 {
+		summary.Metadata[droppedImagesKey] = images
 	}
 	if profile != contextkit.ProfileDeep {
 		return summary, nil
@@ -137,13 +156,47 @@ func (c *Compressor) summarize(ctx context.Context, profile contextkit.Profile, 
 	return summary, nil
 }
 
-// windowStart returns the index of the first kept conversation message. The
-// kept window always holds the last minRecent messages, starts on a turn
-// boundary so no tool reply loses its call, and, under a budget, extends back
-// over earlier whole turns while they fit. Without a budget nothing is dropped.
-func windowStart(messages []contextkit.Message, minRecent int, bounded bool, available int) int {
+// cost is what messages take from a Budget.
+type cost struct {
+	chars, tokens int
+}
+
+func (c cost) add(o cost) cost {
+	return cost{chars: c.chars + o.chars, tokens: c.tokens + o.tokens}
+}
+
+// limits adds the fit check to contextkit.Budget.
+type limits struct {
+	contextkit.Budget
+}
+
+func (b limits) fits(c cost) bool {
+	return (b.MaxChars <= 0 || c.chars <= b.MaxChars) && (b.MaxTokens <= 0 || c.tokens <= b.MaxTokens)
+}
+
+// coster prices messages for the limits the budget sets, so CountTokens runs
+// only under a token limit.
+func (c *Compressor) coster(b limits) func([]contextkit.Message) cost {
+	return func(messages []contextkit.Message) cost {
+		var total cost
+		for _, msg := range messages {
+			total.chars += msg.CharLen()
+			if b.MaxTokens > 0 {
+				total.tokens += c.cfg.CountTokens(msg)
+			}
+		}
+		return total
+	}
+}
+
+// windowStart returns the index of the first kept conversation message and
+// what the kept messages cost. The kept window always holds the last
+// minRecent messages, starts on a turn boundary so no tool reply loses its
+// call, and, under a budget, extends back over earlier whole turns while they
+// fit. Without a budget nothing is dropped.
+func windowStart(messages []contextkit.Message, minRecent int, bounded bool, costOf func([]contextkit.Message) cost, fits func(cost) bool) (int, cost) {
 	if !bounded {
-		return 0
+		return 0, cost{}
 	}
 	boundaries := turnBoundaries(messages)
 	limit := max(len(messages)-minRecent, 0)
@@ -153,19 +206,19 @@ func windowStart(messages []contextkit.Message, minRecent int, bounded bool, ava
 			cut = b
 		}
 	}
-	suffix := charLen(messages[cut:])
+	kept := costOf(messages[cut:])
 	for i := len(boundaries) - 1; i >= 0; i-- {
 		b := boundaries[i]
 		if b >= cut {
 			continue
 		}
-		suffix += charLen(messages[b:cut])
-		if suffix > available {
+		next := kept.add(costOf(messages[b:cut]))
+		if !fits(next) {
 			break
 		}
-		cut = b
+		cut, kept = b, next
 	}
-	return cut
+	return cut, kept
 }
 
 // turnBoundaries lists the indexes a kept window may start at: each user
@@ -222,10 +275,10 @@ func isSummary(msg contextkit.Message) bool {
 	return kind == kindWindowSummary || kind == kindCollapseSummary
 }
 
-// droppedTotal reads the count a summary carries, also after a JSON round
-// trip has turned it into a float64.
-func droppedTotal(msg contextkit.Message) int {
-	switch n := msg.Metadata[droppedTotalKey].(type) {
+// metadataInt reads a count a summary carries, also after a JSON round trip
+// has turned it into a float64.
+func metadataInt(msg contextkit.Message, key string) int {
+	switch n := msg.Metadata[key].(type) {
 	case int:
 		return n
 	case float64:
@@ -235,17 +288,29 @@ func droppedTotal(msg contextkit.Message) int {
 	}
 }
 
-func placeholderSummary(total int, dropped []contextkit.Message) string {
+func placeholderSummary(total, images int, dropped []contextkit.Message) string {
+	text := fmt.Sprintf("compressed earlier context: %d messages omitted", total)
+	if images > 0 {
+		text += fmt.Sprintf(" (%d images)", images)
+	}
 	ids := make([]string, 0, len(dropped))
 	for _, msg := range dropped {
 		if msg.ID != "" {
 			ids = append(ids, msg.ID)
 		}
 	}
-	if len(ids) == 0 {
-		return fmt.Sprintf("compressed earlier context: %d messages omitted", total)
+	if len(ids) > 0 {
+		text += ", latest ids: " + strings.Join(ids, ", ")
 	}
-	return fmt.Sprintf("compressed earlier context: %d messages omitted, latest ids: %s", total, strings.Join(ids, ", "))
+	return text
+}
+
+func imageCount(messages []contextkit.Message) int {
+	total := 0
+	for _, msg := range messages {
+		total += len(msg.Images)
+	}
+	return total
 }
 
 func joinContents(messages []contextkit.Message) string {
@@ -285,22 +350,21 @@ func collapseID(ids []string) string {
 	return "collapse-" + hex.EncodeToString(h.Sum(nil))[:12]
 }
 
-func charLen(messages []contextkit.Message) int {
-	total := 0
-	for _, msg := range messages {
-		total += msg.CharLen()
+// effectiveBudget prefers a request budget that sets any limit, taken whole:
+// a limit it leaves unset does not fall back to the config.
+func effectiveBudget(requestBudget, configBudget contextkit.Budget) limits {
+	if requestBudget.Bounded() {
+		return limits{requestBudget}
 	}
-	return total
-}
-
-func effectiveBudget(requestBudget, configBudget contextkit.Budget) contextkit.Budget {
-	if requestBudget.MaxChars > 0 {
-		return requestBudget
-	}
-	return configBudget
+	return limits{configBudget}
 }
 
 func cloneMessage(msg contextkit.Message) contextkit.Message {
+	if len(msg.Images) > 0 {
+		msg.Images = append([]contextkit.Image(nil), msg.Images...)
+	} else {
+		msg.Images = nil
+	}
 	msg.Metadata = cloneMetadata(msg.Metadata)
 	return msg
 }

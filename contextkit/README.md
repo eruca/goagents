@@ -71,9 +71,47 @@ modelMessages := result.Messages
 The window is chosen from the newest message backwards. It always holds the
 last `MinRecent` messages (default 1), starts at a user message so a tool reply
 never loses its call, and extends over earlier whole turns while system
-messages plus the kept turns fit `MaxChars`. The summary message is not
+messages plus the kept turns fit the budget. The summary message is not
 counted. Without a budget nothing is dropped. When the newest turn alone is too
 large it is kept anyway and `Result.OverBudget` is set.
+
+## Token Budget
+
+A model's window is measured in tokens, and the ratio of characters to tokens
+varies with the language. Set `Budget.MaxTokens` and give the compressor the
+host's own counter:
+
+```go
+compressor := window.New(window.Config{
+	Budget:      contextkit.Budget{MaxTokens: 52000},
+	MinRecent:   2,
+	CountTokens: func(msg contextkit.Message) int { return tokenizer.Count(msg) },
+})
+```
+
+Each positive limit in a `Budget` must hold, so `MaxChars` and `MaxTokens` can
+be combined. `CountTokens` runs only when `MaxTokens` is set; it sees tool
+messages after projection. A `MaxTokens` budget without `CountTokens` fails
+with `window.ErrTokenCounterRequired` rather than estimating tokens from
+characters. A `Request.Budget` that sets any limit replaces the configured
+budget whole; limits it leaves at zero do not fall back to the config.
+
+## Images
+
+`Message.Images` holds references to images attached to a message. contextkit
+never reads them: `CharLen` ignores them, so a budget that must account for
+images needs `MaxTokens` and a `CountTokens` that prices them. When a message
+with images is dropped:
+
+- the standard placeholder counts them, for example
+  `compressed earlier context: 3 messages omitted (2 images)`, and carries the
+  count across incremental compressions;
+- a deep `Summarizer` receives them in `SummarizeRequest.Collapsed`, so the
+  host can have a vision model describe them in the summary or note them;
+- collapse records keep them, so `RestoreProjection` returns them.
+
+Messages are copied at every boundary; editing what a summarizer or a result
+holds does not change the caller's messages.
 
 Compression is incremental: keep `result.Messages` as the session transcript
 and append new messages to it. The next `Compress` recognizes its own summary,
