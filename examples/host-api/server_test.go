@@ -1685,6 +1685,7 @@ func TestCreateSyncWorkflowRejectedWhileDraining(t *testing.T) {
 		t.Fatalf("NewServer returned error: %v", err)
 	}
 	server.executions.BeginDrain()
+	recorded := recordArtifactPuts(server)
 
 	response := workflowRequestForTest(t, server.Handler(), http.MethodPost, "/workflows", map[string]string{
 		"id":    "wf-sync-draining",
@@ -1694,8 +1695,8 @@ func TestCreateSyncWorkflowRejectedWhileDraining(t *testing.T) {
 	if _, err := server.workflows.Get(t.Context(), "wf-sync-draining"); !errors.Is(err, workflowkit.ErrRunNotFound) {
 		t.Fatalf("rejected workflow Get() error = %v, want workflow not found", err)
 	}
-	if _, err := server.artifacts.Get(t.Context(), "artifact:wf-sync-draining:input"); !errors.Is(err, artifactkit.ErrArtifactNotFound) {
-		t.Fatalf("rejected workflow input artifact error = %v, want artifact not found", err)
+	if recorded.wrote(workflowInputRefPrefix("wf-sync-draining")) {
+		t.Fatal("rejected workflow wrote an input artifact")
 	}
 	if snapshots := server.executions.Snapshot(); len(snapshots) != 0 {
 		t.Fatalf("active executions after rejection = %+v, want none", snapshots)
@@ -1790,7 +1791,7 @@ func TestHostAPIRunModeSyncAndQueuedSemantics(t *testing.T) {
 	if queued.RunMode != string(RunModeQueued) || queued.Status != string(workflowkit.StatusPending) {
 		t.Fatalf("queued response = %+v, want queued pending workflow", queued)
 	}
-	if queued.InputRef != "artifact:wf-queued:input" || queued.AgentRunID != "" || queued.OutputRef != "" {
+	if !isWorkflowInputRef("wf-queued", queued.InputRef) || queued.AgentRunID != "" || queued.OutputRef != "" {
 		t.Fatalf("queued response refs = %+v, want only input ref before background run", queued)
 	}
 

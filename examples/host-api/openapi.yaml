@@ -1086,6 +1086,7 @@ components:
           $ref: '#/components/schemas/RunMode'
         input_ref:
           type: string
+          description: Opaque ref of the input artifact, artifact:{id}:input:{random suffix}.
         output_ref:
           type: string
         agent_run_id:

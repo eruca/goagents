@@ -36,7 +36,7 @@ func TestCreateWorkflowRejectsExistingIDWithoutTouchingIt(t *testing.T) {
 	if err != nil || stored.Status != workflowkit.StatusWaitingApproval || len(stored.CompletedSteps) == 0 {
 		t.Fatalf("stored = %+v, %v; want the original workflow untouched", stored, err)
 	}
-	input, err := server.artifacts.Get(t.Context(), "artifact:wf-dup:input")
+	input, err := server.artifacts.Get(t.Context(), stored.InputRef)
 	if err != nil || string(input.Content) != "original" {
 		t.Fatalf("input artifact = %q, %v; want the original input", input.Content, err)
 	}

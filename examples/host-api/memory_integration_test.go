@@ -124,6 +124,7 @@ func TestWorkflowMemoryScopeAuthorizationFailureHasNoPersistentSideEffects(t *te
 			if err != nil {
 				t.Fatal(err)
 			}
+			recorded := recordArtifactPuts(server)
 			t.Cleanup(func() { _ = server.Close(context.Background()) })
 			workflowID := "wf-auth-side-effect-" + strings.ReplaceAll(test.name, " ", "-")
 			response := createMemoryWorkflowRequest(t, server.Handler(), map[string]any{
@@ -133,7 +134,7 @@ func TestWorkflowMemoryScopeAuthorizationFailureHasNoPersistentSideEffects(t *te
 			if response.Code < 400 {
 				t.Fatalf("authorization failure status=%d body=%s", response.Code, response.Body.String())
 			}
-			if _, err := server.artifacts.Get(t.Context(), "artifact:"+workflowID+":input"); err == nil {
+			if recorded.wrote(workflowInputRefPrefix(workflowID)) {
 				t.Fatal("authorization failure persisted input Artifact")
 			}
 			if _, err := server.workflows.Get(t.Context(), workflowID); err == nil {
@@ -247,7 +248,7 @@ func TestAgentMemoryCheckpointPreservesTrustedScopeForResume(t *testing.T) {
 	request := checkpoint.Request
 	if request.UserID != "user-a" || request.SessionID != created.ID || request.PolicyContext.TenantID != "tenant-a" ||
 		request.PolicyContext.Labels["project_id"] != "project-a" || request.Metadata[memoryWriteIntentMetadataKey] != true ||
-		request.Metadata[hostWorkflowInputRefKey] != "artifact:wf-memory-resume:input" ||
+		!isWorkflowInputRef("wf-memory-resume", stringMetadata(request.Metadata, hostWorkflowInputRefKey)) ||
 		!slices.Contains(request.AllowedPermissions, policy.PermissionWrite) {
 		t.Fatalf("checkpoint request lost trusted memory identity: %#v", request)
 	}
@@ -378,7 +379,7 @@ func TestAgentMemoryMalformedScopeStopsBeforeLLM(t *testing.T) {
 	}
 	llm := &recordingMemoryLLM{}
 	workflow := workflowkit.WorkflowRun{
-		ID: "workflow-malformed-production", InputRef: "artifact:workflow-malformed-production:input",
+		ID: "workflow-malformed-production", InputRef: "artifact:workflow-malformed-production:input:test",
 		Metadata: map[string]any{
 			"task_profile": defaultHostTaskProfile(), memoryTenantMetadataKey: "tenant-a",
 			memoryProjectMetadataKey: "project-a", memoryUserMetadataKey: "user-a", memoryWriteIntentMetadataKey: false,
@@ -420,7 +421,7 @@ func TestAgentMemoryEnqueueFailureKeepsSuccessfulRunAndRecordsSafeDegradation(t 
 		artifacts: artifacts, runs: runs,
 	}
 	run := workflowkit.WorkflowRun{
-		ID: "workflow-enqueue-failure", InputRef: "artifact:workflow-enqueue-failure:input",
+		ID: "workflow-enqueue-failure", InputRef: "artifact:workflow-enqueue-failure:input:test",
 		Metadata: map[string]any{
 			"task_profile": defaultHostTaskProfile(), memoryTenantMetadataKey: "tenant-a",
 			memoryProjectMetadataKey: "project-a", memoryUserMetadataKey: "user-a", memoryWriteIntentMetadataKey: false,
@@ -482,7 +483,7 @@ func TestAgentMemoryRequeueKeepsExtractionSourcesRunImmutable(t *testing.T) {
 		artifacts: artifacts, runs: runs,
 	}
 	run := workflowkit.WorkflowRun{
-		ID: "workflow-requeued-output", InputRef: "artifact:workflow-requeued-output:input",
+		ID: "workflow-requeued-output", InputRef: "artifact:workflow-requeued-output:input:test",
 		Metadata: map[string]any{
 			"task_profile": defaultHostTaskProfile(), memoryTenantMetadataKey: "tenant-a",
 			memoryProjectMetadataKey: "project-a", memoryUserMetadataKey: "user-a", memoryWriteIntentMetadataKey: false,
@@ -689,7 +690,7 @@ func runProductionMemoryAgent(
 ) *agentcore.RunResult {
 	t.Helper()
 	workflow := workflowkit.WorkflowRun{
-		ID: workflowID, InputRef: "artifact:" + workflowID + ":input",
+		ID: workflowID, InputRef: workflowInputRefPrefix(workflowID) + "test",
 		Metadata: map[string]any{
 			"task_profile": defaultHostTaskProfile(), memoryTenantMetadataKey: "tenant-a",
 			memoryProjectMetadataKey: projectID, memoryUserMetadataKey: "user-a", memoryWriteIntentMetadataKey: writeIntent,

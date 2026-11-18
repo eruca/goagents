@@ -107,10 +107,10 @@ func newHostMemoryQueryBuilder(artifacts artifactkit.Store, maxQueryRunes int) (
 		if !workflowIDPresent || !ok || strings.TrimSpace(workflowID) == "" || !inputRefOK {
 			return "", nil, nil, invalidHostMemoryQuery()
 		}
-		expectedRef := "artifact:" + workflowID + ":input"
-		if inputRef != expectedRef {
+		if !isWorkflowInputRef(workflowID, inputRef) {
 			return "", nil, nil, invalidHostMemoryQuery()
 		}
+		expectedRef := inputRef
 		expectedMessage := "Review input artifact " + expectedRef
 		currentUser := ""
 		for index := len(request.Messages) - 1; index >= 0; index-- {
