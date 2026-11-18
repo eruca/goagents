@@ -44,6 +44,7 @@ github.com/eruca/goagents/workflowkit does not import github.com/eruca/goagents/
 - lifecycle guards for `Run`, `Continue`, and `Cancel`
 - explicit retry policy for transient step errors
 - `sqlitestore` for SQLite-backed persistence
+- `pgstore` for PostgreSQL-backed persistence shared by several replicas
 - `storetest` conformance suite for Store implementations
 
 It intentionally does not provide DAG execution, distributed worker loops, cron,
@@ -189,6 +190,36 @@ and metadata, attempts, and completed steps as JSON fields. It still stores refs
 not raw prompts or full tool payloads. The current SQLite schema is versioned as
 `sqlitestore.SchemaVersion`.
 
+## PostgreSQL Store
+
+Use `pgstore` when several host replicas share one workflow store:
+
+```go
+store, err := pgstore.Open(ctx, "postgres://user:pass@host:5432/app?sslmode=require")
+if err != nil {
+	panic(err)
+}
+defer store.Close()
+```
+
+`pgstore.OpenDB(ctx, db)` uses a caller-owned `*sql.DB` and leaves it open on
+`Close`. Both migrate the schema under a PostgreSQL advisory lock and refuse a
+database migrated by a newer `pgstore.SchemaVersion`.
+
+The store implements `CreateStore`, `WorkflowQueryStore`, and
+`QueueRecoveryStore` with the same semantics as `sqlitestore`. `Update` locks
+the run row for its whole read-mutate-write, and `ClaimRunnable` and
+`FailExpiredRunning` use `FOR UPDATE SKIP LOCKED`, so replicas never claim or
+recover the same run twice.
+
+Known limits:
+
+- Times are stored as `TIMESTAMPTZ`, which keeps microseconds; the store
+  truncates every time it writes to microsecond precision and reads times
+  back in UTC.
+- `ListWorkflows` filters `MetadataEquals` in Go after reading every run with
+  the requested status, so a metadata query scans those rows.
+
 ## Queue Lease
 
 Use `QueueStore` when a host needs to claim a pending workflow for background
@@ -309,5 +340,7 @@ Extension packages are useful but still early:
 - `sqlitestore` is suitable for local persistence and prototypes; schema
   compatibility should be treated as experimental until versioned migrations are
   introduced.
+- `pgstore` is the multi-replica PostgreSQL store; its schema is versioned
+  and migrated under an advisory lock, but should still be treated as early.
 - `storetest` is intended for future store implementations.
 
