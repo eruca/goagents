@@ -13,7 +13,10 @@ import (
 	"github.com/eruca/goagents/memorykit"
 )
 
-var _ memorykit.Store = (*Store)(nil)
+var (
+	_ memorykit.Store                  = (*Store)(nil)
+	_ memorykit.EmbeddingBacklogReader = (*Store)(nil)
+)
 
 type Store struct {
 	mu         sync.RWMutex
@@ -318,12 +321,8 @@ func (s *Store) PendingEmbeddings(ctx context.Context, query memorykit.PendingEm
 	}
 	result := make([]memorykit.EmbeddingInput, 0)
 	for id, memory := range s.memories {
-		if memory.Status != memorykit.StatusActive {
-			continue
-		}
-		contentHash := hashMemoryContent(memory.Content)
-		embedding, exists := s.embeddings[embeddingIdentity{memoryID: id, profileID: query.ProfileID}]
-		if exists && embedding.contentHash == contentHash {
+		contentHash, pending := s.embeddingPendingLocked(id, memory, query.ProfileID)
+		if !pending {
 			continue
 		}
 		result = append(result, memorykit.EmbeddingInput{
@@ -342,6 +341,41 @@ func (s *Store) PendingEmbeddings(ctx context.Context, query memorykit.PendingEm
 		result = result[:query.Limit]
 	}
 	return append([]memorykit.EmbeddingInput(nil), result...), nil
+}
+
+// CountPendingEmbeddings counts exactly the memories PendingEmbeddings would
+// return for the profile without a limit.
+func (s *Store) CountPendingEmbeddings(ctx context.Context, query memorykit.EmbeddingBacklogQuery) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if err := memorykit.ValidateEmbeddingBacklogQuery(query, s.limits); err != nil {
+		return 0, err
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	var count int64
+	for id, memory := range s.memories {
+		if _, pending := s.embeddingPendingLocked(id, memory, query.ProfileID); pending {
+			count++
+		}
+	}
+	return count, nil
+}
+
+// embeddingPendingLocked reports whether an active memory lacks a current
+// embedding for the profile, and returns its content hash.
+func (s *Store) embeddingPendingLocked(id string, memory memorykit.Memory, profileID string) (string, bool) {
+	if memory.Status != memorykit.StatusActive {
+		return "", false
+	}
+	contentHash := hashMemoryContent(memory.Content)
+	embedding, exists := s.embeddings[embeddingIdentity{memoryID: id, profileID: profileID}]
+	return contentHash, !exists || embedding.contentHash != contentHash
 }
 
 func (s *Store) PutEmbedding(ctx context.Context, request memorykit.PutEmbeddingRequest) error {

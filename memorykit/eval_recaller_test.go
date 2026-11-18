@@ -79,7 +79,7 @@ func TestEvaluateProjectMemoryV1ProductionRecallerAblations(t *testing.T) {
 
 func loadProductionEvalCorpus(t *testing.T) memorykit.EvalCorpus {
 	t.Helper()
-	data, err := os.ReadFile("testdata/recall_cases.json")
+	data, err := os.ReadFile("testdata/recall_cases_vector_v1.json")
 	if err != nil {
 		t.Fatal(err)
 	}

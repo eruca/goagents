@@ -147,6 +147,15 @@ a content-free degradation event for operator follow-up.
 - **Audit:** revisions record lifecycle action, actor, reason, version, and
   timestamps. Extraction-job completion/final failure retains only a
   content-free idempotency/operational tombstone.
+- **Worker status:** `EmbeddingWorker.Snapshot` and
+  `ExtractionWorker.Snapshot` return a content-free `WorkerSnapshot`: the
+  exact durable backlog (via `EmbeddingBacklogReader` /
+  `ExtractionBacklogReader`, which `memorystore` and `pgstore` implement), and
+  process-local success/failure counts, last `WorkerErrorClass` and last
+  transition time. Idle runs are not counted. The backlog reader comes from the
+  worker config's `Backlog` field, or from the store itself when it implements
+  the reader; without either, `Snapshot` returns
+  `ErrWorkerBacklogUnavailable`.
 
 ## Verification
 
