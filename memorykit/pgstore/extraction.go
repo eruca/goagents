@@ -13,7 +13,10 @@ import (
 	"github.com/eruca/goagents/memorykit"
 )
 
-var _ memorykit.ExtractionJobStore = (*Store)(nil)
+var (
+	_ memorykit.ExtractionJobStore      = (*Store)(nil)
+	_ memorykit.ExtractionBacklogReader = (*Store)(nil)
+)
 
 func (s *Store) EnqueueExtraction(ctx context.Context, job memorykit.ExtractionJob) error {
 	if err := ctx.Err(); err != nil {
@@ -100,6 +103,27 @@ func (s *Store) ClaimExtraction(
 		return memorykit.ExtractionJob{}, wrapBackend("claim extraction commit", err)
 	}
 	return job, nil
+}
+
+// CountPendingExtractions counts jobs with attempts left that are pending,
+// including those waiting out a retry delay, or leased under an expired
+// lease. Jobs under a live lease are in progress and are not counted.
+func (s *Store) CountPendingExtractions(ctx context.Context, query memorykit.ExtractionBacklogQuery) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if err := memorykit.ValidateExtractionBacklogQuery(query); err != nil {
+		return 0, err
+	}
+	var count int64
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM memory_extraction_jobs
+		WHERE attempts < $2
+		  AND (status = 'pending' OR (status = 'leased' AND lease_until <= $1))`,
+		query.Now, query.MaxAttempts).Scan(&count); err != nil {
+		return 0, wrapBackend("count pending extractions", err)
+	}
+	return count, nil
 }
 
 func (s *Store) CompleteExtraction(ctx context.Context, id, workerID string, expectedAttempt int, now time.Time) error {

@@ -267,3 +267,70 @@ func assertCandidateIDs(t *testing.T, candidates []memorykit.Candidate, want []s
 		t.Fatalf("candidate IDs = %v, want %v", got, want)
 	}
 }
+func TestStoreCountsPendingEmbeddings(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	scope := memorykit.Scope{
+		TenantID:    "tenant-backlog",
+		SubjectType: memorykit.SubjectProject,
+		SubjectID:   "project-backlog",
+	}
+	active := testMemoryRequest(
+		memoryIDExact,
+		scope,
+		memorykit.KindDecision,
+		"embedding.active",
+		"active content",
+		memorykit.StatusActive,
+		now,
+		80,
+	)
+	inactive := testMemoryRequest(
+		memoryIDInactive,
+		scope,
+		memorykit.KindDecision,
+		"embedding.inactive",
+		"inactive content",
+		memorykit.StatusInactive,
+		now,
+		80,
+	)
+	createTestMemory(t, store, active)
+	createTestMemory(t, store, inactive)
+
+	assertPendingEmbeddingCount(t, store, "profile-a", 1)
+	hash := hashMemoryContent(active.Content)
+	if err := store.PutEmbedding(ctx, memorykit.PutEmbeddingRequest{
+		MemoryID: active.ID, Scope: scope, ProfileID: "profile-a", ContentHash: hash,
+		Dimensions: 2, Vector: []float32{1, 0}, EmbeddedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertPendingEmbeddingCount(t, store, "profile-a", 0)
+
+	if _, err := store.Correct(ctx, memorykit.CorrectRequest{
+		Command: memorykit.VersionedCommand{
+			Scope: scope, ID: active.ID, ExpectedVersion: 1,
+			Actor: "test", Reason: "refresh backlog", Now: now.Add(time.Minute),
+		},
+		Content: "corrected active content", ValidFrom: active.ValidFrom,
+		Importance: active.Importance, Confidence: active.Confidence,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertPendingEmbeddingCount(t, store, "profile-a", 1)
+}
+
+func assertPendingEmbeddingCount(t *testing.T, store *Store, profileID string, want int64) {
+	t.Helper()
+	got, err := store.CountPendingEmbeddings(context.Background(), memorykit.EmbeddingBacklogQuery{
+		ProfileID: profileID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("CountPendingEmbeddings() = %d, want %d", got, want)
+	}
+}

@@ -696,3 +696,84 @@ func TestExtractionRetryDelayDoublesUpToTheCeiling(t *testing.T) {
 		t.Errorf("default delay = %s, want %s", got, defaultExtractionRetryDelay)
 	}
 }
+
+func TestStoreCountsPendingExtractions(t *testing.T) {
+	store := openExtractionStore(t)
+	ctx := context.Background()
+	queryNow := time.Date(2026, 7, 27, 14, 0, 0, 0, time.UTC)
+	query := memorykit.ExtractionBacklogQuery{Now: queryNow, MaxAttempts: 3}
+	// The backlog is global; other tenants' jobs in a shared test database
+	// are part of the baseline.
+	baseline, err := store.CountPendingExtractions(ctx, query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs := map[string]string{
+		"pending":           "8c111111-1111-4111-8111-111111111111",
+		"active lease":      "8c222222-2222-4222-8222-222222222222",
+		"expired retryable": "8c333333-3333-4333-8333-333333333333",
+		"expired exhausted": "8c444444-4444-4444-8444-444444444444",
+		"completed":         "8c555555-5555-4555-8555-555555555555",
+		"failed":            "8c666666-6666-4666-8666-666666666666",
+		"retry delayed":     "8c777777-7777-4777-8777-777777777777",
+		"pending exhausted": "8c888888-8888-4888-8888-888888888888",
+	}
+	for _, id := range jobs {
+		if err := store.EnqueueExtraction(ctx, extractionJobFixture(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setExtractionQueueState(t, store, jobs["active lease"], memorykit.ExtractionLeased, 1, queryNow.Add(time.Minute), time.Time{})
+	setExtractionQueueState(t, store, jobs["expired retryable"], memorykit.ExtractionLeased, 1, queryNow, time.Time{})
+	setExtractionQueueState(t, store, jobs["expired exhausted"], memorykit.ExtractionLeased, 3, queryNow, time.Time{})
+	setExtractionQueueState(t, store, jobs["completed"], memorykit.ExtractionCompleted, 1, time.Time{}, time.Time{})
+	setExtractionQueueState(t, store, jobs["failed"], memorykit.ExtractionFailed, 3, time.Time{}, time.Time{})
+	setExtractionQueueState(t, store, jobs["retry delayed"], memorykit.ExtractionPending, 1, time.Time{}, queryNow.Add(time.Hour))
+	setExtractionQueueState(t, store, jobs["pending exhausted"], memorykit.ExtractionPending, 3, time.Time{}, time.Time{})
+
+	got, err := store.CountPendingExtractions(ctx, query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// pending, expired retryable and retry delayed.
+	if got-baseline != 3 {
+		t.Fatalf("CountPendingExtractions() = %d, want baseline %d + 3", got, baseline)
+	}
+
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := store.CountPendingExtractions(canceled, query); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled CountPendingExtractions() = %v, want context.Canceled", err)
+	}
+	if _, err := store.CountPendingExtractions(ctx, memorykit.ExtractionBacklogQuery{Now: queryNow}); !errors.Is(err, memorykit.ErrInvalidMemory) {
+		t.Fatalf("CountPendingExtractions(zero attempts) = %v, want ErrInvalidMemory", err)
+	}
+}
+
+func setExtractionQueueState(
+	t *testing.T,
+	store *Store,
+	id string,
+	status memorykit.ExtractionJobStatus,
+	attempts int,
+	leaseUntil, nextAttemptAt time.Time,
+) {
+	t.Helper()
+	var lease, next any
+	owner := ""
+	if !leaseUntil.IsZero() {
+		lease = leaseUntil
+		owner = "worker-backlog"
+	}
+	if !nextAttemptAt.IsZero() {
+		next = nextAttemptAt
+	}
+	if _, err := store.db.ExecContext(context.Background(), `
+		UPDATE memory_extraction_jobs
+		SET status = $2, attempts = $3, lease_owner = $4, lease_until = $5, next_attempt_at = $6
+		WHERE id = $1`,
+		id, status, attempts, owner, lease, next,
+	); err != nil {
+		t.Fatal(err)
+	}
+}

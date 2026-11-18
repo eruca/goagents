@@ -31,6 +31,18 @@ type PendingEmbeddingQuery struct {
 	Limit     int
 }
 
+// EmbeddingBacklogQuery selects the durable embedding backlog of one profile.
+type EmbeddingBacklogQuery struct {
+	ProfileID string
+}
+
+// ExtractionBacklogQuery selects the durable extraction backlog as seen by a
+// worker that gives up after MaxAttempts claims.
+type ExtractionBacklogQuery struct {
+	Now         time.Time
+	MaxAttempts int
+}
+
 type EmbeddingInput struct {
 	MemoryID    string
 	Scope       Scope
@@ -52,6 +64,20 @@ type PutEmbeddingRequest struct {
 type EmbeddingStore interface {
 	PendingEmbeddings(context.Context, PendingEmbeddingQuery) ([]EmbeddingInput, error)
 	PutEmbedding(context.Context, PutEmbeddingRequest) error
+}
+
+// EmbeddingBacklogReader counts, exactly, the memories PendingEmbeddings would
+// eventually return for a profile. It reads counts only, never content.
+type EmbeddingBacklogReader interface {
+	CountPendingEmbeddings(context.Context, EmbeddingBacklogQuery) (int64, error)
+}
+
+// ExtractionBacklogReader counts, exactly, the extraction jobs that still have
+// work left: pending jobs, including those waiting out a retry delay, and
+// leased jobs whose lease has expired, as long as they have attempts left. A
+// job under a live lease is in progress and not counted.
+type ExtractionBacklogReader interface {
+	CountPendingExtractions(context.Context, ExtractionBacklogQuery) (int64, error)
 }
 
 type Channel string
@@ -101,6 +127,23 @@ func ValidatePendingEmbeddingQuery(query PendingEmbeddingQuery, limits Limits) e
 	}
 	if !validEmbeddingMetadata(query.ProfileID, limits) || query.Limit <= 0 || query.Limit > limits.MaxListItems {
 		return fmt.Errorf("%w: invalid pending embedding query", ErrInvalidMemory)
+	}
+	return nil
+}
+
+func ValidateEmbeddingBacklogQuery(query EmbeddingBacklogQuery, limits Limits) error {
+	if err := limits.Validate(); err != nil {
+		return err
+	}
+	if !validEmbeddingMetadata(query.ProfileID, limits) {
+		return fmt.Errorf("%w: invalid embedding backlog query", ErrInvalidMemory)
+	}
+	return nil
+}
+
+func ValidateExtractionBacklogQuery(query ExtractionBacklogQuery) error {
+	if query.Now.IsZero() || query.MaxAttempts <= 0 || query.MaxAttempts > math.MaxInt32 {
+		return fmt.Errorf("%w: invalid extraction backlog query", ErrInvalidMemory)
 	}
 	return nil
 }
