@@ -1,7 +1,7 @@
 # GoAgents Roadmap
 
 - 更新日期：2026-11-18
-- 对应代码：`main` @ `v0.6.0`（`6b82b14`）
+- 对应代码：`main` @ `c9c3dcd`（v0.6.0 之后）
 - 状态：草案。"下一阶段"一节的方向和顺序要等维护者确认后才算定稿。
 
 本文以当前 `main` 为准。2026-07 的 memorykit/v0.1.0 产品基线、roadmap 和
@@ -19,7 +19,7 @@ ADR-0001 是在分 kit 发版、旧 CJK 检索方案下写的，已经不适用�
 - 只有出现明确的跨 Agent 业务流程，才在 host/workflow 层考虑 handoff，不扩张
   `goagent` 核心。
 
-## 当前状态（v0.6.0）
+## 当前状态
 
 - 单 module `github.com/eruca/goagents`，按 `vX.Y.Z` 整体发版；kit 之间的依赖
   由 `internal/boundary` 在测试中强制检查（见 [`docs/modules.md`](../modules.md)）。
@@ -27,26 +27,21 @@ ADR-0001 是在分 kit 发版、旧 CJK 检索方案下写的，已经不适用�
   流式错误统计和 host-api 安全加固；随后 contextkit 支持按 token 计预算。
 - memorykit 中英文召回评测集 v2（#8）已合入：exact+FTS 召回 19/22，
   禁止召回 1/30（已知，见 #9）。
+- v0.6.0 之后从旧分支移植并合入：llmkit `CascadeExecutor`（#5，按验收测试逐级
+  升级模型，门槛可配置）、`examples/memory-ingest`（#6）、memory worker
+  可观测性与 `GET /workers/memory`（#10）。
 - `examples/host-api` 是单机 MVP：有进程级黑盒验收和 3×50 工作流的稳定性测试，
   worker 一次处理一个任务，不是生产网关。
 
 | Kit | 成熟度 | 已知缺口 |
 |---|---|---|
 | goagent | 高 | — |
-| memorykit | 高 | worker 可观测性待合入（见下）；全文检索缺最低得分门槛（#9） |
+| memorykit | 高 | 全文检索缺最低得分门槛（#9） |
 | workflowkit (+agentstep) | 高 | 只有 SQLite store，没有 PostgreSQL store |
 | llmkit | 高 | HealthStore 只有进程内存实现；没有项目/账户级预算扣减 |
 | runkit | 高 | 审批 checkpoint 密钥来源只有 macOS Keychain |
 | contextkit / ocrs / skillkit / mcpkit | 中 | — |
 | artifactkit / evalkit / hostkit | 基础 | artifactkit 只有 FileStore |
-
-## 进行中
-
-从未合并分支移植到 main 的工作（2026-11-18 起）：
-
-- PR #5：llmkit `CascadeExecutor`，按验收测试逐级升级模型。合并前需要审查设计。
-- PR #6：`examples/memory-ingest` 文本入库示例。
-- memorykit worker 可观测性：积压数、成功/失败计数、`GET /workers/memory`。
 
 ## 下一阶段候选（待决定）
 
