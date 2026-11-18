@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -58,6 +59,52 @@ func openTestStore(t *testing.T) *Store {
 }
 
 var migrationDriverSequence atomic.Uint64
+
+// openIsolatedSchemaStore opens a Store migrated into a fresh schema that is
+// dropped at cleanup, for tests that seed fixed IDs or need an empty table.
+func openIsolatedSchemaStore(t *testing.T) *Store {
+	t.Helper()
+	dsn := postgresDSN(t)
+	schema := fmt.Sprintf("memorykit_test_%d_%d", os.Getpid(), migrationDriverSequence.Add(1))
+
+	adminDB, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open schema admin DB: %v", err)
+	}
+	if _, err := adminDB.ExecContext(context.Background(), "CREATE SCHEMA "+schema); err != nil {
+		_ = adminDB.Close()
+		t.Fatalf("create isolated schema: %v", err)
+	}
+	dropSchema := func() {
+		if _, err := adminDB.ExecContext(context.Background(), "DROP SCHEMA "+schema+" CASCADE"); err != nil {
+			t.Errorf("drop isolated schema: %v", err)
+		}
+		_ = adminDB.Close()
+	}
+
+	scopedURL, err := url.Parse(dsn)
+	if err != nil || scopedURL.Scheme == "" {
+		dropSchema()
+		t.Fatalf("test DSN must be a PostgreSQL URL: %v", err)
+	}
+	query := scopedURL.Query()
+	query.Set("search_path", schema+",public")
+	scopedURL.RawQuery = query.Encode()
+	db, err := sql.Open("pgx", scopedURL.String())
+	if err != nil {
+		dropSchema()
+		t.Fatalf("open isolated schema DB: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = db.Close()
+		dropSchema()
+	})
+	store, err := OpenDB(context.Background(), db, validConfig())
+	if err != nil {
+		t.Fatalf("OpenDB() in isolated schema: %v", err)
+	}
+	return store
+}
 
 func openMigrationDriverDB(t *testing.T, options migrationDriverOptions) (*sql.DB, *migrationDriverState) {
 	t.Helper()
