@@ -144,6 +144,24 @@ a content-free degradation event for operator follow-up.
   content hashes become pending), then run `EmbeddingWorker` until
   `PendingEmbeddings` is empty. Exact/full-text recall remains available while
   vector rows are absent.
+- **One embedding worker across replicas:** set
+  `EmbeddingWorkerConfig.RunGate` to a `memorykit.RunGate`, whose
+  `TryRun(ctx, run) (ran, err)` runs `run` only while no other holder is
+  running. `RunOnce` then runs its batch inside `TryRun`; a round in which
+  another holder has the gate returns `(0, nil)` without reading the backlog
+  or calling the embedder, and, like an idle run, is not counted by
+  `Snapshot`. An error from the gate itself is returned and counted as a
+  failure with class `pending_read_failed` (or the cancellation class). A nil
+  `RunGate` keeps the old behavior: every `RunOnce` runs.
+  `pgstore.Store.EmbeddingRunGate()` implements it with a non-blocking
+  `pg_try_advisory_lock` on a dedicated pooled connection, always followed by
+  `pg_advisory_unlock` (with a context that ignores the caller's cancellation)
+  even if `run` panics or is canceled; if the unlock cannot be confirmed, the
+  connection is discarded so the session, and its lock, ends. Advisory locks
+  are per database, not per schema, so the lock key hashes
+  `memorykit.embedding`, the connection's current schema, and the embedding
+  profile: Stores sharing a database, schema and profile share one lock;
+  different schemas or profiles do not block each other.
 - **Activation:** changes a reviewed candidate to active and supersedes an
   existing active record with the same Scope/kind/key.
 - **Correction:** creates a new revision, replaces content/sources, and

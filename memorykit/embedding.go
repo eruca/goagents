@@ -18,6 +18,11 @@ type EmbeddingWorkerConfig struct {
 	ProfileID  string
 	Dimensions int
 	BatchSize  int
+	// RunGate, when set, makes RunOnce run its batch only while holding the
+	// gate, so that replicas sharing one store do not embed the same batch
+	// at once. A round in which another holder has the gate is skipped. Nil
+	// runs every round, as before.
+	RunGate RunGate
 }
 
 // Validate rejects incomplete worker configuration before background work starts.
@@ -37,6 +42,7 @@ type EmbeddingWorker struct {
 	profileID  string
 	dimensions int
 	batchSize  int
+	gate       RunGate
 	stats      workerStats
 }
 
@@ -48,6 +54,10 @@ func NewEmbeddingWorker(config EmbeddingWorkerConfig) (*EmbeddingWorker, error) 
 	if nilInterface(backlog) {
 		backlog, _ = config.Store.(EmbeddingBacklogReader)
 	}
+	gate := config.RunGate
+	if nilInterface(gate) {
+		gate = nil
+	}
 	return &EmbeddingWorker{
 		store:      config.Store,
 		backlog:    backlog,
@@ -55,20 +65,23 @@ func NewEmbeddingWorker(config EmbeddingWorkerConfig) (*EmbeddingWorker, error) 
 		profileID:  config.ProfileID,
 		dimensions: config.Dimensions,
 		batchSize:  config.BatchSize,
+		gate:       gate,
 	}, nil
 }
 
 // RunOnce processes at most one Store-ordered batch. Host owns scheduling and retries.
 // A run that finds nothing pending is idle and is not counted by Snapshot;
 // any other run counts as one success or, if it returns an error, one failure.
+//
+// With a RunGate, the batch runs inside RunGate.TryRun. A round skipped
+// because another holder has the gate returns (0, nil) and, like an idle run,
+// is not counted. An error from the gate itself is returned and counted as a
+// failure classed like a store read (WorkerErrorPendingReadFailed), unless
+// the context was canceled or timed out.
 func (w *EmbeddingWorker) RunOnce(ctx context.Context) (int, error) {
-	inputs, err := w.pending(ctx)
-	if err == nil && len(inputs) == 0 {
+	stored, idle, err := w.gatedBatch(ctx)
+	if err == nil && idle {
 		return 0, nil
-	}
-	stored := 0
-	if err == nil {
-		stored, err = w.process(ctx, inputs)
 	}
 	if err != nil {
 		w.stats.recordFailure(classifyWorkerError(ctx, err, WorkerErrorProviderFailed), time.Now())
@@ -76,6 +89,44 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context) (int, error) {
 		w.stats.recordSuccess(time.Now())
 	}
 	return stored, err
+}
+
+// gatedBatch runs one batch, inside the RunGate when there is one. idle
+// reports a round that did no work: nothing pending, or skipped by the gate.
+func (w *EmbeddingWorker) gatedBatch(ctx context.Context) (stored int, idle bool, err error) {
+	if w.gate == nil {
+		return w.batch(ctx)
+	}
+	called := false
+	var runErr error
+	_, err = w.gate.TryRun(ctx, func(runCtx context.Context) error {
+		called = true
+		stored, idle, runErr = w.batch(runCtx)
+		return runErr
+	})
+	if err != nil {
+		if !called || runErr == nil {
+			// The gate failed to acquire or to release.
+			err = withWorkerErrorClass(WorkerErrorPendingReadFailed, err)
+		}
+		return stored, false, err
+	}
+	if !called {
+		return 0, true, nil
+	}
+	return stored, idle, nil
+}
+
+func (w *EmbeddingWorker) batch(ctx context.Context) (stored int, idle bool, err error) {
+	inputs, err := w.pending(ctx)
+	if err != nil {
+		return 0, false, err
+	}
+	if len(inputs) == 0 {
+		return 0, true, nil
+	}
+	stored, err = w.process(ctx, inputs)
+	return stored, false, err
 }
 
 // Snapshot returns the worker's content-free status. The process-local

@@ -64,6 +64,13 @@ var migrationDriverSequence atomic.Uint64
 // dropped at cleanup, for tests that seed fixed IDs or need an empty table.
 func openIsolatedSchemaStore(t *testing.T) *Store {
 	t.Helper()
+	return openIsolatedSchemaStores(t, 1)[0]
+}
+
+// openIsolatedSchemaStores opens count Stores on one fresh schema, each with
+// its own connection pool, as separate processes sharing a database would.
+func openIsolatedSchemaStores(t *testing.T, count int) []*Store {
+	t.Helper()
 	dsn := postgresDSN(t)
 	schema := fmt.Sprintf("memorykit_test_%d_%d", os.Getpid(), migrationDriverSequence.Add(1))
 
@@ -71,39 +78,46 @@ func openIsolatedSchemaStore(t *testing.T) *Store {
 	if err != nil {
 		t.Fatalf("open schema admin DB: %v", err)
 	}
+	// On a fresh database, migrating with the isolated schema first on
+	// search_path would install pgvector into it, and dropping the schema
+	// would drop the extension. Install it on the default path first.
+	if _, err := adminDB.ExecContext(context.Background(), "CREATE EXTENSION IF NOT EXISTS vector"); err != nil {
+		_ = adminDB.Close()
+		t.Fatalf("create vector extension: %v", err)
+	}
 	if _, err := adminDB.ExecContext(context.Background(), "CREATE SCHEMA "+schema); err != nil {
 		_ = adminDB.Close()
 		t.Fatalf("create isolated schema: %v", err)
 	}
-	dropSchema := func() {
+	t.Cleanup(func() {
 		if _, err := adminDB.ExecContext(context.Background(), "DROP SCHEMA "+schema+" CASCADE"); err != nil {
 			t.Errorf("drop isolated schema: %v", err)
 		}
 		_ = adminDB.Close()
-	}
+	})
 
 	scopedURL, err := url.Parse(dsn)
 	if err != nil || scopedURL.Scheme == "" {
-		dropSchema()
 		t.Fatalf("test DSN must be a PostgreSQL URL: %v", err)
 	}
 	query := scopedURL.Query()
 	query.Set("search_path", schema+",public")
 	scopedURL.RawQuery = query.Encode()
-	db, err := sql.Open("pgx", scopedURL.String())
-	if err != nil {
-		dropSchema()
-		t.Fatalf("open isolated schema DB: %v", err)
+	stores := make([]*Store, 0, count)
+	for range count {
+		db, err := sql.Open("pgx", scopedURL.String())
+		if err != nil {
+			t.Fatalf("open isolated schema DB: %v", err)
+		}
+		// Registered after the schema drop, so it runs first.
+		t.Cleanup(func() { _ = db.Close() })
+		store, err := OpenDB(context.Background(), db, validConfig())
+		if err != nil {
+			t.Fatalf("OpenDB() in isolated schema: %v", err)
+		}
+		stores = append(stores, store)
 	}
-	t.Cleanup(func() {
-		_ = db.Close()
-		dropSchema()
-	})
-	store, err := OpenDB(context.Background(), db, validConfig())
-	if err != nil {
-		t.Fatalf("OpenDB() in isolated schema: %v", err)
-	}
-	return store
+	return stores
 }
 
 func openMigrationDriverDB(t *testing.T, options migrationDriverOptions) (*sql.DB, *migrationDriverState) {
