@@ -212,3 +212,93 @@ func TestVectorRecallSkipsStoredZeroNormEmbeddings(t *testing.T) {
 		t.Fatalf("vector recall = %#v, %v; want only the good memory", got.Vector, err)
 	}
 }
+func TestStoreCountsPendingEmbeddings(t *testing.T) {
+	store := openIsolatedStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 27, 13, 0, 0, 0, time.UTC)
+	// The backlog is global; other tenants' rows in a shared test database
+	// are part of the baseline.
+	baseline := postgresPendingEmbeddingCount(t, store)
+	scope := memorykit.Scope{
+		TenantID:    conformanceTenantID,
+		SubjectType: memorykit.SubjectProject,
+		SubjectID:   "project-embedding-backlog",
+	}
+	active := queryCreateRequest(
+		embeddingIDActive,
+		scope,
+		memorykit.StatusActive,
+		"embedding.backlog.active",
+		"active backlog content",
+		now,
+		70,
+	)
+	createQueryMemory(t, store, active)
+	createQueryMemory(t, store, queryCreateRequest(
+		embeddingIDInactive,
+		scope,
+		memorykit.StatusInactive,
+		"embedding.backlog.inactive",
+		"inactive backlog content",
+		now,
+		70,
+	))
+
+	assertPostgresPendingEmbeddingCount(t, store, baseline+1)
+	put := memorykit.PutEmbeddingRequest{
+		MemoryID: active.ID, Scope: scope, ProfileID: "test-3d",
+		ContentHash: contentDigest(active.Content), Dimensions: 3,
+		Vector: []float32{1, 0, 0}, EmbeddedAt: now,
+	}
+	if err := store.PutEmbedding(ctx, put); err != nil {
+		t.Fatal(err)
+	}
+	assertPostgresPendingEmbeddingCount(t, store, baseline+0)
+
+	if _, err := store.db.ExecContext(ctx,
+		"UPDATE memory_embeddings SET dimension = 2 WHERE memory_id = $1",
+		active.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	assertPostgresPendingEmbeddingCount(t, store, baseline+1)
+
+	if _, err := store.db.ExecContext(ctx,
+		"UPDATE memory_embeddings SET dimension = 3, content_hash = 'stale' WHERE memory_id = $1",
+		active.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	assertPostgresPendingEmbeddingCount(t, store, baseline+1)
+
+	if err := store.PutEmbedding(ctx, put); err != nil {
+		t.Fatal(err)
+	}
+	assertPostgresPendingEmbeddingCount(t, store, baseline+0)
+}
+
+func assertPostgresPendingEmbeddingCount(t *testing.T, store *Store, want int64) {
+	t.Helper()
+	if got := postgresPendingEmbeddingCount(t, store); got != want {
+		t.Fatalf("CountPendingEmbeddings() = %d, want %d", got, want)
+	}
+}
+
+func postgresPendingEmbeddingCount(t *testing.T, store *Store) int64 {
+	t.Helper()
+	got, err := store.CountPendingEmbeddings(context.Background(), memorykit.EmbeddingBacklogQuery{
+		ProfileID: "test-3d",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+func TestCountPendingEmbeddingsRejectsForeignProfile(t *testing.T) {
+	store := openIsolatedStore(t)
+	_, err := store.CountPendingEmbeddings(context.Background(), memorykit.EmbeddingBacklogQuery{ProfileID: "other-profile"})
+	if !errors.Is(err, memorykit.ErrInvalidMemory) {
+		t.Fatalf("CountPendingEmbeddings(other profile) = %v, want ErrInvalidMemory", err)
+	}
+}

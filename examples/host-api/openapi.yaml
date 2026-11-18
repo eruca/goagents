@@ -326,6 +326,41 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/QueuedWorkerStatus'
+  /workers/memory:
+    get:
+      tags:
+        - workers
+      summary: Get embedding and extraction worker status
+      description: >
+        Available only when the optional memory runtime is enabled. Returns a
+        host-wide, content-free operational snapshot of the memory workers,
+        which serve every tenant. The caller must hold memory.review on the
+        project named by project_id. Backlog is read exactly from the durable
+        Store per request; counters are process-local and reset on restart.
+        No atomicity is promised between the backlog and the counters.
+      operationId: getMemoryWorkerStatus
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: project_id
+          in: query
+          required: true
+          description: Project the caller is authorized to review.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Current embedding and extraction worker status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryWorkersStatus'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '403':
+          $ref: '#/components/responses/ErrorResponse'
+        '503':
+          $ref: '#/components/responses/ErrorResponse'
   /projects/{projectID}/memories:
     get:
       tags:
@@ -1336,6 +1371,64 @@ components:
           type: string
         last_heartbeat_error:
           type: string
+    MemoryWorkerErrorClass:
+      type: string
+      description: Fixed low-cardinality failure class. Raw errors are never returned.
+      enum:
+        - context_canceled
+        - deadline_exceeded
+        - pending_read_failed
+        - pending_result_invalid
+        - provider_failed
+        - provider_result_invalid
+        - embedding_write_failed
+        - claim_failed
+        - source_read_failed
+        - candidate_extract_failed
+        - candidate_validate_failed
+        - candidate_write_failed
+    MemoryWorkerStatus:
+      type: object
+      additionalProperties: false
+      required:
+        - backlog
+        - success_total
+        - failure_total
+      properties:
+        backlog:
+          type: integer
+          format: int64
+          minimum: 0
+          description: >
+            Exact durable Store backlog at read time. For embedding, active
+            memories without a current embedding for the configured profile.
+            For extraction, jobs with attempts left that are pending (including
+            those waiting out a retry delay) or held by an expired lease.
+        success_total:
+          type: integer
+          minimum: 0
+          description: Successful non-idle RunOnce calls since process start.
+        failure_total:
+          type: integer
+          minimum: 0
+          description: Failed non-idle RunOnce calls since process start.
+        last_error_class:
+          $ref: '#/components/schemas/MemoryWorkerErrorClass'
+        last_transition_time:
+          type: string
+          format: date-time
+          description: UTC time of the last counted success or failure.
+    MemoryWorkersStatus:
+      type: object
+      additionalProperties: false
+      required:
+        - embedding
+        - extraction
+      properties:
+        embedding:
+          $ref: '#/components/schemas/MemoryWorkerStatus'
+        extraction:
+          $ref: '#/components/schemas/MemoryWorkerStatus'
     Model:
       type: object
       additionalProperties: false

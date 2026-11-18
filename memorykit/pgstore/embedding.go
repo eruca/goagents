@@ -8,7 +8,20 @@ import (
 	pgvector "github.com/pgvector/pgvector-go"
 )
 
-var _ memorykit.EmbeddingStore = (*Store)(nil)
+var (
+	_ memorykit.EmbeddingStore         = (*Store)(nil)
+	_ memorykit.EmbeddingBacklogReader = (*Store)(nil)
+)
+
+// pendingEmbeddingRelation is shared by PendingEmbeddings and
+// CountPendingEmbeddings so the backlog count matches what a worker reads.
+// $1 is the profile ID and $2 the configured dimension.
+const pendingEmbeddingRelation = `
+		FROM memories m
+		LEFT JOIN memory_embeddings e
+		  ON e.memory_id = m.id AND e.embedding_profile_id = $1
+		WHERE m.status = 'active'
+		  AND (e.memory_id IS NULL OR e.content_hash <> m.content_hash OR e.dimension <> $2)`
 
 func (s *Store) PendingEmbeddings(ctx context.Context, query memorykit.PendingEmbeddingQuery) ([]memorykit.EmbeddingInput, error) {
 	if err := ctx.Err(); err != nil {
@@ -23,12 +36,7 @@ func (s *Store) PendingEmbeddings(ctx context.Context, query memorykit.PendingEm
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT m.id, m.tenant_id, m.subject_type, m.subject_id,
-		       m.content, m.content_hash, m.version
-		FROM memories m
-		LEFT JOIN memory_embeddings e
-		  ON e.memory_id = m.id AND e.embedding_profile_id = $1
-		WHERE m.status = 'active'
-		  AND (e.memory_id IS NULL OR e.content_hash <> m.content_hash OR e.dimension <> $2)
+		       m.content, m.content_hash, m.version`+pendingEmbeddingRelation+`
 		ORDER BY m.updated_at ASC, m.id ASC
 		LIMIT $3`, query.ProfileID, s.cfg.EmbeddingDimensions, query.Limit)
 	if err != nil {
@@ -51,6 +59,26 @@ func (s *Store) PendingEmbeddings(ctx context.Context, query memorykit.PendingEm
 		return nil, wrapBackend("read pending embeddings", err)
 	}
 	return append([]memorykit.EmbeddingInput(nil), result...), nil
+}
+
+// CountPendingEmbeddings counts exactly the memories PendingEmbeddings would
+// return for the profile without a limit.
+func (s *Store) CountPendingEmbeddings(ctx context.Context, query memorykit.EmbeddingBacklogQuery) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if err := memorykit.ValidateEmbeddingBacklogQuery(query, s.cfg.Limits); err != nil {
+		return 0, err
+	}
+	if query.ProfileID != s.cfg.EmbeddingProfileID {
+		return 0, fmt.Errorf("%w: embedding profile does not match store configuration", memorykit.ErrInvalidMemory)
+	}
+	var count int64
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*)"+pendingEmbeddingRelation,
+		query.ProfileID, s.cfg.EmbeddingDimensions).Scan(&count); err != nil {
+		return 0, wrapBackend("count pending embeddings", err)
+	}
+	return count, nil
 }
 
 func (s *Store) PutEmbedding(ctx context.Context, request memorykit.PutEmbeddingRequest) error {

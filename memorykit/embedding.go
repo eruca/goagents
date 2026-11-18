@@ -10,7 +10,10 @@ import (
 )
 
 type EmbeddingWorkerConfig struct {
-	Store      EmbeddingStore
+	Store EmbeddingStore
+	// Backlog counts the durable backlog for Snapshot. When nil, Store is
+	// used if it implements EmbeddingBacklogReader.
+	Backlog    EmbeddingBacklogReader
 	Embedder   Embedder
 	ProfileID  string
 	Dimensions int
@@ -29,18 +32,25 @@ func (c EmbeddingWorkerConfig) Validate() error {
 
 type EmbeddingWorker struct {
 	store      EmbeddingStore
+	backlog    EmbeddingBacklogReader
 	embedder   Embedder
 	profileID  string
 	dimensions int
 	batchSize  int
+	stats      workerStats
 }
 
 func NewEmbeddingWorker(config EmbeddingWorkerConfig) (*EmbeddingWorker, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
+	backlog := config.Backlog
+	if nilInterface(backlog) {
+		backlog, _ = config.Store.(EmbeddingBacklogReader)
+	}
 	return &EmbeddingWorker{
 		store:      config.Store,
+		backlog:    backlog,
 		embedder:   config.Embedder,
 		profileID:  config.ProfileID,
 		dimensions: config.Dimensions,
@@ -49,27 +59,69 @@ func NewEmbeddingWorker(config EmbeddingWorkerConfig) (*EmbeddingWorker, error) 
 }
 
 // RunOnce processes at most one Store-ordered batch. Host owns scheduling and retries.
+// A run that finds nothing pending is idle and is not counted by Snapshot;
+// any other run counts as one success or, if it returns an error, one failure.
 func (w *EmbeddingWorker) RunOnce(ctx context.Context) (int, error) {
+	inputs, err := w.pending(ctx)
+	if err == nil && len(inputs) == 0 {
+		return 0, nil
+	}
+	stored := 0
+	if err == nil {
+		stored, err = w.process(ctx, inputs)
+	}
+	if err != nil {
+		w.stats.recordFailure(classifyWorkerError(ctx, err, WorkerErrorProviderFailed), time.Now())
+	} else {
+		w.stats.recordSuccess(time.Now())
+	}
+	return stored, err
+}
+
+// Snapshot returns the worker's content-free status. The process-local
+// counters are read before the durable backlog, so the two are not one atomic
+// view. When the backlog cannot be read, the counters come back with the error.
+func (w *EmbeddingWorker) Snapshot(ctx context.Context) (WorkerSnapshot, error) {
+	snapshot := w.stats.snapshot()
 	if err := ctx.Err(); err != nil {
-		return 0, err
+		return snapshot, err
+	}
+	if nilInterface(w.backlog) {
+		return snapshot, ErrWorkerBacklogUnavailable
+	}
+	backlog, err := w.backlog.CountPendingEmbeddings(ctx, EmbeddingBacklogQuery{ProfileID: w.profileID})
+	if err != nil {
+		return snapshot, err
+	}
+	if backlog < 0 {
+		return snapshot, fmt.Errorf("%w: negative embedding backlog", ErrInvalidMemory)
+	}
+	snapshot.Backlog = backlog
+	return snapshot, nil
+}
+
+func (w *EmbeddingWorker) pending(ctx context.Context) ([]EmbeddingInput, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	inputs, err := w.store.PendingEmbeddings(ctx, PendingEmbeddingQuery{
 		ProfileID: w.profileID,
 		Limit:     w.batchSize,
 	})
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return 0, ctxErr
+		return nil, ctxErr
 	}
 	if err != nil {
-		return 0, err
+		return nil, withWorkerErrorClass(WorkerErrorPendingReadFailed, err)
 	}
 	if len(inputs) > w.batchSize {
-		return 0, fmt.Errorf("%w: pending embedding batch exceeds configured limit", ErrInvalidMemory)
+		return nil, withWorkerErrorClass(WorkerErrorPendingResultInvalid,
+			fmt.Errorf("%w: pending embedding batch exceeds configured limit", ErrInvalidMemory))
 	}
-	if len(inputs) == 0 {
-		return 0, nil
-	}
+	return inputs, nil
+}
 
+func (w *EmbeddingWorker) process(ctx context.Context, inputs []EmbeddingInput) (int, error) {
 	vectors, err := w.embed(ctx, inputs)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return 0, ctxErr
@@ -116,7 +168,7 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context) (int, error) {
 		if errors.Is(err, ErrConflict) {
 			continue
 		}
-		return stored, err
+		return stored, withWorkerErrorClass(WorkerErrorEmbeddingWriteFailed, err)
 	}
 	return stored, skipped
 }
@@ -128,10 +180,10 @@ func (w *EmbeddingWorker) embed(ctx context.Context, inputs []EmbeddingInput) ([
 	}
 	vectors, err := w.embedder.Embed(ctx, EmbedRequest{ProfileID: w.profileID, Texts: texts})
 	if err != nil {
-		return nil, err
+		return nil, withWorkerErrorClass(WorkerErrorProviderFailed, err)
 	}
 	if err := validateEmbeddingBatch(vectors, len(inputs), w.dimensions); err != nil {
-		return nil, err
+		return nil, withWorkerErrorClass(WorkerErrorProviderResultInvalid, err)
 	}
 	return vectors, nil
 }

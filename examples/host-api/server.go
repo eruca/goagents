@@ -331,6 +331,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /llmkit/models", s.handleModels)
 	mux.HandleFunc("GET /workers/queued", s.handleQueuedWorker)
 	if s.memory != nil {
+		mux.HandleFunc("GET /workers/memory", s.handleMemoryWorkers)
 		mux.HandleFunc("GET /projects/{projectID}/memories", s.handleListMemories)
 		mux.HandleFunc("GET /projects/{projectID}/memories/{memoryID}", s.handleGetMemory)
 		mux.HandleFunc("GET /projects/{projectID}/memories/{memoryID}/revisions", s.handleMemoryRevisions)
