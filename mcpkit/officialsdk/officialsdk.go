@@ -18,14 +18,23 @@ import (
 const (
 	defaultClientName    = "goagents-mcpkit"
 	defaultClientVersion = "v0.0.0"
+	// maxToolListPages bounds how many tool list pages a server can make
+	// ListTools fetch, so a server cannot keep it paging forever.
+	maxToolListPages = 100
 )
 
 // StdioConfig describes a local MCP server process managed through the official
 // SDK CommandTransport. Command, Args, Env, and Dir are host-owned config.
+//
+// The server process does not inherit the host's environment, which holds
+// secrets such as LLM API keys. It gets only the variables named in
+// InheritEnv, copied from the host, plus Env. A nil InheritEnv means
+// DefaultInheritEnv; an empty, non-nil one inherits nothing.
 type StdioConfig struct {
 	Command           string
 	Args              []string
 	Env               []string
+	InheritEnv        []string
 	Dir               string
 	Name              string
 	Version           string
@@ -56,9 +65,7 @@ func ConnectStdio(ctx context.Context, cfg StdioConfig) (*Client, error) {
 		return nil, fmt.Errorf("stdio command is required")
 	}
 	cmd := exec.Command(cfg.Command, cfg.Args...)
-	if len(cfg.Env) > 0 {
-		cmd.Env = append(os.Environ(), cfg.Env...)
-	}
+	cmd.Env = childEnv(cfg)
 	cmd.Dir = cfg.Dir
 
 	sdkClient := newSDKClient(cfg.Name, cfg.Version)
@@ -70,6 +77,29 @@ func ConnectStdio(ctx context.Context, cfg StdioConfig) (*Client, error) {
 		return nil, err
 	}
 	return &Client{session: session}, nil
+}
+
+// DefaultInheritEnv lists the host variables a stdio server inherits when
+// StdioConfig.InheritEnv is nil: what a process needs to find programs,
+// a home and temporary directory, and its locale, and nothing secret.
+var DefaultInheritEnv = []string{
+	"PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "TEMP", "TMP",
+	"LANG", "LC_ALL", "LC_CTYPE", "TZ",
+	"SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "USERPROFILE",
+}
+
+func childEnv(cfg StdioConfig) []string {
+	names := cfg.InheritEnv
+	if names == nil {
+		names = DefaultInheritEnv
+	}
+	env := make([]string, 0, len(names)+len(cfg.Env))
+	for _, name := range names {
+		if value, ok := os.LookupEnv(name); ok {
+			env = append(env, name+"="+value)
+		}
+	}
+	return append(env, cfg.Env...)
 }
 
 func ConnectStreamableHTTP(ctx context.Context, cfg StreamableHTTPConfig) (*Client, error) {
@@ -107,7 +137,11 @@ func (c *Client) ListTools(ctx context.Context) ([]mcpkit.ToolDescriptor, error)
 
 	var out []mcpkit.ToolDescriptor
 	params := &mcp.ListToolsParams{}
-	for {
+	seenCursors := map[string]struct{}{}
+	for page := 0; ; page++ {
+		if page == maxToolListPages {
+			return nil, fmt.Errorf("mcp server listed more than %d pages of tools", maxToolListPages)
+		}
 		result, err := c.session.ListTools(ctx, params)
 		if err != nil {
 			return nil, err
@@ -122,6 +156,10 @@ func (c *Client) ListTools(ctx context.Context) ([]mcpkit.ToolDescriptor, error)
 		if result.NextCursor == "" {
 			return out, nil
 		}
+		if _, repeated := seenCursors[result.NextCursor]; repeated {
+			return nil, fmt.Errorf("mcp server repeated tool list cursor %q", result.NextCursor)
+		}
+		seenCursors[result.NextCursor] = struct{}{}
 		params.Cursor = result.NextCursor
 	}
 }

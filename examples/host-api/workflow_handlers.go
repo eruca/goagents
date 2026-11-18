@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"strconv"
@@ -104,12 +105,58 @@ type workflowEventResponse struct {
 }
 
 type agentRunResponse struct {
-	RunID      string                 `json:"run_id"`
-	WorkflowID string                 `json:"workflow_id,omitempty"`
-	TaskID     string                 `json:"task_id,omitempty"`
-	Status     string                 `json:"status"`
-	Summary    runkit.TerminalSummary `json:"summary"`
-	Events     []runkit.RunEvent      `json:"events,omitempty"`
+	RunID      string                  `json:"run_id"`
+	WorkflowID string                  `json:"workflow_id,omitempty"`
+	TaskID     string                  `json:"task_id,omitempty"`
+	Status     string                  `json:"status"`
+	Summary    agentRunSummaryResponse `json:"summary"`
+	Events     []agentRunEventResponse `json:"events,omitempty"`
+}
+
+// agentRunSummaryResponse and agentRunEventResponse give the runkit records
+// the API's snake_case field names; the runkit types have no JSON tags.
+type agentRunSummaryResponse struct {
+	Status       runkit.Status `json:"status,omitempty"`
+	ContentRef   string        `json:"content_ref,omitempty"`
+	AbortReason  string        `json:"abort_reason,omitempty"`
+	InputTokens  int           `json:"input_tokens"`
+	OutputTokens int           `json:"output_tokens"`
+	LLMCalls     int           `json:"llm_calls"`
+	ToolCalls    int           `json:"tool_calls"`
+	UsedTools    []string      `json:"used_tools,omitempty"`
+}
+
+type agentRunEventResponse struct {
+	Sequence   int            `json:"sequence"`
+	Type       string         `json:"type"`
+	Stage      string         `json:"stage,omitempty"`
+	Iteration  int            `json:"iteration"`
+	Message    string         `json:"message,omitempty"`
+	Metadata   map[string]any `json:"metadata,omitempty"`
+	RecordedAt time.Time      `json:"recorded_at"`
+}
+
+func agentRunToResponse(record runkit.RunRecord, events []runkit.RunEvent) agentRunResponse {
+	summary := record.Summary
+	response := agentRunResponse{
+		RunID:      record.RunID,
+		WorkflowID: record.WorkflowID,
+		TaskID:     record.TaskID,
+		Status:     string(record.Status),
+		Summary: agentRunSummaryResponse{
+			Status: summary.Status, ContentRef: summary.ContentRef, AbortReason: summary.AbortReason,
+			InputTokens: summary.InputTokens, OutputTokens: summary.OutputTokens,
+			LLMCalls: summary.LLMCalls, ToolCalls: summary.ToolCalls, UsedTools: summary.UsedTools,
+		},
+		Events: make([]agentRunEventResponse, 0, len(events)),
+	}
+	for _, event := range events {
+		response.Events = append(response.Events, agentRunEventResponse{
+			Sequence: event.Sequence, Type: event.Type, Stage: event.Stage, Iteration: event.Iteration,
+			Message: event.Message, Metadata: event.Metadata, RecordedAt: event.RecordedAt,
+		})
+	}
+	return response
 }
 
 func (s *Server) handleListSkills(w http.ResponseWriter, _ *http.Request) {
@@ -190,6 +237,20 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		}
 		trustedMemoryIdentity = identity
 	}
+	// Workflow ids are caller-chosen, so creation must never replace a stored
+	// workflow or its input artifact.
+	if _, creating := s.creatingWorkflows.LoadOrStore(req.ID, struct{}{}); creating {
+		writeWorkflowExists(w)
+		return
+	}
+	defer s.creatingWorkflows.Delete(req.ID)
+	if _, err := s.workflows.Get(r.Context(), req.ID); err == nil {
+		writeWorkflowExists(w)
+		return
+	} else if !errors.Is(err, workflowkit.ErrRunNotFound) {
+		writeInternalError(w, "workflow_error", err)
+		return
+	}
 	operationCtx := r.Context()
 	var pendingShutdown *pendingShutdownTracker
 	if runMode == RunModeSync {
@@ -206,7 +267,7 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 	inputRef := "artifact:" + req.ID + ":input"
 	if err := putTextArtifact(operationCtx, s.artifacts, inputRef, req.Input); err != nil {
-		writeError(w, http.StatusInternalServerError, "artifact_error", err.Error())
+		writeInternalError(w, "artifact_error", err)
 		return
 	}
 	metadata := map[string]any{
@@ -230,8 +291,12 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 	if runMode == RunModeQueued {
 		run.Status = workflowkit.StatusPending
-		if err := s.workflows.Save(operationCtx, run); err != nil {
-			writeError(w, http.StatusInternalServerError, "workflow_error", err.Error())
+		if err := s.createWorkflow(operationCtx, run); err != nil {
+			if errors.Is(err, workflowkit.ErrRunExists) {
+				writeWorkflowExists(w)
+				return
+			}
+			writeInternalError(w, "workflow_error", err)
 			return
 		}
 		s.signalQueuedWorker()
@@ -239,14 +304,43 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	run, err = s.executor.Run(operationCtx, run)
+	if errors.Is(err, workflowkit.ErrRunExists) {
+		writeWorkflowExists(w)
+		return
+	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "workflow_error", err.Error())
+		writeWorkflowRunError(w, run, err)
 		return
 	}
 	if identity, ok := pendingShutdown.Snapshot(); ok {
 		pendingShutdown.Clear(identity.CheckpointID)
 	}
 	writeJSON(w, http.StatusAccepted, workflowToResponse(run, runMode))
+}
+
+// createWorkflow inserts run without replacing a stored workflow when the
+// store supports it. The handler already checked that the id is free, so a
+// store without Create only races with another host creating the same id.
+func (s *Server) createWorkflow(ctx context.Context, run workflowkit.WorkflowRun) error {
+	if creator, ok := s.workflows.(workflowkit.CreateStore); ok {
+		return creator.Create(ctx, run)
+	}
+	return s.workflows.Save(ctx, run)
+}
+
+// writeWorkflowRunError reports an executor error. A failed step leaves its
+// message in the stored workflow's Error, which GET /workflows/{id} already
+// shows, so the response carries it; any other error is internal.
+func writeWorkflowRunError(w http.ResponseWriter, run workflowkit.WorkflowRun, err error) {
+	if run.Status == workflowkit.StatusFailed && run.Error != "" {
+		writeError(w, http.StatusInternalServerError, "workflow_error", run.Error)
+		return
+	}
+	writeInternalError(w, "workflow_error", err)
+}
+
+func writeWorkflowExists(w http.ResponseWriter) {
+	writeError(w, http.StatusConflict, "workflow_exists", "a workflow with this id already exists")
 }
 
 // resolveSkillRefs accepts caller-supplied names only as lookup inputs. The
@@ -295,9 +389,22 @@ func (s *Server) handleListWorkflows(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	if s.memory != nil {
+		// Listing is scoped to one authorized project of the caller's tenant.
+		projectID := strings.TrimSpace(r.URL.Query().Get("project_id"))
+		_, identity, ok := s.authorizeWorkflowMemory(w, r, projectID, memoryRead)
+		if !ok {
+			return
+		}
+		if query.MetadataEquals == nil {
+			query.MetadataEquals = map[string]string{}
+		}
+		query.MetadataEquals[memoryTenantMetadataKey] = identity.TenantID
+		query.MetadataEquals[memoryProjectMetadataKey] = projectID
+	}
 	runs, err := s.queries.ListWorkflows(r.Context(), query)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "workflow_error", err.Error())
+		writeInternalError(w, "workflow_error", err)
 		return
 	}
 	workflows := make([]workflowResponse, 0, len(runs))
@@ -313,6 +420,9 @@ func (s *Server) handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeWorkflowStoreError(w, err)
 		return
 	}
+	if _, ok := s.authorizeStoredWorkflow(w, r, run, memoryRead); !ok {
+		return
+	}
 	writeJSON(w, http.StatusOK, workflowToResponse(run, RunModeSync))
 }
 
@@ -322,11 +432,34 @@ func (s *Server) handleWorkflowEvents(w http.ResponseWriter, r *http.Request) {
 		writeWorkflowStoreError(w, err)
 		return
 	}
+	if _, ok := s.authorizeStoredWorkflow(w, r, run, memoryRead); !ok {
+		return
+	}
 	writeJSON(w, http.StatusOK, workflowToEventsResponse(run))
 }
 
 func (s *Server) handleRequeueWorkflow(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	stored, err := s.workflows.Get(r.Context(), id)
+	if err != nil {
+		writeWorkflowStoreError(w, err)
+		return
+	}
+	// A requeued run executes again under its stored memory scope, and with
+	// write intent it writes as its creator, so only the creator may requeue it.
+	capability := memoryRead
+	writeIntent, _ := stored.Metadata[memoryWriteIntentMetadataKey].(bool)
+	if writeIntent {
+		capability = memoryWriteExplicit
+	}
+	identity, ok := s.authorizeStoredWorkflow(w, r, stored, capability)
+	if !ok {
+		return
+	}
+	if creator, _ := stored.Metadata[memoryUserMetadataKey].(string); s.memory != nil && writeIntent && identity.Subject != creator {
+		writeMemoryError(w, http.StatusForbidden, "forbidden", "only the workflow creator can requeue a workflow with memory write intent")
+		return
+	}
 	run, err := s.workflows.Update(r.Context(), id, func(run workflowkit.WorkflowRun) (workflowkit.WorkflowRun, error) {
 		if run.Status != workflowkit.StatusFailed && run.Status != workflowkit.StatusCancelled {
 			return run, errWorkflowNotRequeueable
@@ -339,6 +472,8 @@ func (s *Server) handleRequeueWorkflow(w http.ResponseWriter, r *http.Request) {
 		run.WaitingReason = ""
 		run.LeaseOwner = ""
 		run.LeaseUntil = time.Time{}
+		run.StepRetries = 0
+		run.NextAttemptAt = time.Time{}
 		if run.Metadata == nil {
 			run.Metadata = make(map[string]any)
 		}
@@ -377,20 +512,29 @@ func (s *Server) handleApproveWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer handle.Done()
+	// Binding the approval to the final-approval request keeps this route from
+	// resolving a pending tool approval, which only /agent-approve may answer.
 	run, err := s.executor.Approve(r.Context(), id, workflowkit.Approval{
-		AuditRef: "audit:" + id + ":approval",
+		ApprovalRef: "approval:" + id,
+		AuditRef:    "audit:" + id + ":approval",
 		Metadata: map[string]any{
 			"approved_by":   identity.Subject,
 			"approval_note": req.Note,
 		},
 	})
+	if err != nil && run.Status == workflowkit.StatusFailed && run.Error != "" {
+		writeWorkflowRunError(w, run, err)
+		return
+	}
 	if err != nil {
 		writeWorkflowStoreError(w, err)
 		return
 	}
+	// The approval is committed. Failing the response now would make a retry
+	// see a finished workflow and report 409, so the outcome audit is best
+	// effort and its failure only logged.
 	if err := s.recordBusinessOutcome(r.Context(), id); err != nil {
-		writeError(w, http.StatusInternalServerError, "llm_audit_error", err.Error())
-		return
+		log.Printf("host-api llm_audit_error: record business outcome for workflow %s: %v", id, err)
 	}
 	writeJSON(w, http.StatusOK, workflowToResponse(run, RunModeSync))
 }
@@ -402,22 +546,30 @@ func (s *Server) handleGetAgentRun(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "not_found", "agent run not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "run_error", err.Error())
+		writeInternalError(w, "run_error", err)
 		return
+	}
+	if s.memory != nil {
+		// An agent run is visible to whoever may read its workflow.
+		workflow, err := s.workflows.Get(r.Context(), record.WorkflowID)
+		if errors.Is(err, workflowkit.ErrRunNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "agent run not found")
+			return
+		}
+		if err != nil {
+			writeWorkflowStoreError(w, err)
+			return
+		}
+		if _, ok := s.authorizeStoredWorkflow(w, r, workflow, memoryRead); !ok {
+			return
+		}
 	}
 	events, err := s.runs.Events(r.Context(), record.RunID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "run_error", err.Error())
+		writeInternalError(w, "run_error", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, agentRunResponse{
-		RunID:      record.RunID,
-		WorkflowID: record.WorkflowID,
-		TaskID:     record.TaskID,
-		Status:     string(record.Status),
-		Summary:    record.Summary,
-		Events:     events,
-	})
+	writeJSON(w, http.StatusOK, agentRunToResponse(record, events))
 }
 
 func workflowToResponse(run workflowkit.WorkflowRun, runMode RunMode) workflowResponse {

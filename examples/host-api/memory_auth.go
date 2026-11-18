@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/eruca/goagents/memorykit"
+	"github.com/eruca/goagents/workflowkit"
 )
 
 type memoryCapability string
@@ -81,6 +82,28 @@ func nilMemoryDependency(value any) bool {
 // from the trusted route selected by net/http.
 func (s *Server) authorizeProjectMemory(w http.ResponseWriter, r *http.Request, capability memoryCapability) (memorykit.Scope, memoryIdentity, bool) {
 	return s.authorizeWorkflowMemory(w, r, r.PathValue("projectID"), capability)
+}
+
+// authorizeStoredWorkflow guards routes that read or act on a stored
+// workflow. With project memory enabled, every workflow carries its creator's
+// tenant and project, so the caller must hold capability on that project in
+// that tenant; a workflow of another tenant reads as not found. Without
+// memory, workflow routes stay as open as before.
+func (s *Server) authorizeStoredWorkflow(w http.ResponseWriter, r *http.Request, run workflowkit.WorkflowRun, capability memoryCapability) (memoryIdentity, bool) {
+	if s.memory == nil {
+		return memoryIdentity{}, true
+	}
+	tenantID, _ := run.Metadata[memoryTenantMetadataKey].(string)
+	projectID, _ := run.Metadata[memoryProjectMetadataKey].(string)
+	_, identity, ok := s.authorizeWorkflowMemory(w, r, projectID, capability)
+	if !ok {
+		return memoryIdentity{}, false
+	}
+	if tenantID == "" || identity.TenantID != tenantID {
+		writeError(w, http.StatusNotFound, "not_found", "workflow not found")
+		return memoryIdentity{}, false
+	}
+	return identity, true
 }
 
 func (s *Server) authorizeWorkflowMemory(w http.ResponseWriter, r *http.Request, projectID string, capability memoryCapability) (memorykit.Scope, memoryIdentity, bool) {

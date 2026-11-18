@@ -31,17 +31,34 @@ func (s ActStage) Run(ctx context.Context, state *RunState) (StageResult, error)
 		SessionID: state.Input.SessionID,
 		Metadata:  state.Metadata,
 	})
+	s.emitCompleted(ctx, state, results)
+	state.recordToolResults(results)
 	if err != nil {
-		for _, call := range state.PendingCalls {
+		// The executor stops at the first failed group, so every call
+		// without a result either failed or never ran.
+		completed := make(map[int]struct{}, len(results))
+		for _, result := range results {
+			completed[result.Index] = struct{}{}
+		}
+		for i, call := range state.PendingCalls {
+			if _, ok := completed[i]; ok {
+				continue
+			}
 			state.Emit(ctx, Event{
 				Type: EventToolFailed,
 				Metadata: map[string]any{
-					"tool": call.Name,
+					"index": i,
+					"tool":  call.Name,
 				},
 			})
 		}
 		return StageAbort, err
 	}
+	state.ToolResults = results
+	return StageContinue, nil
+}
+
+func (s ActStage) emitCompleted(ctx context.Context, state *RunState, results []tools.Execution) {
 	for _, result := range results {
 		metadata := map[string]any{
 			"index": result.Index,
@@ -58,7 +75,4 @@ func (s ActStage) Run(ctx context.Context, state *RunState) (StageResult, error)
 			Metadata: metadata,
 		})
 	}
-	state.recordToolResults(results)
-	state.ToolResults = results
-	return StageContinue, nil
 }

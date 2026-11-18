@@ -11,6 +11,9 @@ var (
 	// ErrRunPreempted reports that a running workflow was cancelled, failed, or
 	// claimed by another lease owner, so the executor stopped writing to it.
 	ErrRunPreempted = errors.New("workflow run preempted")
+	// ErrApprovalMismatch reports an approval that names a different approval
+	// request than the one the run is waiting on.
+	ErrApprovalMismatch = errors.New("approval does not match the pending approval request")
 )
 
 func runPreemptedError(current WorkflowRun) error {

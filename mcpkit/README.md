@@ -28,6 +28,13 @@ agent, err := agentcore.NewAgent(
 )
 ```
 
+The server chooses tool names, so `RegisterTools` checks them before it
+registers anything: each name must match `^[A-Za-z0-9_-]{1,64}$`, appear once
+in the listing, and not already be in the registry, so a server cannot replace
+a host tool. Set `RegisterOptions.NamePrefix` (for example `docs__`) to keep
+several servers apart; calls still use the server's own name. `MaxLLMChars` and
+`MaxUserChars` bound result text in characters, never splitting one.
+
 `RegisterOptions.Permission` always takes precedence. Without an explicit
 permission, annotations from an MCP server are ignored by default and tools keep
 an empty permission, so the default `goagent` policy denies execution.

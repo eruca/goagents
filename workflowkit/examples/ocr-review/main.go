@@ -155,7 +155,10 @@ func run(ctx context.Context, out io.Writer) error {
 			Input:     "review " + fmt.Sprint(run.Metadata["context_ref"]),
 			SessionID: run.ID,
 		}
-	}, agentstep.WithResultMapper(func(run workflowkit.WorkflowRun, result *agentcore.RunResult) workflowkit.StepResult {
+	}, agentstep.WithResultMapper(func(run workflowkit.WorkflowRun, result *agentcore.RunResult, err error) (workflowkit.StepResult, error) {
+		if err != nil {
+			return agentstep.DefaultResult(run, result, err)
+		}
 		return workflowkit.StepResult{
 			Status:        workflowkit.StatusWaitingApproval,
 			AgentRunID:    result.RunID.String(),
@@ -164,7 +167,7 @@ func run(ctx context.Context, out io.Writer) error {
 			Metadata: map[string]any{
 				"agent_content_preview": result.Content,
 			},
-		}
+		}, nil
 	}))
 
 	store := workflowkit.NewMemoryStore()

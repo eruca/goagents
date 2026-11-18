@@ -39,7 +39,7 @@ func (s InputGuardStage) Name() string {
 }
 
 func (s InputGuardStage) Run(ctx context.Context, state *RunState) (StageResult, error) {
-	if s.Guard == nil || state.Metadata[inputGuardValidatedKey] == true {
+	if s.Guard == nil || state.stageDone(inputGuardValidatedKey) {
 		return StageContinue, nil
 	}
 	request := InputGuardRequest{
@@ -57,10 +57,7 @@ func (s InputGuardStage) Run(ctx context.Context, state *RunState) (StageResult,
 		state.Emit(ctx, Event{Type: EventInputRejected})
 		return StageAbort, ErrInputRejected
 	}
-	if state.Metadata == nil {
-		state.Metadata = make(map[string]any)
-	}
-	state.Metadata[inputGuardValidatedKey] = true
+	state.markStageDone(inputGuardValidatedKey)
 	state.Emit(ctx, Event{Type: EventInputValidated})
 	return StageContinue, nil
 }

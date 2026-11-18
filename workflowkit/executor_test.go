@@ -244,6 +244,23 @@ func TestExecutorApproveRejectsNonWaitingRun(t *testing.T) {
 	}
 }
 
+func TestExecutorApproveRejectsApprovalForAnotherRequest(t *testing.T) {
+	store := NewMemoryStore()
+	if err := store.Save(context.Background(), WorkflowRun{ID: "wf-tool", Status: StatusWaitingApproval, ApprovalRef: "agent-approval:cp-1"}); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+	executor := NewExecutor(store, []Step{})
+
+	_, err := executor.Approve(context.Background(), "wf-tool", Approval{ApprovalRef: "approval:wf-tool"})
+	if !errors.Is(err, ErrApprovalMismatch) {
+		t.Fatalf("err = %v, want ErrApprovalMismatch", err)
+	}
+	stored, err := store.Get(context.Background(), "wf-tool")
+	if err != nil || stored.Status != StatusWaitingApproval {
+		t.Fatalf("stored = %+v, %v; want still waiting", stored, err)
+	}
+}
+
 func TestExecutorMarksRunFailedWhenStepReturnsError(t *testing.T) {
 	store := NewMemoryStore()
 	boom := errors.New("boom")
@@ -794,5 +811,30 @@ func TestExecutorWaitsInProcessForUnleasedRetry(t *testing.T) {
 	run, err := executor.Run(context.Background(), WorkflowRun{ID: "wf-sync-retry"})
 	if err != nil || run.Status != StatusSucceeded || attempts != 3 || run.StepRetries != 0 {
 		t.Fatalf("run = %+v, %v, attempts = %d; want success after in-process retries", run, err, attempts)
+	}
+}
+
+func TestExecutorApproveDropsStaleQueueLease(t *testing.T) {
+	store := NewMemoryStore()
+	// A worker paused the run for approval and crashed before releasing it.
+	if err := store.Save(context.Background(), WorkflowRun{
+		ID: "wf-stale-lease", Status: StatusWaitingApproval, CompletedSteps: []string{"prepare"},
+		LeaseOwner: "crashed-worker", LeaseUntil: time.Now().Add(-time.Minute),
+	}); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+	executor := NewExecutor(store, []Step{
+		stepFunc{name: "prepare", run: func(context.Context, WorkflowRun) (StepResult, error) { return StepResult{}, nil }},
+		stepFunc{name: "finalize", run: func(context.Context, WorkflowRun) (StepResult, error) {
+			// Recovery runs while the resumed step is in progress.
+			if failed, err := store.FailExpiredRunning(context.Background(), "lease expired"); err != nil || len(failed) != 0 {
+				t.Errorf("FailExpiredRunning = %+v, %v; want the resumed run left alone", failed, err)
+			}
+			return StepResult{}, nil
+		}},
+	})
+	result, err := executor.Approve(context.Background(), "wf-stale-lease", Approval{AuditRef: "audit:ok"})
+	if err != nil || result.Status != StatusSucceeded {
+		t.Fatalf("Approve = %+v, %v; want succeeded", result, err)
 	}
 }

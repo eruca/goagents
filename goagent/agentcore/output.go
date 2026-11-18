@@ -61,7 +61,7 @@ func (s OutputFormatStage) Name() string {
 }
 
 func (s OutputFormatStage) Run(ctx context.Context, state *RunState) (StageResult, error) {
-	if s.Format.IsZero() || state.Metadata[outputFormatLoadedKey] == true {
+	if s.Format.IsZero() || state.stageDone(outputFormatLoadedKey) {
 		return StageContinue, nil
 	}
 	content := s.Format.promptContent()
@@ -73,7 +73,7 @@ func (s OutputFormatStage) Run(ctx context.Context, state *RunState) (StageResul
 			Content:  content,
 		})
 	}
-	state.Metadata[outputFormatLoadedKey] = true
+	state.markStageDone(outputFormatLoadedKey)
 	return StageContinue, nil
 }
 

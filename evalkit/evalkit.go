@@ -101,8 +101,11 @@ type GradeRequest struct {
 	Trial Trial
 }
 
-// GradeResult is one grader's decision for a trial. Assertions, when present,
-// are aggregated into Passed so callers do not need to duplicate that logic.
+// GradeResult is one grader's decision for a trial. When Assertions is not
+// empty, Passed is derived from them and the grader's own Passed and Score are
+// not consulted: a grader that must fail regardless adds a failing assertion.
+// A trial passes when its harness run succeeded and every grade passed, so a
+// suite without graders passes every trial whose harness run succeeded.
 type GradeResult struct {
 	Name       string
 	Score      float64

@@ -11,7 +11,7 @@ func (s SystemPromptStage) Name() string {
 }
 
 func (s SystemPromptStage) Run(ctx context.Context, state *RunState) (StageResult, error) {
-	if s.Provider == nil || state.Metadata[systemPromptLoadedKey] == true {
+	if s.Provider == nil || state.stageDone(systemPromptLoadedKey) {
 		return StageContinue, nil
 	}
 	blocks, err := s.Provider.SystemPrompt(ctx, state.Input)
@@ -19,7 +19,7 @@ func (s SystemPromptStage) Run(ctx context.Context, state *RunState) (StageResul
 		return StageAbort, err
 	}
 	state.PromptBlocks = append(state.PromptBlocks, blocks...)
-	state.Metadata[systemPromptLoadedKey] = true
+	state.markStageDone(systemPromptLoadedKey)
 	return StageContinue, nil
 }
 

@@ -1,6 +1,9 @@
 package memorykit
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 var (
 	ErrInvalidScope        = errors.New("invalid memory scope")
@@ -10,6 +13,9 @@ var (
 	ErrNoExtractionJob     = errors.New("no claimable extraction job")
 	ErrInvalidRecallResult = errors.New("invalid memory recall result")
 	ErrRecallDependency    = errors.New("memory recall dependency failure")
+	// ErrActiveMismatch reports a create whose ExpectedActive no longer names
+	// the current active record for its kind and key. It matches ErrConflict.
+	ErrActiveMismatch = fmt.Errorf("%w: current active memory changed", ErrConflict)
 )
 
 type BackendError struct {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -554,5 +555,61 @@ func TestModelStatsWeightRecentOutcomesOverOldOnes(t *testing.T) {
 	entry := stats.Models[modelStatsKey("rewrite", "acct", "recovered", "p")]
 	if entry.OutcomeCount != 25 || entry.RecentFailures > 1.3 || entry.RecentOutcomes < 6 {
 		t.Fatalf("recovered entry = %+v, want 25 raw outcomes with old failures decayed to 1/16", entry)
+	}
+}
+
+func TestRefreshModelStatsSkipsDamagedAndReadsLongLines(t *testing.T) {
+	home := t.TempDir()
+	recorder, err := NewJSONLRecorder(home)
+	if err != nil {
+		t.Fatalf("NewJSONLRecorder returned error: %v", err)
+	}
+	outcome := func(routeID, reason string) TaskOutcome {
+		return TaskOutcome{
+			RouteID: routeID, TaskID: routeID, TaskType: "review",
+			AccountAlias: "local", ModelAlias: "local-small", Provider: "local",
+			FailureReason: reason,
+		}
+	}
+	if err := recorder.RecordOutcome(context.Background(), outcome("route-long", strings.Repeat("x", 100_000))); err != nil {
+		t.Fatalf("RecordOutcome returned error: %v", err)
+	}
+	// A crash mid-append leaves a partial line that the next append continues.
+	file, err := os.OpenFile(filepath.Join(home, outcomesFile), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString(`{"route_id":"route-cut","task_ty`); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := recorder.RecordOutcome(context.Background(), outcome("route-after", "")); err != nil {
+		t.Fatalf("RecordOutcome returned error: %v", err)
+	}
+	if err := recorder.RecordOutcome(context.Background(), outcome("route-next", "")); err != nil {
+		t.Fatalf("RecordOutcome returned error: %v", err)
+	}
+
+	stats, err := RefreshModelStats(home)
+	if err != nil {
+		t.Fatalf("RefreshModelStats returned error: %v", err)
+	}
+	// The long line and the line after the damaged one count; the damaged
+	// line and the record appended onto it are lost.
+	if got := stats.Models["review|local|local-small|local"]; got.OutcomeCount != 2 {
+		t.Fatalf("outcome count = %d, want 2", got.OutcomeCount)
+	}
+}
+
+func TestModelStatsIgnoreCallerCausedFailuresForReliability(t *testing.T) {
+	builder := modelStatsBuilder{now: time.Now(), entries: map[string]*modelStatsAccumulator{}}
+	for _, class := range []ErrorClass{ErrorClassCanceled, ErrorClassStreamConsumer, ErrorClassTimeout} {
+		builder.addOutcome(TaskOutcome{RouteID: string(class), TaskType: "review", AccountAlias: "a", ModelAlias: "m", Provider: "p", ErrorClass: class})
+	}
+	got := builder.stats().Models["review|a|m|p"]
+	if got.Failures != 3 || got.RecentOutcomes != 1 || got.RecentFailures != 1 {
+		t.Fatalf("stats = %+v, want 3 failures of which only the timeout weighs on reliability", got)
 	}
 }

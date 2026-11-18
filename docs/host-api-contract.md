@@ -127,6 +127,14 @@ Common error codes:
 - `llm_audit_error`
 - `run_error`
 - `not_found`
+- `workflow_exists` (`409`)
+- `approval_mismatch` (`409`)
+- `workflow_conflict` (`409`): the workflow's state does not allow the
+  operation, for example approving one that is not waiting
+- `request_too_large` (`413`): request bodies are limited to 4 MiB
+
+A `500` response carries only its code and the message `internal server
+error`; the underlying error is written to the host log, never to the client.
 
 ## POST /workflows
 
@@ -157,7 +165,9 @@ Request:
 
 Fields:
 
-- `id`: required workflow id.
+- `id`: required workflow id. Creation never replaces a stored workflow: an id
+  that already exists returns `409 workflow_exists` and leaves the stored
+  workflow and its input artifact unchanged.
 - `input`: input text written as an artifact.
 - `run_mode`: optional. `sync` is supported and default. `queued` is an
   in-process proof that saves a pending workflow and returns immediately while a
@@ -428,6 +438,11 @@ Missing, malformed, expired, wrong-issuer, or wrong-audience tokens return
 `401 unauthorized`. `approved_by` is not an accepted request field, so callers
 cannot supply or override the audited identity.
 
+The approval answers only the final-approval request (`approval_ref` of
+`approval:{id}`). A workflow waiting on a tool approval returns
+`409 approval_mismatch`; resolve it through `POST /workflows/{id}/agent-approve`
+first.
+
 Response:
 
 ```json
@@ -540,14 +555,22 @@ Response:
   "task_id": "wf-review-1",
   "status": "succeeded",
   "summary": {
-    "Status": "succeeded",
-    "ContentRef": "artifact:wf-review-1:agent-output",
-    "InputTokens": 11,
-    "OutputTokens": 13,
-    "LLMCalls": 1,
-    "ToolCalls": 0
+    "status": "succeeded",
+    "content_ref": "artifact:wf-review-1:agent-output",
+    "input_tokens": 11,
+    "output_tokens": 13,
+    "llm_calls": 1,
+    "tool_calls": 0
   },
-  "events": []
+  "events": [
+    {
+      "sequence": 1,
+      "type": "stage.started",
+      "stage": "think",
+      "iteration": 0,
+      "recorded_at": "2026-05-06T01:00:00Z"
+    }
+  ]
 }
 ```
 

@@ -331,3 +331,41 @@ func TestValidVectorRejectsZeroNormAndNonFinite(t *testing.T) {
 		}
 	}
 }
+
+func TestEmbeddingWorkerSkipsAnInputTheEmbedderRejects(t *testing.T) {
+	store := &embeddingWorkerStore{pendingInputs: embeddingWorkerInputs()}
+	rejected := errors.New("input too long")
+	// The batch fails, then "first" fails alone and "second" succeeds.
+	embedder := &embeddingWorkerEmbedder{
+		responses: [][][]float32{nil, nil, {{0, 1, 0}}},
+		errors:    []error{rejected, rejected, nil},
+	}
+	worker, err := NewEmbeddingWorker(EmbeddingWorkerConfig{
+		Store: store, Embedder: embedder, ProfileID: "test-3d", Dimensions: 3, BatchSize: 8,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	count, err := worker.RunOnce(context.Background())
+	if count != 1 || !errors.Is(err, rejected) {
+		t.Fatalf("RunOnce = %d, %v; want the other input stored and the rejection reported", count, err)
+	}
+	if len(store.putRequests) != 1 || store.putRequests[0].MemoryID != embeddingWorkerInputs()[1].MemoryID {
+		t.Fatalf("stored = %#v, want only the second input", store.putRequests)
+	}
+}
+
+func TestEmbeddingWorkerDoesNotSplitBatchOnRecoverableFailure(t *testing.T) {
+	store := &embeddingWorkerStore{pendingInputs: embeddingWorkerInputs()}
+	outage := &BackendError{Op: "embed", Recoverable: true, Err: errors.New("unavailable")}
+	embedder := &embeddingWorkerEmbedder{errors: []error{outage}}
+	worker, err := NewEmbeddingWorker(EmbeddingWorkerConfig{
+		Store: store, Embedder: embedder, ProfileID: "test-3d", Dimensions: 3, BatchSize: 8,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count, err := worker.RunOnce(context.Background()); count != 0 || !errors.Is(err, outage) || len(embedder.requests) != 1 {
+		t.Fatalf("RunOnce = %d, %v after %d embed calls; want one failed batch call", count, err, len(embedder.requests))
+	}
+}

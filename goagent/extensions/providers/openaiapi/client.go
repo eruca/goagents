@@ -237,6 +237,22 @@ type chatMessage struct {
 	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
 }
 
+// MarshalJSON always sends content, even empty, except on an assistant
+// message that only carries tool calls: OpenAI rejects a tool or user
+// message without content, such as a tool result with an empty ForLLM.
+func (m chatMessage) MarshalJSON() ([]byte, error) {
+	wire := struct {
+		Role       string         `json:"role"`
+		Content    *string        `json:"content,omitempty"`
+		ToolCallID string         `json:"tool_call_id,omitempty"`
+		ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
+	}{Role: m.Role, ToolCallID: m.ToolCallID, ToolCalls: m.ToolCalls}
+	if m.Content != "" || len(m.ToolCalls) == 0 {
+		wire.Content = &m.Content
+	}
+	return json.Marshal(wire)
+}
+
 type chatToolCall struct {
 	ID       string           `json:"id"`
 	Type     string           `json:"type"`

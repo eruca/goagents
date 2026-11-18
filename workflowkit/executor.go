@@ -3,6 +3,7 @@ package workflowkit
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -42,8 +43,12 @@ type Executor struct {
 }
 
 type Approval struct {
-	AuditRef string
-	Metadata map[string]any
+	// ApprovalRef, when set, must equal the run's ApprovalRef, so an approval
+	// answers only the request it was issued for and cannot resolve a
+	// different pending approval, such as a tool approval inside a step.
+	ApprovalRef string
+	AuditRef    string
+	Metadata    map[string]any
 }
 
 type Option func(*Executor)
@@ -102,7 +107,11 @@ func (e *Executor) start(ctx context.Context, run WorkflowRun) (WorkflowRun, err
 		return run, nil
 	})
 	if errors.Is(err, ErrRunNotFound) {
-		if err := e.store.Save(ctx, run); err != nil {
+		create := e.store.Save
+		if creator, ok := e.store.(CreateStore); ok {
+			create = creator.Create
+		}
+		if err := create(ctx, run); err != nil {
 			return run, err
 		}
 		return run, nil
@@ -114,11 +123,14 @@ func (e *Executor) start(ctx context.Context, run WorkflowRun) (WorkflowRun, err
 }
 
 func (e *Executor) Continue(ctx context.Context, id string) (WorkflowRun, error) {
-	return e.resumeWaiting(ctx, id, "continue", func(*WorkflowRun) {})
+	return e.resumeWaiting(ctx, id, "continue", func(*WorkflowRun) error { return nil })
 }
 
 func (e *Executor) Approve(ctx context.Context, id string, approval Approval) (WorkflowRun, error) {
-	return e.resumeWaiting(ctx, id, "approve", func(run *WorkflowRun) {
+	return e.resumeWaiting(ctx, id, "approve", func(run *WorkflowRun) error {
+		if approval.ApprovalRef != "" && approval.ApprovalRef != run.ApprovalRef {
+			return fmt.Errorf("%w: workflow %s waits on %q, approval names %q", ErrApprovalMismatch, run.ID, run.ApprovalRef, approval.ApprovalRef)
+		}
 		if approval.AuditRef != "" {
 			run.AuditRef = approval.AuditRef
 		}
@@ -130,12 +142,16 @@ func (e *Executor) Approve(ctx context.Context, id string, approval Approval) (W
 				run.Metadata[key] = value
 			}
 		}
+		return nil
 	})
 }
 
 // resumeWaiting checks and leaves waiting_approval in one store update, so
-// concurrent approvals cannot both run the remaining steps.
-func (e *Executor) resumeWaiting(ctx context.Context, id string, op string, apply func(*WorkflowRun)) (WorkflowRun, error) {
+// concurrent approvals cannot both run the remaining steps. The resumed run
+// executes in this call, not under the queue lease that paused it: that lease
+// belongs to a worker that may be gone, and keeping it would let
+// FailExpiredRunning fail the run in the middle of a step.
+func (e *Executor) resumeWaiting(ctx context.Context, id string, op string, apply func(*WorkflowRun) error) (WorkflowRun, error) {
 	if e.store == nil {
 		return WorkflowRun{}, ErrRunNotFound
 	}
@@ -145,8 +161,12 @@ func (e *Executor) resumeWaiting(ctx context.Context, id string, op string, appl
 		if current.Status != StatusWaitingApproval {
 			return current, InvalidTransitionError{From: current.Status, To: StatusRunning, Op: op}
 		}
-		apply(&current)
+		if err := apply(&current); err != nil {
+			return current, err
+		}
 		current.Status = StatusRunning
+		current.LeaseOwner = ""
+		current.LeaseUntil = time.Time{}
 		return current, nil
 	})
 	if err != nil {
@@ -169,6 +189,8 @@ func (e *Executor) Cancel(ctx context.Context, id string, reason string) (Workfl
 		}
 		current.Status = StatusCancelled
 		current.Error = reason
+		current.StepRetries = 0
+		current.NextAttemptAt = time.Time{}
 		return current, nil
 	})
 	if err != nil {

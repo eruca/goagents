@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"reflect"
@@ -23,6 +24,10 @@ func NewExecutor(registry interface {
 	return &Executor{registry: registry}
 }
 
+// Execute runs calls in order, grouping adjacent parallel calls. It stops at
+// the first group with a failed call, so no later call runs after a failure:
+// a write must not follow a step the model never saw fail. On error it
+// returns the executions that completed, in call order, with the error.
 func (e *Executor) Execute(ctx context.Context, calls []Call, env Env) ([]Execution, error) {
 	results := make([]Execution, len(calls))
 	errs := make([]error, len(calls))
@@ -35,25 +40,34 @@ func (e *Executor) Execute(ctx context.Context, calls []Call, env Env) ([]Execut
 		resolved[i] = tool
 	}
 	for start := 0; start < len(calls); {
+		end := start + 1
 		mode := executionMode(resolved[start])
 		if mode == ports.ExecutionModeParallel {
-			end := start + 1
 			for end < len(calls) && executionMode(resolved[end]) == ports.ExecutionModeParallel {
 				end++
 			}
 			executeParallel(ctx, calls[start:end], resolved[start:end], env, results[start:end], errs[start:end], start)
-			start = end
-			continue
+		} else {
+			executeOne(ctx, calls[start], resolved[start], env, results, errs, start)
 		}
-		executeOne(ctx, calls[start], resolved[start], env, results, errs, start)
-		start++
-	}
-	for _, err := range errs {
-		if err != nil {
-			return nil, err
+		for _, err := range errs[start:end] {
+			if err != nil {
+				return completedExecutions(results[:end]), err
+			}
 		}
+		start = end
 	}
 	return results, nil
+}
+
+func completedExecutions(results []Execution) []Execution {
+	completed := make([]Execution, 0, len(results))
+	for _, execution := range results {
+		if execution.Result != nil {
+			completed = append(completed, execution)
+		}
+	}
+	return completed
 }
 
 func executeParallel(ctx context.Context, calls []Call, resolved []Tool, env Env, results []Execution, errs []error, offset int) {
@@ -120,7 +134,13 @@ func runTool(ctx context.Context, tool Tool, call Call, env Env) (result *Result
 			err = fmt.Errorf("%w: tool %q panicked: %v", ErrToolExecutionFailed, call.Name, recovered)
 		}
 	}()
-	return toolHandler(tool)(toolCtx, call.Input, env)
+	result, err = toolHandler(tool)(toolCtx, call.Input, env)
+	// Only the tool's own Spec.Timeout is a tool timeout; when the run's
+	// context ended, the error stays the run's.
+	if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil && errors.Is(toolCtx.Err(), context.DeadlineExceeded) {
+		err = fmt.Errorf("%w: %w", ErrToolTimeout, err)
+	}
+	return result, err
 }
 
 func executionMode(tool Tool) ports.ExecutionMode {

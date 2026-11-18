@@ -2,7 +2,10 @@ package artifactkit_test
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/eruca/goagents/artifactkit"
@@ -51,5 +54,43 @@ func TestFileStorePersistsArtifactsAcrossReopen(t *testing.T) {
 	}
 	if got.Metadata["workflow_id"] != "wf-1" {
 		t.Fatalf("metadata after reopen = %+v", got.Metadata)
+	}
+}
+
+func TestFileStoreHandlesConcurrentWritesAndLongRefs(t *testing.T) {
+	store, err := artifactkit.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	errs := make(chan error, 64)
+	for writer := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for round := range 8 {
+				if err := store.Put(ctx, artifactkit.Artifact{Ref: "artifact:shared", Content: []byte(fmt.Sprintf("%d-%d", writer, round))}); err != nil {
+					errs <- err
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent Put error: %v", err)
+	}
+	if _, err := store.Get(ctx, "artifact:shared"); err != nil {
+		t.Fatalf("Get after concurrent writes: %v", err)
+	}
+
+	long := "artifact:" + strings.Repeat("w", 300) + ":input"
+	if err := store.Put(ctx, artifactkit.Artifact{Ref: long, Content: []byte("long")}); err != nil {
+		t.Fatalf("Put long ref: %v", err)
+	}
+	got, err := store.Get(ctx, long)
+	if err != nil || string(got.Content) != "long" {
+		t.Fatalf("Get long ref = %q, %v", got.Content, err)
 	}
 }

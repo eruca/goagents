@@ -70,6 +70,16 @@ func (p *Projector) Project(ctx context.Context, request agentcore.ContextProjec
 		return nil, err
 	}
 	text = lastRunes(text, p.cfg.Recall.MaxQueryRunes())
+	if strings.TrimSpace(text) == "" && len(keys) == 0 {
+		// Nothing to recall by, such as a turn whose last message is not
+		// user text. Recall rejects an empty request, which would fail the
+		// whole turn, so the turn goes on without memory.
+		metadata, err := projectionBaseMetadata(canonical.Metadata)
+		if err != nil {
+			return nil, err
+		}
+		return p.projectNext(ctx, canonical.Messages, canonical.Budget, metadata)
+	}
 	result, err := p.cfg.Recall.Recall(ctx, memorykit.RecallRequest{
 		Scope: scope,
 		Text:  text,

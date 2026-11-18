@@ -59,6 +59,12 @@ report, err := runner.Run(ctx, suite)
 - trace DTOs suitable for host adapters
 - suite-level pass/fail summaries
 
+A trial passes when its harness run succeeds and every grade passes. A grade
+with assertions passes exactly when all of them pass; its own `Passed` and
+`Score` are then not consulted, so a grader that must fail regardless adds a
+failing assertion. A suite without graders passes every trial whose harness
+run succeeds, which suits a smoke check but measures nothing else.
+
 It does not own:
 
 - model calls

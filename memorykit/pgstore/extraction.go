@@ -75,7 +75,8 @@ func (s *Store) ClaimExtraction(
 		WITH claimable AS (
 			SELECT id FROM memory_extraction_jobs
 			WHERE attempts < $2
-			  AND (status = 'pending' OR (status = 'leased' AND lease_until <= $1))
+			  AND ((status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= $1))
+			    OR (status = 'leased' AND lease_until <= $1))
 			ORDER BY created_at, id
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1
@@ -150,10 +151,11 @@ func (s *Store) FailExtraction(
 			source_ref = CASE WHEN attempts >= $5 THEN '' ELSE source_ref END,
 			evidence_hash = CASE WHEN attempts >= $5 THEN '' ELSE evidence_hash END,
 			source_agent_id = CASE WHEN attempts >= $5 THEN '' ELSE source_agent_id END,
+			next_attempt_at = CASE WHEN attempts >= $5 THEN NULL ELSE $7::timestamptz END,
 			lease_owner = '', lease_until = NULL, updated_at = $6
 		WHERE id = $1 AND lease_owner = $2 AND attempts = $3
 		  AND status = 'leased' AND lease_until > $6`,
-		id, workerID, expectedAttempt, failureCode, maxAttempts, now)
+		id, workerID, expectedAttempt, failureCode, maxAttempts, now, now.Add(s.cfg.extractionRetryDelay(expectedAttempt)))
 	if err != nil {
 		return wrapBackend("fail extraction", err)
 	}

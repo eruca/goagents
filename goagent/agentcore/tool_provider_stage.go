@@ -18,7 +18,7 @@ func (s ToolProviderStage) Name() string {
 }
 
 func (s ToolProviderStage) Run(ctx context.Context, state *RunState) (StageResult, error) {
-	if s.Provider == nil || state.Metadata[toolProviderLoadedKey] == true {
+	if s.Provider == nil || state.stageDone(toolProviderLoadedKey) {
 		return StageContinue, nil
 	}
 	provided, err := s.Provider.Tools(ctx, state.Input)
@@ -28,7 +28,7 @@ func (s ToolProviderStage) Run(ctx context.Context, state *RunState) (StageResul
 	for _, tool := range provided {
 		s.Registry.Register(tool)
 	}
-	state.Metadata[toolProviderLoadedKey] = true
+	state.markStageDone(toolProviderLoadedKey)
 	return StageContinue, nil
 }
 

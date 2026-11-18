@@ -27,6 +27,15 @@ trusted Host metadata so restart, requeue, and approval resume retain the same
 Scope. V1 constructs only project Scope and rejects caller-supplied tenant,
 subject, or `subject_type=user`.
 
+With memory enabled, the routes that read or act on a stored workflow
+(`GET /workflows/{id}`, `/events`, `/llm-routes`, `GET /agent-runs/{id}`, and
+`POST /workflows/{id}/requeue`) authorize the caller against the stored
+project with `memory.read`; a workflow of another tenant reads as
+`404 not_found`. `GET /workflows` requires a `project_id` query parameter and
+lists only that project's workflows in the caller's tenant. Requeueing a
+workflow with write intent requires `memory.write_explicit` and the same user
+that created it, because the requeued run writes memory as that user.
+
 Automatic recall projects a bounded active/effective project view before the
 model call. For a production workflow, the Host verifies the trusted workflow
 ID, expected input Artifact ref, and current ref-only user message, then reads

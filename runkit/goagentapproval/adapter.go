@@ -193,7 +193,14 @@ func checkpointAAD(checkpointID, runID, tenantID, definitionHash string) []byte 
 	return encoded
 }
 
+// leaseFinishTimeout bounds closing a lease after the resume ran. Closing
+// uses a context detached from the request: a client that disconnects while
+// the approved tool runs must not leave the checkpoint leased.
+const leaseFinishTimeout = 5 * time.Second
+
 func (a *Adapter) completeLease(ctx context.Context, checkpoint runkit.ApprovalCheckpoint, request runkit.ApprovalLeaseRequest) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), leaseFinishTimeout)
+	defer cancel()
 	if err := a.store.CompleteLease(ctx, runkit.CheckpointLeaseCompletion{
 		CheckpointID: checkpoint.ID,
 		TenantID:     checkpoint.TenantID,
@@ -206,6 +213,8 @@ func (a *Adapter) completeLease(ctx context.Context, checkpoint runkit.ApprovalC
 }
 
 func (a *Adapter) failLease(ctx context.Context, checkpoint runkit.ApprovalCheckpoint, request runkit.ApprovalLeaseRequest, failureCode string, result *agentcore.RunResult, cause error) (*agentcore.RunResult, error) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), leaseFinishTimeout)
+	defer cancel()
 	if err := a.store.FailLease(ctx, runkit.CheckpointLeaseCompletion{
 		CheckpointID: checkpoint.ID,
 		TenantID:     checkpoint.TenantID,

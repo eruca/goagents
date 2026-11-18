@@ -15,6 +15,14 @@ not retried automatically because an external write may already have occurred.
 Failed leases retain a bounded failure code for operator audit without storing
 the decrypted checkpoint or a raw runtime error.
 
+`ExpireCheckpoints` expires a pending checkpoint at `ExpiresAt`. A leased one
+also waits until its lease ends, so a tool approved just before expiry can
+still complete; a leased checkpoint whose holder crashed expires once both
+times have passed. The memory, SQLite, and PostgreSQL stores report the same
+errors, checked by `storetest.RunCheckpointStoreConformance`. The goagent
+approval adapter closes its lease on a context detached from the request, so
+a client that disconnects mid-resume does not leave the checkpoint leased.
+
 Set `RUNKIT_POSTGRES_TEST_DSN` to run the PostgreSQL integration tests. Point
 it at a disposable database: migration creates checkpoint tables in that
 database.

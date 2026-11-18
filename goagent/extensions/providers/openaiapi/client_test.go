@@ -627,3 +627,35 @@ func chatWithMaxOutputTokens(client *Client, req ports.ChatRequest, maxOutputTok
 	req.MaxOutputTokens = maxOutputTokens
 	return client.Chat(context.Background(), req)
 }
+
+func TestClientSendsEmptyToolResultContent(t *testing.T) {
+	var gotBody struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"done"}}],"usage":{"prompt_tokens":0,"completion_tokens":0}}`))
+	}))
+	defer server.Close()
+	client, err := New(Config{BaseURL: server.URL + "/v1", APIKey: "test-key", Model: "test-model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Chat(context.Background(), ports.ChatRequest{Messages: []ports.ChatMessage{
+		{Role: "user", Content: "hello"},
+		{Role: "assistant", ToolCalls: []ports.ToolCall{{ID: "call_1", Name: "lookup", Input: json.RawMessage(`{}`)}}},
+		{Role: "tool", ToolCallID: "call_1"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content, ok := gotBody.Messages[2]["content"]; !ok || content != "" {
+		t.Fatalf("tool message = %v, want an empty content field", gotBody.Messages[2])
+	}
+	if _, ok := gotBody.Messages[1]["content"]; ok {
+		t.Fatalf("assistant tool-call message = %v, want no content field", gotBody.Messages[1])
+	}
+}

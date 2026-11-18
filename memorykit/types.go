@@ -90,6 +90,19 @@ type CreateRequest struct {
 	SourceAgentID, Actor, Reason, IdempotencyKey string
 	Sources                                      []Source
 	Now                                          time.Time
+	// ExpectedActive, set only on an active create, names the one active
+	// record the create may supersede, checked in the same transaction: a
+	// zero value means there must be none. Any other current active record
+	// fails the create with ErrActiveMismatch and writes nothing. It is not
+	// part of the idempotency fingerprint.
+	ExpectedActive *ActiveExpectation `json:"-"`
+}
+
+// ActiveExpectation identifies an active record by ID and version; a zero
+// value means no active record.
+type ActiveExpectation struct {
+	ID      string
+	Version int64
 }
 
 type VersionedCommand struct {

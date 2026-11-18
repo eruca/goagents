@@ -83,7 +83,11 @@ const (
 	// ErrorClassProviderBusy marks a candidate HealthStore.Acquire turned
 	// away; no call was made.
 	ErrorClassProviderBusy ErrorClass = "provider_busy"
-	ErrorClassUnknown      ErrorClass = "unknown"
+	// ErrorClassStreamConsumer reports that the caller's stream callback
+	// failed, for example because its client disconnected, while the provider
+	// was still answering.
+	ErrorClassStreamConsumer ErrorClass = "stream_consumer_error"
+	ErrorClassUnknown        ErrorClass = "unknown"
 )
 
 // TaskOutcome is the allowlisted audit record for the result of an LLM task.

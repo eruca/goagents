@@ -12,7 +12,16 @@ type Runner interface {
 }
 
 type RequestBuilder func(workflowkit.WorkflowRun) agentcore.RunRequest
-type ResultMapper func(workflowkit.WorkflowRun, *agentcore.RunResult) workflowkit.StepResult
+
+// ResultMapper turns an agent run into the step's result. It sees the run's
+// error too, so it can map an interruption such as agentcore.ErrApprovalPending
+// to waiting_approval by returning a nil error. A returned error fails the
+// step; the default mapper is DefaultResult.
+type ResultMapper func(run workflowkit.WorkflowRun, result *agentcore.RunResult, err error) (workflowkit.StepResult, error)
+
+// maxContentPreviewRunes bounds the agent output DefaultResult keeps in step
+// metadata; full output belongs in an artifact.
+const maxContentPreviewRunes = 256
 
 type Step struct {
 	name    string
@@ -47,28 +56,39 @@ func (s Step) Run(ctx context.Context, run workflowkit.WorkflowRun) (workflowkit
 		req = s.builder(run)
 	}
 	result, err := s.runner.RunDetailed(ctx, req)
+	if s.mapper != nil {
+		return s.mapper(run, result, err)
+	}
+	return DefaultResult(run, result, err)
+}
+
+// DefaultResult maps a failed run to a failed step that keeps the agent run
+// ID, and a successful one to a step that completes with no status, so the
+// workflow continues with its next step. It records the agent run as the
+// step's output and a bounded content preview.
+func DefaultResult(_ workflowkit.WorkflowRun, result *agentcore.RunResult, err error) (workflowkit.StepResult, error) {
 	if err != nil {
 		return failedResult(result, err), err
 	}
-	if s.mapper != nil {
-		return s.mapper(run, result), nil
-	}
-	return successResult(result), nil
-}
-
-func successResult(result *agentcore.RunResult) workflowkit.StepResult {
 	if result == nil {
-		return workflowkit.StepResult{Status: workflowkit.StatusSucceeded}
+		return workflowkit.StepResult{}, nil
 	}
 	runID := result.RunID.String()
 	return workflowkit.StepResult{
-		Status:     workflowkit.StatusSucceeded,
 		AgentRunID: runID,
 		OutputRef:  "agent:" + runID,
 		Metadata: map[string]any{
-			"content_preview": result.Content,
+			"content_preview": contentPreview(result.Content),
 		},
+	}, nil
+}
+
+func contentPreview(content string) string {
+	runes := []rune(content)
+	if len(runes) <= maxContentPreviewRunes {
+		return content
 	}
+	return string(runes[:maxContentPreviewRunes])
 }
 
 func failedResult(result *agentcore.RunResult, err error) workflowkit.StepResult {

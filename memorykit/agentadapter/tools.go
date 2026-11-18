@@ -350,24 +350,37 @@ func (p *ToolProvider) newWriteTool(scope memorykit.Scope, actor string, runID a
 			if validUntil != nil {
 				until = *validUntil
 			}
-			status, statusErr := p.writeStatus(ctx, scope, parsed.Kind, parsed.Key)
-			if contextErr := canonicalContextError(ctx, statusErr); contextErr != nil {
-				return nil, contextErr
+			// The status decision and the create are separate calls, so the
+			// create names the active record the decision saw. If a person
+			// wrote or reviewed one in between, the create fails and the
+			// decision is made again, now yielding a candidate.
+			var request memorykit.CreateRequest
+			var created memorykit.Memory
+			var createErr error
+			for attempt := 0; attempt < 2; attempt++ {
+				status, expected, statusErr := p.writeStatus(ctx, scope, parsed.Kind, parsed.Key)
+				if contextErr := canonicalContextError(ctx, statusErr); contextErr != nil {
+					return nil, contextErr
+				}
+				if statusErr != nil {
+					return memoryWriteFailure(env), nil
+				}
+				request = memorykit.CreateRequest{
+					ID: id, Scope: scope, Kind: parsed.Kind, Key: parsed.Key,
+					Status: status, Content: parsed.Content,
+					ValidFrom: now, ValidUntil: until,
+					Importance: 0, Confidence: 0, SourceAgentID: runID.String(),
+					Actor: actor, Reason: parsed.Reason,
+					IdempotencyKey: idempotencyKey,
+					Sources:        []memorykit.Source{{Kind: "agent_run", Ref: "agent-run:" + runID.String()}},
+					Now:            now,
+					ExpectedActive: expected,
+				}
+				created, createErr = p.cfg.Store.Create(ctx, request)
+				if !errors.Is(createErr, memorykit.ErrActiveMismatch) {
+					break
+				}
 			}
-			if statusErr != nil {
-				return memoryWriteFailure(env), nil
-			}
-			request := memorykit.CreateRequest{
-				ID: id, Scope: scope, Kind: parsed.Kind, Key: parsed.Key,
-				Status: status, Content: parsed.Content,
-				ValidFrom: now, ValidUntil: until,
-				Importance: 0, Confidence: 0, SourceAgentID: runID.String(),
-				Actor: actor, Reason: parsed.Reason,
-				IdempotencyKey: idempotencyKey,
-				Sources:        []memorykit.Source{{Kind: "agent_run", Ref: "agent-run:" + runID.String()}},
-				Now:            now,
-			}
-			created, createErr := p.cfg.Store.Create(ctx, request)
 			if contextErr := canonicalContextError(ctx, createErr); contextErr != nil {
 				return nil, contextErr
 			}
@@ -402,19 +415,23 @@ const agentWriteKeyPrefix = "agent-write:"
 // model may only replace its own untouched writes. Memory a person wrote,
 // reviewed, or corrected stays in effect; the new content becomes a candidate
 // for review instead, which keeps a prompt-injected write from rewriting it.
-func (p *ToolProvider) writeStatus(ctx context.Context, scope memorykit.Scope, kind memorykit.Kind, key string) (memorykit.Status, error) {
+// An active write also returns the active record it may supersede, for the
+// create to check.
+func (p *ToolProvider) writeStatus(ctx context.Context, scope memorykit.Scope, kind memorykit.Kind, key string) (memorykit.Status, *memorykit.ActiveExpectation, error) {
 	current, err := p.cfg.Store.List(ctx, memorykit.ListQuery{
 		Scope: scope, Kind: kind, Key: key, Status: memorykit.StatusActive, Limit: 1,
 	})
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
+	expected := &memorykit.ActiveExpectation{}
 	for _, memory := range current {
 		if !strings.HasPrefix(memory.IdempotencyKey, agentWriteKeyPrefix) || memory.Version != 1 {
-			return memorykit.StatusCandidate, nil
+			return memorykit.StatusCandidate, nil, nil
 		}
+		expected = &memorykit.ActiveExpectation{ID: memory.ID, Version: memory.Version}
 	}
-	return memorykit.StatusActive, nil
+	return memorykit.StatusActive, expected, nil
 }
 
 type writeExpectation struct {

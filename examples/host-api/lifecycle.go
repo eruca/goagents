@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/eruca/goagents/hostkit"
 )
@@ -53,6 +54,10 @@ func (s *hostAPIService) Start(ctx context.Context) error {
 	s.listener = listener
 	s.httpServer = &http.Server{
 		Handler: s.requests.Wrap(s.server.Handler()),
+		// Sync workflows can run long, so only headers and idle connections
+		// are bounded; bodies are bounded by size in Server.Handler.
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
 		BaseContext: func(net.Listener) context.Context {
 			return s.executionCtx
 		},

@@ -227,7 +227,7 @@ func TestVectorChannelErrorClassification(t *testing.T) {
 	}
 }
 
-func TestSearchGramsFollowContentAndBackfillOnUpgrade(t *testing.T) {
+func TestSearchTermsFollowContentAndBackfillOnUpgrade(t *testing.T) {
 	store := openIsolatedStore(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
@@ -236,17 +236,18 @@ func TestSearchGramsFollowContentAndBackfillOnUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	searchGrams := func() []string {
+	readTerms := func(column string) []string {
 		var data string
-		if err := store.db.QueryRowContext(ctx, `SELECT array_to_json(search_grams)::text FROM memories WHERE id = $1`, queryIDLexical).Scan(&data); err != nil {
-			t.Fatalf("read search_grams: %v", err)
+		if err := store.db.QueryRowContext(ctx, `SELECT array_to_json(`+column+`)::text FROM memories WHERE id = $1`, queryIDLexical).Scan(&data); err != nil {
+			t.Fatalf("read %s: %v", column, err)
 		}
-		var grams []string
-		if err := json.Unmarshal([]byte(data), &grams); err != nil {
-			t.Fatalf("decode search_grams: %v", err)
+		var terms []string
+		if err := json.Unmarshal([]byte(data), &terms); err != nil {
+			t.Fatalf("decode %s: %v", column, err)
 		}
-		return grams
+		return terms
 	}
+	searchGrams := func() []string { return readTerms("search_grams") }
 	if got, want := searchGrams(), memorykit.IndexGrams("部署.目标 生产环境使用 Kubernetes"); !reflect.DeepEqual(got, want) {
 		t.Fatalf("created grams = %q, want %q", got, want)
 	}
@@ -266,16 +267,20 @@ func TestSearchGramsFollowContentAndBackfillOnUpgrade(t *testing.T) {
 	}
 	assertQueryCandidateIDs(t, found.FullText, []string{queryIDLexical})
 
-	// A schema version 1 database has no grams; reopening backfills them.
-	if _, err := store.db.ExecContext(ctx, `UPDATE memories SET search_grams = '{}' WHERE id = $1`, queryIDLexical); err != nil {
+	// A schema version 1 database has neither column filled; reopening
+	// backfills both.
+	if _, err := store.db.ExecContext(ctx, `UPDATE memories SET search_grams = '{}', search_words = '{}' WHERE id = $1`, queryIDLexical); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.db.ExecContext(ctx, `DELETE FROM memorykit_schema_versions WHERE version = 2`); err != nil {
+	if _, err := store.db.ExecContext(ctx, `DELETE FROM memorykit_schema_versions WHERE version >= 2`); err != nil {
 		t.Fatal(err)
 	}
 	reopened := openTestStore(t)
 	if got, want := searchGrams(), memorykit.IndexGrams("部署.目标 测试环境使用 Docker"); !reflect.DeepEqual(got, want) {
 		t.Fatalf("backfilled grams = %q, want %q", got, want)
+	}
+	if got, want := readTerms("search_words"), memorykit.IndexWords("部署.目标 测试环境使用 Docker"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("backfilled words = %q, want %q", got, want)
 	}
 	var version int
 	if err := reopened.db.QueryRowContext(ctx, `SELECT MAX(version) FROM memorykit_schema_versions`).Scan(&version); err != nil || version != supportedSchemaVersion {

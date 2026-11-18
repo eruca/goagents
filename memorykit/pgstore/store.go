@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/eruca/goagents/memorykit"
@@ -21,6 +22,32 @@ type Config struct {
 	Limits              memorykit.Limits
 	EmbeddingProfileID  string
 	EmbeddingDimensions int
+	// ExtractionRetryDelay is how long a failed extraction job waits before
+	// it can be claimed again; each further failure doubles the wait, up to
+	// ExtractionMaxRetryDelay. Zero values use 5 seconds and 5 minutes.
+	ExtractionRetryDelay    time.Duration
+	ExtractionMaxRetryDelay time.Duration
+}
+
+const (
+	defaultExtractionRetryDelay    = 5 * time.Second
+	defaultExtractionMaxRetryDelay = 5 * time.Minute
+)
+
+// extractionRetryDelay is the wait after the attempt-th failure.
+func (c Config) extractionRetryDelay(attempt int) time.Duration {
+	base, ceiling := c.ExtractionRetryDelay, c.ExtractionMaxRetryDelay
+	if base <= 0 {
+		base = defaultExtractionRetryDelay
+	}
+	if ceiling <= 0 {
+		ceiling = defaultExtractionMaxRetryDelay
+	}
+	delay := base
+	for i := 1; i < attempt && delay < ceiling; i++ {
+		delay *= 2
+	}
+	return min(delay, ceiling)
 }
 
 // Store owns PostgreSQL persistence. ownsDB distinguishes Open from caller-controlled OpenDB.

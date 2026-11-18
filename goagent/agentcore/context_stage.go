@@ -11,10 +11,10 @@ func (s ContextStage) Name() string {
 }
 
 func (s ContextStage) Run(ctx context.Context, state *RunState) (StageResult, error) {
-	if state.Input.Input == "" || state.Metadata[contextStageInputAdded] == true {
+	if state.Input.Input == "" || state.stageDone(contextStageInputAdded) {
 		return StageContinue, nil
 	}
 	state.Messages = append(state.Messages, Message{Role: "user", Content: state.Input.Input})
-	state.Metadata[contextStageInputAdded] = true
+	state.markStageDone(contextStageInputAdded)
 	return StageContinue, nil
 }

@@ -28,6 +28,16 @@ _, err = mcpkit.RegisterTools(ctx, registry, client, mcpkit.RegisterOptions{
 })
 ```
 
+A stdio server does not inherit the host environment, which usually holds
+secrets such as LLM API keys. It receives only the variables named in
+`StdioConfig.InheritEnv` (default `DefaultInheritEnv`: `PATH`, `HOME`, temp
+directories, locale, and the Windows system variables), plus `Env`. Pass the
+server's own credentials through `Env`; an empty, non-nil `InheritEnv` inherits
+nothing.
+
+`ListTools` follows pagination for at most 100 pages and fails if a server
+repeats a cursor.
+
 For Streamable HTTP:
 
 ```go

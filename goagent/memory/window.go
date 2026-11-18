@@ -28,11 +28,11 @@ func (m *WindowMemory) Load(ctx context.Context, sessionID string) ([]ports.Memo
 	return append([]ports.MemoryMessage(nil), messages...), nil
 }
 
-func (m *WindowMemory) Save(ctx context.Context, sessionID string, messages []ports.MemoryMessage) error {
+func (m *WindowMemory) Append(ctx context.Context, sessionID string, messages []ports.MemoryMessage) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	copied := append([]ports.MemoryMessage(nil), messages...)
+	copied := append(append([]ports.MemoryMessage(nil), m.messages[sessionID]...), messages...)
 	if m.limit > 0 && len(copied) > m.limit {
 		copied = copied[len(copied)-m.limit:]
 	}

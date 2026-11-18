@@ -15,15 +15,17 @@ func (s MemoryLoadStage) Name() string {
 }
 
 func (s MemoryLoadStage) Run(ctx context.Context, state *RunState) (StageResult, error) {
-	if s.Provider == nil || state.Input.SessionID == "" || state.Metadata[memoryLoadedKey] == true {
+	if s.Provider == nil || state.Input.SessionID == "" || state.stageDone(memoryLoadedKey) {
 		return StageContinue, nil
 	}
 	loaded, err := s.Provider.Load(ctx, state.Input.SessionID)
 	if err != nil {
 		return StageAbort, err
 	}
-	state.Messages = append(memoryStateMessages(loaded), state.Messages...)
-	state.Metadata[memoryLoadedKey] = true
+	history := memoryStateMessages(loaded)
+	state.Messages = append(history, state.Messages...)
+	state.memoryMessages = len(history)
+	state.markStageDone(memoryLoadedKey)
 	state.Emit(ctx, Event{
 		Type: EventMemoryLoaded,
 		Metadata: map[string]any{

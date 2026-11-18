@@ -2,6 +2,7 @@ package runkit
 
 import (
 	"context"
+	"errors"
 
 	"github.com/eruca/goagents/goagent/agentcore"
 )
@@ -22,7 +23,9 @@ func (s GoagentEventSink) Emit(ctx context.Context, event agentcore.Event) error
 		return nil
 	}
 	runID := event.RunID.String()
-	if _, err := s.store.Get(ctx, runID); err != nil {
+	// Only a missing run is created. Any other read error is returned: Create
+	// would otherwise reset a finished run to running and drop its summary.
+	if _, err := s.store.Get(ctx, runID); errors.Is(err, ErrRunNotFound) {
 		record := RunRecord{RunID: runID, Status: StatusRunning}
 		if s.builder != nil {
 			record = s.builder(event)
@@ -36,6 +39,8 @@ func (s GoagentEventSink) Emit(ctx context.Context, event agentcore.Event) error
 		if err := s.store.Create(ctx, record); err != nil {
 			return err
 		}
+	} else if err != nil {
+		return err
 	}
 	return s.store.AppendEvent(ctx, RunEvent{
 		RunID:     runID,

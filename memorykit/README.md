@@ -66,16 +66,17 @@ call, enforces one configured deadline and item/token budget, fuses exact,
 PostgreSQL full-text, and pgvector ranks, and inserts a bounded memory view
 immediately before the current user message.
 
-Full-text recall splits the query with `memorykit.SearchTerms`: words match
-the `simple` tsvector, and runs of Chinese or Japanese characters, which the
-default PostgreSQL parser does not segment, become overlapping two-character
-grams matched as substrings. A memory matches if it shares any term; only
+Full-text recall splits the query with `memorykit.SearchTerms` into words and,
+for runs of Chinese or Japanese characters, overlapping two-character grams
+matched as substrings. A memory matches if it shares any term; only
 memories matching more than half as many terms as the best match are kept, and
 results rank by matched terms. `memorystore` and `pgstore` apply the same rule,
-checked by `storetest.RunFullTextRecallConformance`. `pgstore` keeps each
-memory's characters and two-character grams in an indexed `search_grams`
-column, so candidates come from the GIN indexes on `search_vector` and
-`search_grams` and only memories sharing a term are scored.
+checked by `storetest.RunFullTextRecallConformance`. `pgstore` stores each
+memory's words (`memorykit.IndexWords`) and grams (`memorykit.IndexGrams`) in
+indexed `search_words` and `search_grams` columns, split the same way as the
+query, so a word inside a dotted key such as `storage.vectors` matches in both
+stores. Candidates come from those GIN indexes, so only memories sharing a term
+are scored.
 
 On-demand recall uses request-scoped `search_memory` and `read_memory` tools.
 Their schemas contain no Scope fields. `remember_project_memory` is registered
@@ -83,7 +84,10 @@ only when trusted Host metadata grants explicit write intent. A model write
 takes effect immediately only for a new kind/key or to replace the model's own
 untouched earlier write. If the current active record was written, reviewed,
 or corrected by anyone else, the write is stored as a candidate for review and
-the existing record stays in effect.
+the existing record stays in effect. The check and the write are atomic: the
+create carries `CreateRequest.ExpectedActive`, the active record the check saw,
+and a store fails it with `ErrActiveMismatch` if a person wrote or reviewed one
+in between, after which the decision is made again.
 
 A typed recoverable embedding/vector failure degrades to the remaining
 exact/full-text channels and records only content-free channel/ID metadata.
@@ -104,7 +108,11 @@ Artifact bodies are not valid log/event/error fields.
 - A deterministic trusted projection may create active memory without a model.
 - Model extraction can only propose candidate records. Candidates remain hidden
   from recall until an authorized reviewer activates them.
-- Candidate extraction jobs are durable and leased with bounded retries.
+- Candidate extraction jobs are durable and leased with bounded retries. A
+  failed job waits before it can be claimed again, `pgstore.Config`'s
+  `ExtractionRetryDelay` (default 5s) doubling per failure up to
+  `ExtractionMaxRetryDelay` (default 5m), so a short provider outage does not
+  use up every attempt.
   Deterministic job/candidate identities make retries idempotent.
 
 Explicit write failure is truthful: the tool returns `项目记忆未保存`, marks the
@@ -118,7 +126,9 @@ a content-free degradation event for operator follow-up.
 ## Lifecycle and operations
 
 - **Migration:** opening `pgstore` upgrades older schema versions in place
-  (version 2 adds and backfills `search_grams`) and fails closed on an
+  (version 2 adds and backfills `search_grams`; version 3 adds and backfills
+  `search_words` and adds the extraction job `next_attempt_at`) and
+  fails closed on an
   unavailable extension or a newer, unsupported version.
 - **Embedding rebuild:** delete the affected embedding rows (or let changed
   content hashes become pending), then run `EmbeddingWorker` until
@@ -127,7 +137,9 @@ a content-free degradation event for operator follow-up.
 - **Activation:** changes a reviewed candidate to active and supersedes an
   existing active record with the same Scope/kind/key.
 - **Correction:** creates a new revision, replaces content/sources, and
-  invalidates the old embedding by content hash.
+  invalidates the old embedding by content hash. An inactive record (forgotten,
+  dismissed, superseded, or erased) cannot be corrected and returns
+  `ErrConflict`.
 - **Forget:** changes an active record to inactive. It immediately leaves all
   recall paths but retains governed content, sources, and revision audit.
 - **Erase:** keeps an inactive identity/audit tombstone while scrubbing content,
