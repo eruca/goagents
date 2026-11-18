@@ -24,8 +24,10 @@ approval adapter closes its lease on a context detached from the request, so
 a client that disconnects mid-resume does not leave the checkpoint leased.
 
 Set `RUNKIT_POSTGRES_TEST_DSN` to run the PostgreSQL integration tests. Point
-it at a disposable database: migration creates checkpoint tables in that
-database.
+it at a disposable database: migration creates checkpoint and run tables in
+that database, and the run store tests create and drop their own schemas.
+Set `RUNKIT_REQUIRE_POSTGRES=1` to make the run store tests fail instead of
+skipping when the DSN is missing.
 
 ## Goagent approval adapter
 
@@ -139,6 +141,8 @@ The core `Store` contract is DTO-based:
 
 The core package includes `MemoryStore` for examples, tests, and prototypes.
 The `sqlitestore` package provides SQLite persistence for host-side audit logs.
+The `pgstore` package implements the same `Store` (and `CheckpointStore`) in
+PostgreSQL, for hosts that run more than one replica.
 
 ## Use
 
@@ -171,6 +175,26 @@ if err != nil {
 }
 defer store.Close()
 ```
+
+With several replicas, share one PostgreSQL store instead:
+
+```go
+store, err := pgstore.Open(ctx, dsn)
+if err != nil {
+    return err
+}
+defer store.Close()
+```
+
+`pgstore` behaves like `sqlitestore`: `Create` on an existing run id replaces
+the record and keeps its events, `Complete` overwrites the terminal summary,
+and `FindByWorkflowID` returns runs by creation time, then insertion order.
+`AppendEvent` locks the run row while it assigns the next sequence, so
+replicas appending to the same run get gap-free, unique sequences in commit
+order. Times are stored as `TIMESTAMPTZ` (microsecond precision) and read
+back in UTC. `Open` adds the `agent_runs` and `run_events` tables with
+`CREATE TABLE IF NOT EXISTS` under an advisory lock, so a database created by
+the checkpoint-only version upgrades in place.
 
 For `goagent`, use the adapter sink:
 

@@ -1,4 +1,6 @@
-// Package pgstore persists opaque runkit approval checkpoints in PostgreSQL.
+// Package pgstore persists runkit approval checkpoints, agent run records, and
+// run events in PostgreSQL. Store implements runkit.Store with the same
+// semantics as sqlitestore, and runkit.CheckpointStore.
 package pgstore
 
 import (
@@ -226,8 +228,19 @@ func (s *Store) ExpireCheckpoints(ctx context.Context, now time.Time) (int, erro
 	return int(count), err
 }
 
+// migrate creates any missing tables and columns, so a database created by an
+// earlier version upgrades in place. It runs in one transaction under an
+// advisory lock, so replicas starting together migrate one at a time.
 func (s *Store) migrate(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext('runkit.pgstore.schema'))`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS approval_checkpoints (
  checkpoint_id TEXT PRIMARY KEY,
  run_id TEXT NOT NULL,
@@ -251,8 +264,40 @@ CREATE TABLE IF NOT EXISTS approval_decisions (
  reason_code TEXT NOT NULL DEFAULT '',
  decided_at TIMESTAMPTZ NOT NULL
 );
-ALTER TABLE approval_checkpoints ADD COLUMN IF NOT EXISTS failure_code TEXT NOT NULL DEFAULT '';`)
-	return err
+ALTER TABLE approval_checkpoints ADD COLUMN IF NOT EXISTS failure_code TEXT NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS agent_runs (
+ run_id TEXT PRIMARY KEY,
+ workflow_id TEXT NOT NULL DEFAULT '',
+ task_id TEXT NOT NULL DEFAULT '',
+ status TEXT NOT NULL,
+ summary_status TEXT NOT NULL DEFAULT '',
+ content_ref TEXT NOT NULL DEFAULT '',
+ abort_reason TEXT NOT NULL DEFAULT '',
+ input_tokens INTEGER NOT NULL DEFAULT 0,
+ output_tokens INTEGER NOT NULL DEFAULT 0,
+ llm_calls INTEGER NOT NULL DEFAULT 0,
+ tool_calls INTEGER NOT NULL DEFAULT 0,
+ used_tools_json JSONB NOT NULL DEFAULT '[]',
+ metadata_json JSONB NOT NULL DEFAULT '{}',
+ created_at TIMESTAMPTZ NOT NULL,
+ updated_at TIMESTAMPTZ NOT NULL,
+ insert_order BIGINT GENERATED ALWAYS AS IDENTITY
+);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_workflow_id ON agent_runs (workflow_id, created_at, insert_order);
+CREATE TABLE IF NOT EXISTS run_events (
+ run_id TEXT NOT NULL REFERENCES agent_runs(run_id) ON DELETE CASCADE,
+ sequence INTEGER NOT NULL,
+ event_type TEXT NOT NULL,
+ stage TEXT NOT NULL DEFAULT '',
+ iteration INTEGER NOT NULL DEFAULT 0,
+ message TEXT NOT NULL DEFAULT '',
+ metadata_json JSONB NOT NULL DEFAULT '{}',
+ recorded_at TIMESTAMPTZ NOT NULL,
+ PRIMARY KEY (run_id, sequence)
+);`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 const checkpointSelect = `SELECT c.checkpoint_id, c.run_id, c.tenant_id, c.definition_hash, c.ciphertext, c.status, c.failure_code, c.lease_owner, c.lease_until, c.expires_at, c.created_at, c.updated_at, d.approver_id, d.approved, d.audit_ref, d.reason_code, d.decided_at FROM approval_checkpoints c LEFT JOIN approval_decisions d ON d.checkpoint_id = c.checkpoint_id`
