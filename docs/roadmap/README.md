@@ -26,7 +26,7 @@ ADR-0001 是在分 kit 发版、旧 CJK 检索方案下写的，已经不适用�
 - PR #2–#4 完成三轮审查修复（P0–P3），覆盖租约、审批绑定、记忆写入原子性、
   流式错误统计和 host-api 安全加固；随后 contextkit 支持按 token 计预算。
 - memorykit 中英文召回评测集 v2（#8）已合入：exact+FTS 召回 19/22，
-  禁止召回 1/30（已知，见 #9）。
+  禁止召回 1/30（词面匹配的已知限制，见 #9）。
 - v0.6.0 之后从旧分支移植并合入：llmkit `CascadeExecutor`（#5，按验收测试逐级
   升级模型，门槛可配置）、`examples/memory-ingest`（#6）、memory worker
   可观测性与 `GET /workers/memory`（#10）。
@@ -36,7 +36,7 @@ ADR-0001 是在分 kit 发版、旧 CJK 检索方案下写的，已经不适用�
 | Kit | 成熟度 | 已知缺口 |
 |---|---|---|
 | goagent | 高 | — |
-| memorykit | 高 | 全文检索缺最低得分门槛（#9） |
+| memorykit | 高 | 全文检索是词面匹配，分不清词面相同、语义不同的记忆（#9）；还没用真实 embedding 跑过评测集 |
 | workflowkit (+agentstep) | 高 | 只有 SQLite store，没有 PostgreSQL store |
 | llmkit | 高 | HealthStore 只有进程内存实现；没有项目/账户级预算扣减 |
 | runkit | 高 | 审批 checkpoint 密钥来源只有 macOS Keychain |
@@ -57,7 +57,7 @@ ADR-0001 是在分 kit 发版、旧 CJK 检索方案下写的，已经不适用�
 
 另有几件小事：
 
-- memorykit 全文检索加最低得分门槛，消除评测集中唯一的误召回（#9）。
+- 接入真实 embedding provider 后用评测集验证向量检索能不能挡住已知误召回（#9 的后续，需要另外授权调用费用）。
 - 项目/账户级成本预算扣减（边界见 [`docs/llmkit-budget-governance.md`](../llmkit-budget-governance.md)）。
 - 为 v0.6.0 的 breaking changes 写升级说明：`MemoryProvider.Append`、
   `GET /agent-runs/{id}` 改为 snake_case、mcpkit 工具名先校验再注册。
