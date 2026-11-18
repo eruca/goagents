@@ -187,6 +187,11 @@ Fields:
 
 Response status: `202 Accepted`.
 
+`input_ref` is `artifact:{id}:input:` followed by a random suffix chosen per
+request. Treat it as opaque. The suffix keeps two Hosts that race to create
+the same id from overwriting each other's input artifact: the request that
+loses gets `409`, and the created workflow keeps its own input.
+
 Response:
 
 ```json
@@ -194,7 +199,7 @@ Response:
   "id": "wf-review-1",
   "status": "waiting_approval",
   "run_mode": "sync",
-  "input_ref": "artifact:wf-review-1:input",
+  "input_ref": "artifact:wf-review-1:input:7QJ2KZ3L5M6N4P2R",
   "output_ref": "artifact:wf-review-1:agent-output",
   "agent_run_id": "00000000-0000-0000-0000-000000000000",
   "approval_ref": "approval:wf-review-1",
@@ -227,7 +232,7 @@ Response:
       "id": "wf-review-1",
       "status": "waiting_approval",
       "run_mode": "sync",
-      "input_ref": "artifact:wf-review-1:input",
+      "input_ref": "artifact:wf-review-1:input:7QJ2KZ3L5M6N4P2R",
       "output_ref": "artifact:wf-review-1:agent-output",
       "agent_run_id": "00000000-0000-0000-0000-000000000000",
       "approval_ref": "approval:wf-review-1"
@@ -321,7 +326,7 @@ Response:
   "id": "wf-review-1",
   "status": "pending",
   "run_mode": "queued",
-  "input_ref": "artifact:wf-review-1:input"
+  "input_ref": "artifact:wf-review-1:input:7QJ2KZ3L5M6N4P2R"
 }
 ```
 

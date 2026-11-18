@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log"
@@ -265,7 +266,7 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		defer handle.Done()
 		operationCtx = withPendingShutdownTracker(operationCtx, pendingShutdown)
 	}
-	inputRef := "artifact:" + req.ID + ":input"
+	inputRef := newWorkflowInputRef(req.ID)
 	if err := putTextArtifact(operationCtx, s.artifacts, inputRef, req.Input); err != nil {
 		writeInternalError(w, "artifact_error", err)
 		return
@@ -784,4 +785,23 @@ func parseRunMode(value string) (RunMode, bool) {
 	default:
 		return "", false
 	}
+}
+
+// workflowInputRefPrefix is the part of an input artifact ref fixed by the
+// workflow id. A random suffix follows it, so two hosts racing to create one
+// workflow id each write their own input artifact: the losing request cannot
+// overwrite the input of the workflow that was actually created.
+func workflowInputRefPrefix(workflowID string) string {
+	return "artifact:" + workflowID + ":input:"
+}
+
+func newWorkflowInputRef(workflowID string) string {
+	return workflowInputRefPrefix(workflowID) + rand.Text()
+}
+
+// isWorkflowInputRef reports whether ref is an input ref the Host created for
+// workflowID.
+func isWorkflowInputRef(workflowID, ref string) bool {
+	suffix, ok := strings.CutPrefix(ref, workflowInputRefPrefix(workflowID))
+	return ok && suffix != "" && !strings.ContainsAny(suffix, ": \t\r\n")
 }

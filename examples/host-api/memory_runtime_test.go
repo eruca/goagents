@@ -96,7 +96,7 @@ func TestMemoryRuntimeArtifactSourceReaderRejectsUnsupportedAndOversizedSource(t
 
 func TestHostMemoryQueryBuilderUsesTrustedWorkflowArtifactTransiently(t *testing.T) {
 	artifacts := artifactkit.NewMemoryStore()
-	ref := "artifact:workflow-query:input"
+	ref := "artifact:workflow-query:input:test"
 	if err := artifacts.Put(t.Context(), artifactkit.Artifact{
 		Ref: ref, Content: []byte("current user question"), ContentType: "text/plain",
 	}); err != nil {
@@ -150,7 +150,7 @@ func TestHostMemoryQueryBuilderDelegatesNonWorkflowRequests(t *testing.T) {
 
 func TestHostMemoryQueryBuilderFailsClosedOnUntrustedWorkflowEnvelope(t *testing.T) {
 	const privateBody = "PRIVATE QUERY BODY"
-	validRef := "artifact:workflow-query:input"
+	validRef := "artifact:workflow-query:input:test"
 	tests := []struct {
 		name     string
 		store    artifactkit.Store
@@ -280,9 +280,9 @@ func TestHostMemoryQueryBuilderPreservesArtifactContextErrors(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, _, _, err = builder(t.Context(), agentcore.ContextProjectionRequest{
-			Messages: []agentcore.Message{{Role: "user", Content: "Review input artifact artifact:workflow-query:input"}},
+			Messages: []agentcore.Message{{Role: "user", Content: "Review input artifact artifact:workflow-query:input:test"}},
 			Metadata: map[string]any{
-				"workflow_id": "workflow-query", "workflow_input_ref": "artifact:workflow-query:input",
+				"workflow_id": "workflow-query", "workflow_input_ref": "artifact:workflow-query:input:test",
 			},
 		})
 		if !errors.Is(err, want) || strings.Contains(err.Error(), "private wrapper") {

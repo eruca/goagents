@@ -617,8 +617,10 @@ func blackboxScenario(messages []ports.ChatMessage) string {
 		if messages[index].Role == "user" {
 			const prefix = "Review input artifact artifact:"
 			content := messages[index].Content
-			if strings.HasPrefix(content, prefix) && strings.HasSuffix(content, ":input") {
-				return strings.TrimSuffix(strings.TrimPrefix(content, prefix), ":input")
+			if rest, ok := strings.CutPrefix(content, prefix); ok {
+				if workflowID, _, ok := strings.Cut(rest, ":input:"); ok {
+					return workflowID
+				}
 			}
 		}
 	}
