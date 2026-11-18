@@ -207,9 +207,57 @@ never called. This keeps simple tasks local-first when local is
 healthy, while allowing fallback to cloud when the local provider is busy,
 quota-exhausted, or cooling down after failures.
 
-`MemoryHealthStore` is intentionally a single-process implementation. The
-shared-store contract and future host replacement path are documented in
-`../docs/llmkit-healthstore-contract.md`.
+`MemoryHealthStore` is intentionally a single-process implementation. For
+replicas that share providers, use `llmkit/pghealth` (below). The shared-store
+contract is documented in `../docs/llmkit-healthstore-contract.md`; a custom
+store can run the same behavioral checks as the built-in ones with
+`healthtest.RunHealthStoreConformance`. Stores share the rules themselves
+through `llmkit.EvaluateAdmission`, `llmkit.ApplyHealthOutcome`, and
+`llmkit.SettleHealthEntry`, which `MemoryHealthStore` also uses.
+
+### Shared health in PostgreSQL
+
+`llmkit/pghealth.Store` is a `HealthStore` that replicas share, so provider and
+account concurrency limits, the single half-open probe, and the circuit breaker
+hold across all of them:
+
+```go
+health, err := pghealth.Open(ctx, dsn, pghealth.Config{
+    Policy:          llmkit.HealthPolicy{FailureCooldownThreshold: 3, CooldownDuration: 30 * time.Second},
+    LeaseTTL:        30 * time.Second, // default
+    RefreshInterval: time.Second,      // default
+})
+if err != nil {
+    return err
+}
+defer health.Close()
+```
+
+`Open` (or `OpenDB` on a pool the caller keeps owning) applies the schema
+(`llmkit_provider_health`, `llmkit_provider_health_leases`) under an advisory
+lock and starts the background work; `Close` stops it.
+
+- **Admission.** `Acquire` runs in one transaction under an advisory lock on
+  the account, counts unexpired leases as the in-flight calls, applies
+  `llmkit.EvaluateAdmission`, and takes a lease for an admitted call.
+- **Leases.** `Release` and `RecordOutcome` delete the oldest lease this Store
+  holds for the key; `RecordOutcome` applies `llmkit.ApplyHealthOutcome` in the
+  same transaction. Each Store renews its leases every `LeaseTTL/3`, so a long
+  call keeps its slot. A crashed or closed replica's leases stop being renewed
+  and free their slots within `LeaseTTL`; `Close` does not release them.
+- **Snapshot.** `Snapshot()` serves a view cached in memory, reloaded every
+  `RefreshInterval` and after each of this Store's writes. Other replicas'
+  writes show up within `RefreshInterval`; that is enough because the snapshot
+  only pre-filters and `Acquire` is the authoritative check.
+- **Host-set state.** `Store.Set(ctx, entry)` sets a provider's concurrency
+  limit, quota, or availability, like `MemoryHealthStore.Set`.
+- **Clocks.** Times come from `Policy.Now` (the wall clock by default) on each
+  replica and are compared with times other replicas wrote. Keep replicas'
+  clocks within a small fraction of `LeaseTTL/3` of each other (NTP): skew
+  shortens or lengthens leases and shifts when a cooldown ends by as much.
+
+Its tests need PostgreSQL: set `LLMKIT_POSTGRES_TEST_DSN`, and
+`LLMKIT_REQUIRE_POSTGRES=1` to fail instead of skipping without it.
 
 ### Load Spread
 
@@ -368,6 +416,7 @@ Run the complete fixture-only flow from the repository root:
 ```sh
 go run ./llmkit/examples/quality-cascade
 go test ./llmkit/...
+LLMKIT_POSTGRES_TEST_DSN='postgres://...' go test -p 1 ./llmkit/pghealth
 ```
 
 The example evaluates three deterministic arithmetic fixtures, audits the
