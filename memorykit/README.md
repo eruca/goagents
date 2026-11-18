@@ -78,6 +78,16 @@ query, so a word inside a dotted key such as `storage.vectors` matches in both
 stores. Candidates come from those GIN indexes, so only memories sharing a term
 are scored.
 
+Full-text recall is lexical: it cannot tell apart a memory that shares the
+query's words but answers a different question. In the v2 evaluation corpus,
+"Which production UI color theme was approved" returns the draft memory
+`ui.theme_draft` through the full-text channel, because both contain "ui" and
+"theme". A minimum score cutoff does not fix this: on the same corpus, any
+cutoff on the share of query terms that keeps this memory out also drops at
+least four correct results, some of which match only one or two of the query's
+terms. The evaluation tests pin this case as a known injection. Separating such
+cases needs the vector channel or a Host-side reranker.
+
 On-demand recall uses request-scoped `search_memory` and `read_memory` tools.
 Their schemas contain no Scope fields. `remember_project_memory` is registered
 only when trusted Host metadata grants explicit write intent. A model write

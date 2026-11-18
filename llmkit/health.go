@@ -50,6 +50,9 @@ type ProviderHealthSnapshot struct {
 // extend it. A degraded provider whose
 // last failure is CooldownDuration old is available again: being ranked below
 // healthy providers, it might otherwise never get the success that clears it.
+//
+// Unset fields default to a threshold of 3, a one-minute cooldown, and a
+// maximum of 32 times the cooldown. Now defaults to the wall clock.
 type HealthPolicy struct {
 	FailureCooldownThreshold int
 	CooldownDuration         time.Duration
@@ -78,19 +81,23 @@ type MemoryHealthStore struct {
 }
 
 func NewMemoryHealthStore(policy HealthPolicy) *MemoryHealthStore {
-	if policy.FailureCooldownThreshold <= 0 {
-		policy.FailureCooldownThreshold = 3
-	}
-	if policy.CooldownDuration <= 0 {
-		policy.CooldownDuration = time.Minute
-	}
-	if policy.MaxCooldownDuration < policy.CooldownDuration {
-		policy.MaxCooldownDuration = 32 * policy.CooldownDuration
-	}
 	return &MemoryHealthStore{
-		policy:  policy,
+		policy:  policy.withDefaults(),
 		entries: map[string]ProviderHealthEntry{},
 	}
+}
+
+func (p HealthPolicy) withDefaults() HealthPolicy {
+	if p.FailureCooldownThreshold <= 0 {
+		p.FailureCooldownThreshold = 3
+	}
+	if p.CooldownDuration <= 0 {
+		p.CooldownDuration = time.Minute
+	}
+	if p.MaxCooldownDuration < p.CooldownDuration {
+		p.MaxCooldownDuration = 32 * p.CooldownDuration
+	}
+	return p
 }
 
 func ProviderHealthKey(accountAlias, modelAlias, provider string) string {
@@ -132,21 +139,48 @@ func (s *MemoryHealthStore) Acquire(ctx context.Context, candidate Candidate) er
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	now := s.now()
 	key := ProviderHealthKey(candidate.AccountAlias, candidate.Model.Alias, candidate.Model.Provider)
-	entry := ensureEntryIdentity(s.entries[key], candidate.AccountAlias, candidate.Model.Alias, candidate.Model.Provider)
-	entry.Availability = normalizedAvailability(entry.Availability)
-	entry = s.settle(entry, now)
-	if reason := s.admissionBlock(entry, candidate, now); reason != "" {
-		return fmt.Errorf("%w: %s", ErrProviderBusy, reason)
+	account := strings.TrimSpace(candidate.AccountAlias)
+	accountInFlight := 0
+	for _, other := range s.entries {
+		if other.AccountAlias == account {
+			accountInFlight += other.InFlight
+		}
 	}
-	entry.InFlight++
-	entry.UpdatedAt = now
+	entry, err := EvaluateAdmission(s.policy, s.entries[key], candidate, accountInFlight, s.now())
+	if err != nil {
+		return err
+	}
 	s.entries[key] = entry
 	return nil
 }
 
-func (s *MemoryHealthStore) admissionBlock(entry ProviderHealthEntry, candidate Candidate, now time.Time) string {
+// EvaluateAdmission is the admission rule HealthStore.Acquire applies, shared
+// so that every store admits calls alike.
+//
+// entry is the stored entry for the candidate's key, or the zero entry, with
+// InFlight set to the calls admitted to that key. accountInFlight is the calls
+// admitted across every entry of the candidate's account, this one included.
+// When the call is admitted, EvaluateAdmission returns the entry to store:
+// identity filled in, settled (see SettleHealthEntry), InFlight incremented,
+// and UpdatedAt set to now. Otherwise it returns entry unchanged and an error
+// wrapping ErrProviderBusy that names the reason.
+//
+// A store must evaluate and store the result atomically with respect to every
+// other admission for the same account, or concurrent calls could all pass.
+func EvaluateAdmission(policy HealthPolicy, entry ProviderHealthEntry, candidate Candidate, accountInFlight int, now time.Time) (ProviderHealthEntry, error) {
+	admitted := ensureEntryIdentity(entry, candidate.AccountAlias, candidate.Model.Alias, candidate.Model.Provider)
+	admitted.Availability = normalizedAvailability(admitted.Availability)
+	admitted = SettleHealthEntry(policy, admitted, now)
+	if reason := admissionBlock(admitted, candidate, accountInFlight, now); reason != "" {
+		return entry, fmt.Errorf("%w: %s", ErrProviderBusy, reason)
+	}
+	admitted.InFlight++
+	admitted.UpdatedAt = now
+	return admitted, nil
+}
+
+func admissionBlock(entry ProviderHealthEntry, candidate Candidate, accountInFlight int, now time.Time) string {
 	switch {
 	case !entry.CooldownUntil.IsZero() && now.Before(entry.CooldownUntil):
 		return "provider is in cooldown"
@@ -164,17 +198,8 @@ func (s *MemoryHealthStore) admissionBlock(entry ProviderHealthEntry, candidate 
 	if limit > 0 && entry.InFlight >= limit {
 		return "provider concurrency is full"
 	}
-	if candidate.AccountMaxConcurrency > 0 {
-		account := strings.TrimSpace(candidate.AccountAlias)
-		inFlight := 0
-		for _, other := range s.entries {
-			if other.AccountAlias == account {
-				inFlight += other.InFlight
-			}
-		}
-		if inFlight >= candidate.AccountMaxConcurrency {
-			return "account concurrency is full"
-		}
+	if candidate.AccountMaxConcurrency > 0 && accountInFlight >= candidate.AccountMaxConcurrency {
+		return "account concurrency is full"
 	}
 	return ""
 }
@@ -204,19 +229,38 @@ func (s *MemoryHealthStore) RecordOutcome(ctx context.Context, outcome TaskOutco
 	defer s.mu.Unlock()
 
 	key := ProviderHealthKey(outcome.AccountAlias, outcome.ModelAlias, outcome.Provider)
-	entry := s.entries[key]
+	s.entries[key] = ApplyHealthOutcome(s.policy, s.entries[key], outcome, s.now())
+	return nil
+}
+
+// ApplyHealthOutcome is the circuit-breaker rule HealthStore.RecordOutcome
+// applies, shared so that every store opens and closes the circuit alike.
+//
+// entry is the stored entry for the outcome's key, or the zero entry. The
+// result has its identity taken from the outcome, InFlight decremented (if
+// positive), the entry settled (see SettleHealthEntry), and UpdatedAt set to
+// now. Then:
+//   - a success resets the failure streak, marks the provider available, and
+//     clears the cooldown;
+//   - a failure the caller caused (see CountsTowardProviderHealth) changes
+//     nothing more;
+//   - a failure while the circuit is open only moves LastFailureAt, since the
+//     call was admitted before the circuit opened;
+//   - any other failure extends the streak and marks the provider degraded,
+//     or unavailable once the streak reaches the threshold, with a cooldown
+//     that doubles for each failure past it.
+func ApplyHealthOutcome(policy HealthPolicy, entry ProviderHealthEntry, outcome TaskOutcome, now time.Time) ProviderHealthEntry {
+	policy = policy.withDefaults()
 	entry.AccountAlias = strings.TrimSpace(outcome.AccountAlias)
 	entry.ModelAlias = strings.TrimSpace(outcome.ModelAlias)
 	entry.Provider = strings.TrimSpace(outcome.Provider)
 	if entry.InFlight > 0 {
 		entry.InFlight--
 	}
-	now := s.now()
-	entry = s.settle(entry, now)
+	entry = SettleHealthEntry(policy, entry, now)
 	if !outcome.Success && !CountsTowardProviderHealth(outcome.ErrorClass) {
 		entry.UpdatedAt = now
-		s.entries[key] = entry
-		return nil
+		return entry
 	}
 	if outcome.Success {
 		entry.FailureStreak = 0
@@ -230,16 +274,15 @@ func (s *MemoryHealthStore) RecordOutcome(ctx context.Context, outcome TaskOutco
 	} else {
 		entry.FailureStreak++
 		entry.LastFailureAt = now
-		if entry.FailureStreak >= s.policy.FailureCooldownThreshold {
+		if entry.FailureStreak >= policy.FailureCooldownThreshold {
 			entry.Availability = ProviderUnavailable
-			entry.CooldownUntil = now.Add(s.cooldown(entry.FailureStreak))
+			entry.CooldownUntil = now.Add(policy.cooldown(entry.FailureStreak))
 		} else {
 			entry.Availability = ProviderDegraded
 		}
 	}
 	entry.UpdatedAt = now
-	s.entries[key] = entry
-	return nil
+	return entry
 }
 
 // CountsTowardProviderHealth reports whether a failure says something about
@@ -264,7 +307,7 @@ func (s *MemoryHealthStore) Snapshot() ProviderHealthSnapshot {
 	now := s.now()
 	entries := make(map[string]ProviderHealthEntry, len(s.entries))
 	for key, entry := range s.entries {
-		entries[key] = s.settle(entry, now)
+		entries[key] = SettleHealthEntry(s.policy, entry, now)
 	}
 	return ProviderHealthSnapshot{
 		GeneratedAt: now,
@@ -281,23 +324,28 @@ func (s *MemoryHealthStore) Set(entry ProviderHealthEntry) {
 	s.entries[ProviderHealthKey(entry.AccountAlias, entry.ModelAlias, entry.Provider)] = entry
 }
 
-// settle forgets a failure streak that ended CooldownDuration ago without
-// opening the circuit, so failures far apart are not counted as consecutive.
-func (s *MemoryHealthStore) settle(entry ProviderHealthEntry, now time.Time) ProviderHealthEntry {
+// SettleHealthEntry is the degraded-recovery rule every HealthStore applies
+// when it reads an entry: a degraded entry whose last failure is
+// CooldownDuration old is available again with no failure streak, so failures
+// far apart are not counted as consecutive.
+func SettleHealthEntry(policy HealthPolicy, entry ProviderHealthEntry, now time.Time) ProviderHealthEntry {
+	policy = policy.withDefaults()
 	if entry.Availability == ProviderDegraded && !entry.LastFailureAt.IsZero() &&
-		now.Sub(entry.LastFailureAt) >= s.policy.CooldownDuration {
+		now.Sub(entry.LastFailureAt) >= policy.CooldownDuration {
 		entry.Availability = ProviderAvailable
 		entry.FailureStreak = 0
 	}
 	return entry
 }
 
-func (s *MemoryHealthStore) cooldown(streak int) time.Duration {
-	cooldown := s.policy.CooldownDuration
-	for extra := streak - s.policy.FailureCooldownThreshold; extra > 0 && cooldown < s.policy.MaxCooldownDuration; extra-- {
+// cooldown is how long the circuit stays open after the streak-th
+// consecutive failure.
+func (p HealthPolicy) cooldown(streak int) time.Duration {
+	cooldown := p.CooldownDuration
+	for extra := streak - p.FailureCooldownThreshold; extra > 0 && cooldown < p.MaxCooldownDuration; extra-- {
 		cooldown *= 2
 	}
-	return min(cooldown, s.policy.MaxCooldownDuration)
+	return min(cooldown, p.MaxCooldownDuration)
 }
 
 func (s *MemoryHealthStore) now() time.Time {
