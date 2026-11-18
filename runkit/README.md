@@ -91,6 +91,42 @@ terminal. Stores drop a checkpoint's ciphertext once it is consumed, rejected,
 failed, or expired.
 There is intentionally no file or environment-variable fallback.
 
+## Static keyring (multiple replicas)
+
+When the host runs more than one replica, or anywhere without macOS Keychain,
+supply the keys yourself with `NewStaticKeyProvider`. It is pure Go (no cgo or
+build tags), never generates keys, and copies the key bytes on construction:
+
+```go
+// spec comes from a secret manager or environment variable, e.g.
+// "prod-v1:<base64 32 bytes>,prod-v2:<base64 32 bytes>"
+keyring, err := approvalcrypto.ParseKeyring(spec)
+if err != nil {
+    return err
+}
+keys, err := approvalcrypto.NewStaticKeyProvider("prod-v2", keyring)
+if err != nil {
+    return err
+}
+cipher, err := approvalcrypto.NewAESGCMCipher(keys)
+```
+
+`ParseKeyring` accepts comma-separated `id:base64` entries (standard base64
+with padding, surrounding whitespace ignored) and rejects empty entries,
+duplicate ids, invalid base64, and keys that do not decode to exactly 32
+bytes. Its errors name the entry or key id but never include key material.
+Generate a key with `openssl rand -base64 32`. `NewStaticKeyProvider` rejects
+any key that is not 32 bytes and an active id that is not in the keyring;
+`Resolve` of an unknown id returns `ErrKeyMaterialUnavailable`.
+
+Every replica must be given the same keyring. Do not use the Keychain provider
+for multiple replicas: it creates the active key on first use, so each machine
+would generate a different key under the same id, and a checkpoint encrypted on
+one replica would fail on another with `ErrKeyMaterialChanged`. The same error
+appears if the bytes behind an existing id are ever changed. To rotate, add a
+new id, make it active on every replica, and keep the old entry until every
+checkpoint encrypted with it is terminal.
+
 `runkit` is a host-side run store contract for Go agent applications. It keeps
 agent run records, lifecycle events, terminal summaries, and workflow/task
 correlation separate from any one runtime.
