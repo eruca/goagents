@@ -1,7 +1,7 @@
 # GoAgents Roadmap
 
 - 更新日期：2026-11-19
-- 对应代码：`main` @ `3fa4e25`（v0.7.0）
+- 对应代码：`main` @ `b0dabe1`（v0.8.0）
 - 状态：多副本部署和轨迹评测已完成；生产化 host runtime 因没有调用方而搁置。
 
 本文以当前 `main` 为准。2026-07 的 memorykit/v0.1.0 产品基线、roadmap 和
