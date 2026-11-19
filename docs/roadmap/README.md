@@ -2,7 +2,7 @@
 
 - 更新日期：2026-11-19
 - 对应代码：`main` @ `3fa4e25`（v0.7.0）
-- 状态：多副本部署已完成；下一项方向待维护者选定（见"下一阶段"）。
+- 状态：多副本部署和轨迹评测已完成；生产化 host runtime 因没有调用方而搁置。
 
 本文以当前 `main` 为准。2026-07 的 memorykit/v0.1.0 产品基线、roadmap 和
 ADR-0001 是在分 kit 发版、旧 CJK 检索方案下写的，已经不适用，不再维护；保留它们的
@@ -35,6 +35,11 @@ ADR-0001 是在分 kit 发版、旧 CJK 检索方案下写的，已经不适用�
   run 存储 #18、`llmkit/pgaudit` #20），加上静态审批 keyring（#12）、
   embedding 互斥执行（#19）和带随机后缀的 input_ref（#16）。host-api 打开
   六个开关后可以多进程部署，有两进程黑盒测试（含执行中 SIGKILL）覆盖。
+- 轨迹评测：evalkit 有固定的轨迹词汇和现成的评分器（工具必用/禁用/顺序、无失败
+  步骤、预算、结果状态）及 `RecordedHarness`（#24）；`evalkit/runtrace` 从
+  workflowkit、runkit 和 llmkit 审计的存储记录生成无正文轨迹（#25）；host-api
+  提供 `GET /workflows/{id}/trace`，`examples/trajectory-eval` 可对一批生产
+  记录离线打分并作为回归门禁（#26）。
 - `examples/host-api` 仍是示例而不是生产网关：每个进程的 worker 一次处理一个
   任务，没有限流，也没有独立的可执行程序和镜像。
 
@@ -46,7 +51,8 @@ ADR-0001 是在分 kit 发版、旧 CJK 检索方案下写的，已经不适用�
 | llmkit | 高 | 没有项目/账户级预算扣减 |
 | runkit | 高 | — |
 | contextkit / ocrs / skillkit / mcpkit | 中 | — |
-| artifactkit / evalkit / hostkit | 基础 | artifactkit 没有对象存储（S3）实现 |
+| evalkit (+runtrace) | 中 | 不导出 OpenTelemetry；没有 model-as-judge 评分器 |
+| artifactkit / hostkit | 基础 | artifactkit 没有对象存储（S3）实现，等真实宿主遇到 artifact 体积问题再做 |
 
 ## 下一阶段
 
@@ -54,13 +60,21 @@ ADR-0001 是在分 kit 发版、旧 CJK 检索方案下写的，已经不适用�
    README 的 "Shared backends and multiple replicas" 一节：创建时的 worker
    唤醒只在本进程、`/workers/*` 只报告本进程、审计统计每次全量重算、审计表
    只增不减。
-2. **生产化 host runtime**：原 Week 18 计划中的 wire/client/server、UDS/mTLS、
-   Control/Tool Bridge、Host 可执行程序和 OCI 镜像。目前完全没有开始。
-3. **补强基础 kit**：artifactkit 对象存储、evalkit 和 production tracing /
-   trajectory evaluation（旧基线中列为 memorykit 之后的下一项横向能力）。
+2. **生产化 host runtime**（搁置）：原 Week 18 计划中的 wire/client/server、
+   UDS/mTLS、Control/Tool Bridge、Host 可执行程序和 OCI 镜像。2026-08 已做出
+   `hostruntime` 模块的大部分（协议、两种传输、Control Bridge、RuntimeService；
+   binary/OCI 做了一部分），后因 AI Todo 决定首版只用进程内 `goagent + llmkit`
+   而中止。代码在本地分支 `backup/week18-wip-2d15`（另有
+   `backup/week18-inprocess-release`），基于旧的多 module 布局。目前唯一的本地
+   宿主 todo 仍是进程内用法，按"不预建通用 Host 平台"的原则暂不恢复；出现需要
+   独立 Host 进程的宿主时，再按它的调用方式重新定范围。
+3. ~~**补强基础 kit：轨迹评测**~~：已完成（见"当前状态"）。按维护者决定不接
+   OpenTelemetry、不做 artifactkit 对象存储。
 
 另有几件小事：
 
+- todo 仍依赖分 kit 时代的 v0.1.x 模块；把它迁到单 module 的最新版本，是获得
+  真实宿主反馈、决定后续公共 API 的最直接途径（需要改 todo 仓库，另行授权）。
 - 接入真实 embedding provider 后用评测集验证向量检索能不能挡住已知误召回（#9 的后续，需要另外授权调用费用）。
 - 项目/账户级成本预算扣减（边界见 [`docs/llmkit-budget-governance.md`](../llmkit-budget-governance.md)）。
 - 更新 [`docs/llmkit-orchestration-design-review.md`](../llmkit-orchestration-design-review.md)
