@@ -61,6 +61,19 @@ go test -count=1 -race -run '^TestHostMemoryPostgresBlackBox$' ./examples/host-a
 ## Release
 
 Releases are tags of the whole module: `vX.Y.Z` on a commit where CI passed.
+
+Merging to `main` does not make a release. Changes accumulate under
+"Unreleased" in [`docs/upgrading.md`](docs/upgrading.md), and a release is
+cut only when one of these holds:
+
+- a consumer needs a change that is on `main`;
+- the Unreleased changes form a complete batch worth pinning;
+- otherwise, at most about once a month.
+
+A fix that changes no behavior is a patch release (`v0.8.1`); a new feature or
+a behavior change bumps the minor version. Tags are permanent in the Go module
+proxy, so they are not cut just to mark finished work.
+
 After pushing a tag, confirm that the published version resolves and builds:
 
 ```bash
