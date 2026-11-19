@@ -545,6 +545,67 @@ with `available: false` and their rejection reason.
 Failed provider outcomes may also include `error_class`, such as `timeout` or
 `rate_limited`, when the host/adapter provides an error classifier.
 
+## GET /workflows/{id}/trace
+
+Returns the workflow's content-free trajectory, built by `evalkit/runtrace`
+from the workflow's step records, its agent run events, and its llmkit route
+audits. It is meant for trajectory evaluation, for example with
+`examples/trajectory-eval`. With memory enabled it is authorized like
+`GET /workflows/{id}`.
+
+Response status: `200 OK`.
+
+Response:
+
+```json
+{
+  "workflow_id": "wf-review-1",
+  "outcome": {
+    "status": "waiting_approval",
+    "metadata": {"run_mode": "sync"}
+  },
+  "usage": {"input_tokens": 5, "output_tokens": 7, "llm_calls": 1, "tool_calls": 0},
+  "labels": {"skill.refs": "code-review@sha256:..."},
+  "steps": [
+    {
+      "type": "workflow_step",
+      "name": "agent_review",
+      "status": "succeeded",
+      "started_at": "2026-11-19T08:00:00Z",
+      "ended_at": "2026-11-19T08:00:02Z",
+      "metadata": {"attempt": 1, "agent_run_id": "run-..."}
+    },
+    {
+      "type": "model_call",
+      "name": "local-free",
+      "status": "succeeded",
+      "started_at": "2026-11-19T08:00:01Z",
+      "ended_at": "2026-11-19T08:00:01Z",
+      "metadata": {"route_id": "route:wf-review-1:run-...:1", "attempt": 1, "provider": "local", "account_alias": "local-dev", "input_tokens": 5, "output_tokens": 7}
+    },
+    {
+      "type": "agent_event",
+      "name": "finalized",
+      "status": "succeeded",
+      "started_at": "2026-11-19T08:00:01Z",
+      "ended_at": "2026-11-19T08:00:01Z",
+      "metadata": {"sequence": 9}
+    }
+  ]
+}
+```
+
+`type` is one of `workflow_step`, `tool_call`, `model_call`, `approval`, and
+`agent_event`. A tool call's start and completion are one `tool_call` step; an
+approval request and its resolution, even after a resume, are one `approval`
+step. `status` is a workflow status for workflow steps and otherwise one of
+`succeeded`, `failed`, `rejected`, `waiting_approval`, and `running`. Steps
+are ordered by start time, and steps without a time come last.
+
+The trace contains identifiers, statuses, timestamps, and counters only: no
+workflow input or output, prompts, model responses, tool arguments or results,
+event messages, approval reasons, or error text.
+
 ## GET /agent-runs/{id}
 
 Returns durable goagent run audit state and events.

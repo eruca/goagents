@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -13,6 +14,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/eruca/goagents/evalkit"
 	"github.com/eruca/goagents/llmkit"
 	"github.com/eruca/goagents/llmkit/pghealth"
 	"github.com/eruca/goagents/workflowkit"
@@ -233,4 +235,24 @@ func TestHostAPISharedBackendsAcrossProcesses(t *testing.T) {
 	if len(routes.Routes) == 0 {
 		t.Fatal("first Host reads no LLM routes for a workflow the second Host ran")
 	}
+	// Both Hosts build the same trajectory from the shared stores, including
+	// the model call recorded by the Host that ran the workflow.
+	firstTrace := doJSON[workflowTraceResponse](t, first.Handler(), http.MethodGet, "/workflows/wf-shared-pg/trace", nil)
+	secondTrace := doJSON[workflowTraceResponse](t, second.Handler(), http.MethodGet, "/workflows/wf-shared-pg/trace", nil)
+	firstJSON, _ := json.Marshal(firstTrace)
+	secondJSON, _ := json.Marshal(secondTrace)
+	if string(firstJSON) != string(secondJSON) {
+		t.Fatalf("Hosts disagree on the trace:\nfirst  %s\nsecond %s", firstJSON, secondJSON)
+	}
+	if len(evalkit.ModelCalls(evalkit.Trace{Steps: traceSteps(firstTrace)})) == 0 {
+		t.Fatalf("shared trace has no model call: %s", firstJSON)
+	}
+}
+
+func traceSteps(response workflowTraceResponse) []evalkit.TraceStep {
+	steps := make([]evalkit.TraceStep, 0, len(response.Steps))
+	for _, step := range response.Steps {
+		steps = append(steps, evalkit.TraceStep{Type: step.Type, Name: step.Name, Status: step.Status})
+	}
+	return steps
 }

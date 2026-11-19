@@ -28,7 +28,7 @@ Scope. V1 constructs only project Scope and rejects caller-supplied tenant,
 subject, or `subject_type=user`.
 
 With memory enabled, the routes that read or act on a stored workflow
-(`GET /workflows/{id}`, `/events`, `/llm-routes`, `GET /agent-runs/{id}`, and
+(`GET /workflows/{id}`, `/events`, `/llm-routes`, `/trace`, `GET /agent-runs/{id}`, and
 `POST /workflows/{id}/requeue`) authorize the caller against the stored
 project with `memory.read`; a workflow of another tenant reads as
 `404 not_found`. `GET /workflows` requires a `project_id` query parameter and
@@ -301,6 +301,7 @@ Endpoints:
 - `POST /workflows/{id}/agent-approve`
 - `POST /workflows/{id}/approve`
 - `GET /workflows/{id}/llm-routes`
+- `GET /workflows/{id}/trace`
 - `GET /agent-runs/{id}`
 - `GET /llmkit/models`
 - `GET /workers/queued`
@@ -364,6 +365,11 @@ that workflow: effective task profile, selected model/account aliases, provider,
 reason, score breakdown, candidate aliases, full candidate-level scores or
 filter reasons, and outcome metadata such as success, latency, tokens, and
 estimated cents. It does not return prompts, responses, headers, or API keys.
+
+`GET /workflows/{id}/trace` returns the workflow's content-free trajectory
+(workflow steps, tool calls, approvals, model calls, and other agent events),
+built by `evalkit/runtrace`. `examples/trajectory-eval` grades these traces in
+bulk.
 
 `GET /workflows` returns a bounded operational list. It accepts optional
 `status`, `run_mode`, `order`, and `limit` query parameters, for example
