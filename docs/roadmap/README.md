@@ -1,12 +1,12 @@
 # GoAgents Roadmap
 
 - 更新日期：2026-11-19
-- 对应代码：`main` @ `1314599` 加本次多副本 PR（v0.6.0 之后）
+- 对应代码：`main` @ `3fa4e25`（v0.7.0）
 - 状态：多副本部署已完成；下一项方向待维护者选定（见"下一阶段"）。
 
 本文以当前 `main` 为准。2026-07 的 memorykit/v0.1.0 产品基线、roadmap 和
-ADR-0001 是在分 kit 发版、旧 CJK 检索方案下写的，已经不适用，原文保留在分支
-`backup/memorykit-v0.1.0-week01` 中备查，不再维护。
+ADR-0001 是在分 kit 发版、旧 CJK 检索方案下写的，已经不适用，不再维护；保留它们的
+备份分支已在 v0.7.0 时删除（最后提交 `59e7fb2`）。
 
 ## 长期方向
 
@@ -27,9 +27,9 @@ ADR-0001 是在分 kit 发版、旧 CJK 检索方案下写的，已经不适用�
   流式错误统计和 host-api 安全加固；随后 contextkit 支持按 token 计预算。
 - memorykit 中英文召回评测集 v2（#8）已合入：exact+FTS 召回 19/22，
   禁止召回 1/30（词面匹配的已知限制，见 #9）。
-- v0.6.0 之后从旧分支移植并合入：llmkit `CascadeExecutor`（#5，按验收测试逐级
-  升级模型，门槛可配置）、`examples/memory-ingest`（#6）、memory worker
-  可观测性与 `GET /workers/memory`（#10）。
+- v0.7.0 发版，升级说明见 [`docs/upgrading.md`](../upgrading.md)。其中从旧分支
+  移植并合入：llmkit `CascadeExecutor`（#5，按验收测试逐级升级模型，门槛可配置）、
+  `examples/memory-ingest`（#6）、memory worker 可观测性与 `GET /workers/memory`（#10）。
 - 多副本部署已完成：五个后端都有 PostgreSQL 实现（`workflowkit/pgstore`
   #13、`llmkit/pghealth` #14、`artifactkit/pgstore` #17、`runkit/pgstore`
   run 存储 #18、`llmkit/pgaudit` #20），加上静态审批 keyring（#12）、
@@ -63,8 +63,6 @@ ADR-0001 是在分 kit 发版、旧 CJK 检索方案下写的，已经不适用�
 
 - 接入真实 embedding provider 后用评测集验证向量检索能不能挡住已知误召回（#9 的后续，需要另外授权调用费用）。
 - 项目/账户级成本预算扣减（边界见 [`docs/llmkit-budget-governance.md`](../llmkit-budget-governance.md)）。
-- 为 v0.6.0 的 breaking changes 写升级说明：`MemoryProvider.Append`、
-  `GET /agent-runs/{id}` 改为 snake_case、mcpkit 工具名先校验再注册。
 - 更新 [`docs/llmkit-orchestration-design-review.md`](../llmkit-orchestration-design-review.md)
   中"是否为 llmkit 单独打 tag"等单 module 之前的结论。
 

@@ -67,6 +67,9 @@ After pushing a tag, confirm that the published version resolves and builds:
 bash ./scripts/verify-external-consumer.sh vX.Y.Z
 ```
 
+Breaking changes and upgrade steps for each release are listed in
+[`docs/upgrading.md`](docs/upgrading.md).
+
 Before the single-module layout, each kit was its own module with tags such as
 `goagent/v0.1.2`. Those versions still exist in the module proxy. A consumer
 that starts with `go get github.com/eruca/goagents@vX.Y.Z` resolves every kit
