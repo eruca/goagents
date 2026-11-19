@@ -276,6 +276,33 @@ paths:
           $ref: '#/components/responses/ErrorResponse'
         '500':
           $ref: '#/components/responses/ErrorResponse'
+  /workflows/{id}/trace:
+    get:
+      tags:
+        - workflows
+      summary: Get the content-free trajectory of a workflow
+      description: >-
+        Built by evalkit/runtrace from the workflow's step records, agent run
+        events, and llmkit route audits. Contains identifiers, statuses,
+        timestamps, and counters only.
+      operationId: getWorkflowTrace
+      parameters:
+        - $ref: '#/components/parameters/WorkflowID'
+      responses:
+        '200':
+          description: Workflow trajectory.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowTraceResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
   /agent-runs/{id}:
     get:
       tags:
@@ -1213,6 +1240,84 @@ components:
           items:
             type: object
             additionalProperties: true
+    WorkflowTraceResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - workflow_id
+        - outcome
+        - usage
+        - steps
+      properties:
+        workflow_id:
+          type: string
+        outcome:
+          type: object
+          additionalProperties: false
+          required:
+            - status
+          properties:
+            status:
+              type: string
+            output_ref:
+              type: string
+            error_code:
+              type: string
+            metadata:
+              type: object
+              additionalProperties: true
+        usage:
+          type: object
+          additionalProperties: false
+          required:
+            - input_tokens
+            - output_tokens
+            - llm_calls
+            - tool_calls
+          properties:
+            input_tokens:
+              type: integer
+            output_tokens:
+              type: integer
+            llm_calls:
+              type: integer
+            tool_calls:
+              type: integer
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+        steps:
+          type: array
+          items:
+            $ref: '#/components/schemas/TraceStep'
+    TraceStep:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+      properties:
+        type:
+          type: string
+          enum:
+            - workflow_step
+            - tool_call
+            - model_call
+            - approval
+            - agent_event
+        name:
+          type: string
+        status:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        ended_at:
+          type: string
+          format: date-time
+        metadata:
+          type: object
+          additionalProperties: true
     LLMRoutesResponse:
       type: object
       additionalProperties: false

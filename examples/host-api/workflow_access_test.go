@@ -95,6 +95,7 @@ func TestMemoryWorkflowRoutesRequireAccessToStoredScope(t *testing.T) {
 		{http.MethodGet, "/workflows/wf-tenant-a"},
 		{http.MethodGet, "/workflows/wf-tenant-a/events"},
 		{http.MethodGet, "/workflows/wf-tenant-a/llm-routes"},
+		{http.MethodGet, "/workflows/wf-tenant-a/trace"},
 		{http.MethodPost, "/workflows/wf-tenant-a/requeue"},
 	}
 	for _, route := range routes {

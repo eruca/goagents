@@ -403,6 +403,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /workflows/{id}/agent-approve", s.handleApproveAgentTool)
 	mux.HandleFunc("POST /workflows/{id}/requeue", s.handleRequeueWorkflow)
 	mux.HandleFunc("GET /workflows/{id}/llm-routes", s.handleGetWorkflowLLMRoutes)
+	mux.HandleFunc("GET /workflows/{id}/trace", s.handleGetWorkflowTrace)
 	mux.HandleFunc("GET /agent-runs/{id}", s.handleGetAgentRun)
 	mux.HandleFunc("GET /llmkit/models", s.handleModels)
 	mux.HandleFunc("GET /workers/queued", s.handleQueuedWorker)
