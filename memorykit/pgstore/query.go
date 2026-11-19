@@ -82,44 +82,131 @@ func (s *Store) searchExact(ctx context.Context, query memorykit.CandidateQuery)
 	return scanCandidates(rows, memorykit.ChannelExact, false)
 }
 
-// searchFullText matches any query term (memorykit.SearchTerms): words against
-// the memory's search_words and Chinese and Japanese grams against its
-// search_grams, both split by memorykit the same way memorystore splits them.
-// Candidates are found through the GIN indexes on those columns, so only
-// memories sharing a term are scored. Only memories matching more
-// than half as many terms as the best match are kept, so a lone shared word
-// does not earn a high rank, and results rank by matched terms, the same
-// cutoff and order memorystore uses.
+// searchFullText ranks the memories sharing a query term (memorykit.SearchTerms)
+// with memorykit.RankFullText, the BM25 variant memorystore uses. Words match
+// a memory's search_words and Chinese and Japanese grams its search_grams,
+// both split by memorykit the same way memorystore splits them, and both
+// found through GIN indexes. SQL computes only integers: the Scope's
+// statistics, and each matching memory's IDF weight sum and length. Scoring,
+// the cutoff, and the order happen in Go, so both stores rank alike. The
+// statistics and the matches are read in one repeatable-read snapshot.
 func (s *Store) searchFullText(ctx context.Context, query memorykit.CandidateQuery) ([]memorykit.Candidate, error) {
 	words, grams := memorykit.SearchTerms(query.Text)
 	if len(words) == 0 && len(grams) == 0 {
 		return []memorykit.Candidate{}, nil
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT `+qualifiedMemoryColumns+` FROM (
-		SELECT scored.*, max(scored.hits) OVER () AS best_hits FROM (
-			SELECT m.*,
-			       (SELECT count(*) FROM unnest($5::text[]) AS w WHERE w = ANY(m.search_words))
-			     + (SELECT count(*) FROM unnest($6::text[]) AS g
-			        WHERE strpos(m.memory_key || ' ' || m.content, g) > 0) AS hits
-			FROM memories m
-			WHERE m.tenant_id = $1 AND m.subject_type = $2 AND m.subject_id = $3
-			  AND m.status = 'active'
-			  AND m.valid_from <= $4
-			  AND (m.valid_until IS NULL OR m.valid_until > $4)
-			  AND (cardinality($7::text[]) = 0 OR m.kind = ANY($7::text[]))
-			  AND (m.search_words && $5::text[] OR m.search_grams && $6::text[])
-		) scored
-		WHERE scored.hits > 0
-		) m
-		WHERE m.hits * 2 > m.best_hits
-		ORDER BY m.hits DESC, m.importance DESC, m.updated_at DESC, m.id ASC
-		LIMIT $8`,
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return nil, wrapBackend("full-text snapshot", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	const eligible = `m.tenant_id = $1 AND m.subject_type = $2 AND m.subject_id = $3
+		  AND m.status = 'active'
+		  AND m.valid_from <= $4
+		  AND (m.valid_until IS NULL OR m.valid_until > $4)`
+	stats := memorykit.FullTextStats{WordDocuments: make([]int, len(words)), GramDocuments: make([]int, len(grams))}
+	if err := tx.QueryRowContext(ctx, `
+		SELECT count(*), coalesce(sum(cardinality(m.search_words) + cardinality(m.search_grams)), 0)
+		FROM memories m WHERE `+eligible,
 		query.Scope.TenantID, query.Scope.SubjectType, query.Scope.SubjectID, query.Now,
-		words, grams, kindStrings(query.Kinds), query.FullTextLimit)
+	).Scan(&stats.Documents, &stats.TotalLength); err != nil {
+		return nil, wrapBackend("full-text statistics", err)
+	}
+	termRows, err := tx.QueryContext(ctx, `
+		SELECT false, t.position, (SELECT count(*) FROM memories m WHERE `+eligible+` AND m.search_words @> ARRAY[t.term])
+		FROM unnest($5::text[]) WITH ORDINALITY AS t(term, position)
+		UNION ALL
+		SELECT true, t.position, (SELECT count(*) FROM memories m WHERE `+eligible+` AND m.search_grams @> ARRAY[t.term])
+		FROM unnest($6::text[]) WITH ORDINALITY AS t(term, position)`,
+		query.Scope.TenantID, query.Scope.SubjectType, query.Scope.SubjectID, query.Now, words, grams)
+	if err != nil {
+		return nil, wrapBackend("full-text term statistics", err)
+	}
+	seen := 0
+	for termRows.Next() {
+		var isGram bool
+		var position int
+		var documents int
+		if err := termRows.Scan(&isGram, &position, &documents); err != nil {
+			termRows.Close()
+			return nil, wrapBackend("scan full-text term statistics", err)
+		}
+		target := stats.WordDocuments
+		if isGram {
+			target = stats.GramDocuments
+		}
+		if position < 1 || position > len(target) {
+			termRows.Close()
+			return nil, wrapBackend("full-text term statistics", fmt.Errorf("term position out of range"))
+		}
+		target[position-1] = documents
+		seen++
+	}
+	if err := termRows.Err(); err != nil {
+		termRows.Close()
+		return nil, wrapBackend("read full-text term statistics", err)
+	}
+	termRows.Close()
+	if seen != len(words)+len(grams) {
+		return nil, wrapBackend("full-text term statistics", fmt.Errorf("term statistics do not match the query"))
+	}
+	wordWeights, gramWeights := memorykit.FullTextWeights(stats)
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT m.id, m.importance, m.updated_at,
+		       cardinality(m.search_words) + cardinality(m.search_grams),
+		       (SELECT coalesce(sum(t.weight), 0) FROM unnest($5::text[], $8::bigint[]) AS t(term, weight)
+		         WHERE t.term = ANY(m.search_words))
+		     + (SELECT coalesce(sum(t.weight), 0) FROM unnest($6::text[], $9::bigint[]) AS t(term, weight)
+		         WHERE t.term = ANY(m.search_grams))
+		FROM memories m
+		WHERE `+eligible+`
+		  AND (cardinality($7::text[]) = 0 OR m.kind = ANY($7::text[]))
+		  AND (m.search_words && $5::text[] OR m.search_grams && $6::text[])`,
+		query.Scope.TenantID, query.Scope.SubjectType, query.Scope.SubjectID, query.Now,
+		words, grams, kindStrings(query.Kinds), wordWeights, gramWeights)
+	if err != nil {
+		return nil, wrapBackend("full-text matches", err)
+	}
+	var matches []memorykit.FullTextMatch
+	for rows.Next() {
+		var match memorykit.FullTextMatch
+		if err := rows.Scan(&match.ID, &match.Importance, &match.UpdatedAt, &match.Length, &match.WeightSum); err != nil {
+			rows.Close()
+			return nil, wrapBackend("scan full-text matches", err)
+		}
+		matches = append(matches, match)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, wrapBackend("read full-text matches", err)
+	}
+	rows.Close()
+
+	ranked := memorykit.RankFullText(matches, stats, query.FullTextLimit)
+	if len(ranked) == 0 {
+		return []memorykit.Candidate{}, nil
+	}
+	ids := make([]string, len(ranked))
+	for index, matchIndex := range ranked {
+		ids[index] = matches[matchIndex].ID
+	}
+	memoryRows, err := tx.QueryContext(ctx, `SELECT `+qualifiedMemoryColumns+`
+		FROM unnest($1::uuid[]) WITH ORDINALITY AS r(id, position)
+		JOIN memories m ON m.id = r.id
+		ORDER BY r.position`, ids)
 	if err != nil {
 		return nil, wrapBackend("full-text candidates", err)
 	}
-	return scanCandidates(rows, memorykit.ChannelFullText, false)
+	candidates, err := scanCandidates(memoryRows, memorykit.ChannelFullText, false)
+	if err != nil {
+		return nil, err
+	}
+	if len(candidates) != len(ids) {
+		return nil, wrapBackend("full-text candidates", fmt.Errorf("ranked memories changed during the snapshot"))
+	}
+	return candidates, nil
 }
 
 func (s *Store) searchVector(ctx context.Context, query memorykit.CandidateQuery) ([]memorykit.Candidate, error) {

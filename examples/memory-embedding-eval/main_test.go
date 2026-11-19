@@ -88,7 +88,7 @@ func TestEvaluateRunsEveryPolicyAgainstPostgreSQL(t *testing.T) {
 	}
 	// The lexical policies do not depend on the embedding model and match
 	// the pinned PostgreSQL lexical evaluation.
-	for name, want := range map[string]int{"exact-only": 11, "fts-only": 16, "exact+fts": 19} {
+	for name, want := range map[string]int{"exact-only": 11, "fts-only": 15, "exact+fts": 19} {
 		if got := byName[name].Overall.ExpectedFound; got != want {
 			t.Fatalf("%s found %d, want %d", name, got, want)
 		}

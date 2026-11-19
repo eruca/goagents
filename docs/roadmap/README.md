@@ -29,7 +29,8 @@ ADR-0001 是在分 kit 发版、旧 CJK 检索方案下写的，已经不适用�
   禁止召回 1/30（词面匹配的已知限制，见 #9）。用本机 Ollama bge-m3 跑了真实
   向量评测（[`docs/evals`](../evals/memorykit-v2-ollama-bge-m3.md)）：三路融合、
   阈值 0.5 时召回 22/22，同义改写从 1/4 到 4/4；#9 的草稿主题误召回向量也
-  挡不住，需要 reranker。
+  挡不住，需要 reranker。全文通道改为 BM25（IDF 加权 + 长度归一），排名不再
+  依赖记忆 ID，三路融合在低阈值下的误召回减少。
 - v0.7.0 发版，升级说明见 [`docs/upgrading.md`](../upgrading.md)。其中从旧分支
   移植并合入：llmkit `CascadeExecutor`（#5，按验收测试逐级升级模型，门槛可配置）、
   `examples/memory-ingest`（#6）、memory worker 可观测性与 `GET /workers/memory`（#10）。
@@ -49,7 +50,7 @@ ADR-0001 是在分 kit 发版、旧 CJK 检索方案下写的，已经不适用�
 | Kit | 成熟度 | 已知缺口 |
 |---|---|---|
 | goagent | 高 | — |
-| memorykit | 高 | 词面和向量都分不清"草稿"与"已批准"这类语义相近、结论不同的记忆（#9），需要宿主侧 reranker；全文通道命中数并列时按 ID 排序，预算边界上的结果带偶然性 |
+| memorykit | 高 | 词面和向量都分不清"草稿"与"已批准"这类语义相近、结论不同的记忆（#9），需要宿主侧 reranker |
 | workflowkit (+agentstep) | 高 | — |
 | llmkit | 高 | 没有项目/账户级预算扣减 |
 | runkit | 高 | — |

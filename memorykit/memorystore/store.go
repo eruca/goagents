@@ -234,7 +234,15 @@ func (s *Store) SearchCandidates(ctx context.Context, query memorykit.CandidateQ
 		kinds[kind] = struct{}{}
 	}
 	words, grams := memorykit.SearchTerms(query.Text)
-	fullTextHits := map[string]int{}
+	// Full-text statistics cover every active, effective memory of the
+	// Scope, whatever kinds the query asks for, as in pgstore.
+	type fullTextEntry struct {
+		candidate          memorykit.Candidate
+		wordHits, gramHits []bool
+		length             int
+	}
+	var fullTextEntries []fullTextEntry
+	stats := memorykit.FullTextStats{WordDocuments: make([]int, len(words)), GramDocuments: make([]int, len(grams))}
 	result := memorykit.CandidateSet{
 		Exact: make([]memorykit.Candidate, 0), FullText: make([]memorykit.Candidate, 0),
 		Vector: make([]memorykit.Candidate, 0),
@@ -242,20 +250,42 @@ func (s *Store) SearchCandidates(ctx context.Context, query memorykit.CandidateQ
 	for id, memory := range s.memories {
 		if memory.Scope != query.Scope || memory.Status != memorykit.StatusActive ||
 			query.Now.Before(memory.ValidFrom) ||
-			(!memory.ValidUntil.IsZero() && !query.Now.Before(memory.ValidUntil)) ||
-			(len(kinds) > 0 && !containsKind(kinds, memory.Kind)) {
+			(!memory.ValidUntil.IsZero() && !query.Now.Before(memory.ValidUntil)) {
+			continue
+		}
+		var wordHits, gramHits []bool
+		if query.FullTextLimit > 0 && (len(words) > 0 || len(grams) > 0) {
+			wordHits, gramHits = memorykit.FullTextTermMatches(memory.Key, memory.Content, words, grams)
+			length := memorykit.FullTextLength(memory.Key, memory.Content)
+			stats.Documents++
+			stats.TotalLength += length
+			matched := false
+			for index, hit := range wordHits {
+				if hit {
+					stats.WordDocuments[index]++
+					matched = true
+				}
+			}
+			for index, hit := range gramHits {
+				if hit {
+					stats.GramDocuments[index]++
+					matched = true
+				}
+			}
+			if matched && (len(kinds) == 0 || containsKind(kinds, memory.Kind)) {
+				fullTextEntries = append(fullTextEntries, fullTextEntry{
+					candidate: memorykit.Candidate{Memory: memory, Sources: copySources(s.sources[id])},
+					wordHits:  wordHits, gramHits: gramHits, length: length,
+				})
+			}
+		}
+		if len(kinds) > 0 && !containsKind(kinds, memory.Kind) {
 			continue
 		}
 		sources := copySources(s.sources[id])
 		if query.ExactLimit > 0 {
 			if _, matches := keys[memory.Key]; matches {
 				result.Exact = append(result.Exact, memorykit.Candidate{Memory: memory, Sources: sources})
-			}
-		}
-		if query.FullTextLimit > 0 {
-			if hits := memorykit.CountSearchTermHits(memory.Key, memory.Content, words, grams); hits > 0 {
-				fullTextHits[id] = hits
-				result.FullText = append(result.FullText, memorykit.Candidate{Memory: memory, Sources: copySources(sources)})
 			}
 		}
 		if query.VectorLimit > 0 {
@@ -274,26 +304,30 @@ func (s *Store) SearchCandidates(ctx context.Context, query memorykit.CandidateQ
 	}
 
 	sort.Slice(result.Exact, func(i, j int) bool { return candidateMetadataLess(result.Exact[i], result.Exact[j]) })
-	// Same cutoff and order as pgstore: keep memories matching more than half
-	// as many terms as the best match, then rank by matched terms.
-	bestHits := 0
-	for _, hits := range fullTextHits {
-		bestHits = max(bestHits, hits)
-	}
-	kept := result.FullText[:0]
-	for _, candidate := range result.FullText {
-		if fullTextHits[candidate.Memory.ID]*2 > bestHits {
-			kept = append(kept, candidate)
+	// Same scoring, cutoff, and order as pgstore (memorykit.RankFullText).
+	wordWeights, gramWeights := memorykit.FullTextWeights(stats)
+	matches := make([]memorykit.FullTextMatch, len(fullTextEntries))
+	for index, entry := range fullTextEntries {
+		var sum int64
+		for term, hit := range entry.wordHits {
+			if hit {
+				sum += wordWeights[term]
+			}
+		}
+		for term, hit := range entry.gramHits {
+			if hit {
+				sum += gramWeights[term]
+			}
+		}
+		memory := entry.candidate.Memory
+		matches[index] = memorykit.FullTextMatch{
+			ID: memory.ID, WeightSum: sum, Length: entry.length,
+			Importance: memory.Importance, UpdatedAt: memory.UpdatedAt,
 		}
 	}
-	result.FullText = kept
-	sort.Slice(result.FullText, func(i, j int) bool {
-		left, right := fullTextHits[result.FullText[i].Memory.ID], fullTextHits[result.FullText[j].Memory.ID]
-		if left != right {
-			return left > right
-		}
-		return candidateMetadataLess(result.FullText[i], result.FullText[j])
-	})
+	for _, index := range memorykit.RankFullText(matches, stats, query.FullTextLimit) {
+		result.FullText = append(result.FullText, fullTextEntries[index].candidate)
+	}
 	sort.Slice(result.Vector, func(i, j int) bool {
 		if result.Vector[i].Similarity != result.Vector[j].Similarity {
 			return result.Vector[i].Similarity > result.Vector[j].Similarity

@@ -638,7 +638,10 @@ func RunFullTextRecallConformance(t *testing.T, newStore func(*testing.T) FullTe
 		query string
 		want  []string
 	}{
-		{"any english term matches", "which database do we use for embeddings", []string{fullTextPgvector}},
+		// "use" and "database" each occur in one memory, "embeddings" in two:
+		// the pgvector memory matches use+embeddings, and the database memory
+		// matches only the rare "database" but clears the cutoff by its weight.
+		{"any english term matches", "which database do we use for embeddings", []string{fullTextPgvector, fullTextChineseDB}},
 		{"chinese question matches chinese memory", "我们选了哪个数据库？", []string{fullTextChineseDB}},
 		{"more matched terms rank first", "deploy approvals pgvector embeddings", []string{fullTextDeploy, fullTextPgvector}},
 		{"no matching term finds nothing", "kubernetes 天气", []string{}},
@@ -693,5 +696,73 @@ func seedFullTextMemories(t *testing.T, store memorykit.LifecycleStore) {
 		if _, err := store.Create(context.Background(), request); err != nil {
 			t.Fatalf("seed %s: %v", seed.id, err)
 		}
+	}
+}
+
+// RunFullTextRankingConformance checks the BM25 ranking every store shares
+// through memorykit.RankFullText: rare terms outweigh common ones, and
+// between equal matches a shorter memory ranks first.
+func RunFullTextRankingConformance(t *testing.T, newStore func(*testing.T) FullTextStore) {
+	t.Helper()
+	scope := memorykit.Scope{TenantID: "tenant-conformance", SubjectType: memorykit.SubjectProject, SubjectID: "project-ranking"}
+	const (
+		deployApproval = "a1111111-1111-4111-8111-111111111111"
+		deployWindow   = "a2222222-2222-4222-8222-222222222222"
+		deployBlue     = "a3333333-3333-4333-8333-333333333333"
+		rollback       = "a4444444-4444-4444-8444-444444444444"
+		cacheShort     = "a5555555-5555-4555-8555-555555555555"
+		cacheLong      = "a6666666-6666-4666-8666-666666666666"
+	)
+	seed := func(t *testing.T, store FullTextStore) {
+		t.Helper()
+		for _, memory := range []struct {
+			id, key, content string
+			importance       int
+		}{
+			{deployApproval, "deploy.approval", "Every deploy needs reviewer approval", 90},
+			{deployWindow, "deploy.window", "Deploy only on Thursday afternoons", 90},
+			{deployBlue, "deploy.strategy", "Deploy with blue green switching", 90},
+			{rollback, "ops.rollback", "Rollback restores the previous release", 10},
+			// Equal importance and the same matched term: only length differs.
+			{cacheLong, "ops.cache_policy", "Redis cache entries expire after ten minutes unless the operator pins them for audits", 50},
+			{cacheShort, "ops.cache", "Redis cache expires quickly", 50},
+		} {
+			request := baseCreate(memory.id, scope.SubjectID, memorykit.StatusActive)
+			request.Key, request.Content, request.Importance = memory.key, memory.content, memory.importance
+			request.IdempotencyKey = ""
+			if _, err := store.Create(context.Background(), request); err != nil {
+				t.Fatalf("seed %s: %v", memory.id, err)
+			}
+		}
+	}
+	cases := []struct {
+		name  string
+		query string
+		want  []string
+	}{
+		// "deploy" is in three memories and "rollback" in one, so the
+		// rollback memory alone clears the cutoff despite lower importance.
+		{"a rare term outweighs a common one", "deploy rollback", []string{rollback}},
+		{"a shorter memory ranks first between equal matches", "redis", []string{cacheShort, cacheLong}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newStore(t)
+			seed(t, store)
+			set, err := store.SearchCandidates(context.Background(), memorykit.CandidateQuery{
+				Scope: scope, Text: tc.query, FullTextLimit: 10,
+				Now: time.Date(2026, 7, 22, 0, 0, 0, 0, time.UTC),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := make([]string, 0, len(set.FullText))
+			for _, candidate := range set.FullText {
+				got = append(got, candidate.Memory.ID)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("full-text IDs = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

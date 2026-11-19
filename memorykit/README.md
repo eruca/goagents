@@ -68,10 +68,24 @@ immediately before the current user message.
 
 Full-text recall splits the query with `memorykit.SearchTerms` into words and,
 for runs of Chinese or Japanese characters, overlapping two-character grams
-matched as substrings. A memory matches if it shares any term; only
-memories matching more than half as many terms as the best match are kept, and
-results rank by matched terms. `memorystore` and `pgstore` apply the same rule,
-checked by `storetest.RunFullTextRecallConformance`. `pgstore` stores each
+matched as substrings. A memory matches if it shares any term, and matches
+rank by a BM25 variant (`memorykit.RankFullText`):
+
+- each term weighs its inverse document frequency over the active, effective
+  memories of the Scope, so a term most memories share counts little;
+- a memory's weight sum is the weights of the terms it matches; only memories
+  whose weight sum is more than half the best are kept, so one that shares
+  only common terms with the query is dropped;
+- the kept memories rank by weight sum normalized by length (k1 = 1.2,
+  b = 0.75), so between equal matches the shorter memory ranks first, then by
+  importance, recency, and ID. Term frequency is ignored: memories are short.
+
+Stores compute only integers (statistics, weight sums, lengths) and call
+`RankFullText` for scoring and order, so `memorystore` and `pgstore` rank
+alike, checked by `storetest.RunFullTextRecallConformance` and
+`RunFullTextRankingConformance`. `pgstore` reads the statistics and the
+matches in one repeatable-read snapshot and loads full rows only for the
+ranked memories. `pgstore` stores each
 memory's words (`memorykit.IndexWords`) and grams (`memorykit.IndexGrams`) in
 indexed `search_words` and `search_grams` columns, split the same way as the
 query, so a word inside a dotted key such as `storage.vectors` matches in both

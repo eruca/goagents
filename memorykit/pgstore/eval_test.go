@@ -47,7 +47,7 @@ func TestCJKLexicalEvalCorpus(t *testing.T) {
 		"fts-only":   {"q-abstain-theme/m-noise-theme"},
 		"exact+fts":  {"q-abstain-theme/m-noise-theme"},
 	}
-	wantFound := map[string]int{"exact-only": 11, "fts-only": 16, "exact+fts": 19}
+	wantFound := map[string]int{"exact-only": 11, "fts-only": 15, "exact+fts": 19}
 	names := make([]string, 0, len(policies))
 	for name := range policies {
 		names = append(names, name)

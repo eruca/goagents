@@ -3,6 +3,24 @@
 按版本从新到旧排列。每节只列升级时需要处理的变化；完整改动见对应 tag 和
 `git log`。
 
+## Unreleased
+
+### 行为变化
+
+- **memorykit 全文召回改用 BM25 排名。** 以前按命中的查询词个数排序，
+  命中数不到最佳一半的丢弃；现在每个词按它在作用域内的 IDF 加权，按权重和
+  决定保留（不到最佳一半的丢弃），再按长度归一后的分数排序。常见词带来的
+  召回会减少，只命中一个少见词的记忆可能新被召回。公共 API 没有变化，
+  数据库 schema 不变，不需要迁移。依赖具体全文召回结果的宿主测试可能需要
+  更新预期。
+
+### 新增，可选
+
+- `memorykit`：`FullTextStats`、`FullTextWeights`、`FullTextMatch`、
+  `RankFullText`、`FullTextLength`、`FullTextTermMatches`，供自定义
+  RecallStore 实现相同的排名；`storetest.RunFullTextRankingConformance`。
+- `examples/memory-embedding-eval`：用 Ollama 模型跑真实向量评测。
+
 ## v0.7.x → v0.8.0
 
 ### 新增，可选
