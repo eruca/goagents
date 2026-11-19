@@ -1,5 +1,7 @@
 package contextkit
 
+import "unicode/utf8"
+
 type Role string
 
 const (
@@ -10,15 +12,18 @@ const (
 )
 
 type Message struct {
-	ID         string         `json:"id,omitempty"`
-	Role       Role           `json:"role"`
-	Content    string         `json:"content"`
-	Images     []Image        `json:"images,omitempty"`
-	ToolName   string         `json:"tool_name,omitempty"`
-	ToolCallID string         `json:"tool_call_id,omitempty"`
-	Status     string         `json:"status,omitempty"`
-	Ref        string         `json:"ref,omitempty"`
-	Metadata   map[string]any `json:"metadata,omitempty"`
+	ID         string  `json:"id,omitempty"`
+	Role       Role    `json:"role"`
+	Content    string  `json:"content"`
+	Images     []Image `json:"images,omitempty"`
+	ToolName   string  `json:"tool_name,omitempty"`
+	ToolCallID string  `json:"tool_call_id,omitempty"`
+	// ToolCalls are the tool calls an assistant message makes. A tool
+	// message answers one of them through ToolCallID.
+	ToolCalls []ToolCall     `json:"tool_calls,omitempty"`
+	Status    string         `json:"status,omitempty"`
+	Ref       string         `json:"ref,omitempty"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
 }
 
 // Image references an image attached to a message. contextkit never reads the
@@ -28,9 +33,21 @@ type Image struct {
 	ID string `json:"id"`
 }
 
-// CharLen counts the runes of Content; images add nothing.
+// ToolCall is one tool call an assistant message makes.
+type ToolCall struct {
+	ID        string `json:"id,omitempty"`
+	Name      string `json:"name"`
+	Arguments string `json:"arguments,omitempty"`
+}
+
+// CharLen counts the runes of Content and of each tool call's name and
+// arguments; images add nothing.
 func (m Message) CharLen() int {
-	return len([]rune(m.Content))
+	total := utf8.RuneCountInString(m.Content)
+	for _, call := range m.ToolCalls {
+		total += utf8.RuneCountInString(call.Name) + utf8.RuneCountInString(call.Arguments)
+	}
+	return total
 }
 
 // Budget bounds the model-facing view. Each positive limit must hold; zero

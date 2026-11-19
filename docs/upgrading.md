@@ -14,8 +14,25 @@
   数据库 schema 不变，不需要迁移。依赖具体全文召回结果的宿主测试可能需要
   更新预期。
 
+- **contextkit 的窗口与预算语义变化。**
+  - `window.New` 不再读取 `CONTEXT_DEEP_COMPRESSION`；空 `Profile` 即
+    standard。要沿用旧行为，传 `Profile: contextkit.ProfileFromEnv()`。
+  - 摘要计入预算，`Result.OverBudget` 反映含摘要在内的整个投影。配了
+    `Summarizer` 时默认为摘要预留每项预算的 1/5（`Config.SummaryReserve`），
+    超出部分截断；同样的预算下保留的消息可能比以前少。
+  - 最后一轮里每条 assistant 消息也可作为窗口起点（工具回复始终跟着它的
+    调用），并固定保留这一轮的用户消息；单次 agent run 内的工具步骤因此可以
+    被压缩。
+  - deep 摘要的开头从 `summary of earlier context:` 改为
+    `summary of earlier context (N messages omitted):`；占位摘要最多列出
+    5 个被丢弃的消息 ID。
+  - `Message.CharLen` 计入工具调用的名字和参数。
+
 ### 新增，可选
 
+- `contextkit`：`Message.ToolCalls`、`ToolCall`、`SummarizeRequest.SummaryBudget`、
+  `window.Config.SummaryReserve`；新包 `contextkit/agentadapter`，把压缩器
+  接入 goagent 的 `ContextProjector`。
 - `memorykit`：`FullTextStats`、`FullTextWeights`、`FullTextMatch`、
   `RankFullText`、`FullTextLength`、`FullTextTermMatches`，供自定义
   RecallStore 实现相同的排名；`storetest.RunFullTextRankingConformance`。

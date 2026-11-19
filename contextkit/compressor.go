@@ -47,11 +47,15 @@ type Summarizer interface {
 type SummarizeRequest struct {
 	// Previous is the summary an earlier Compress produced; fold Collapsed
 	// into it rather than summarizing from scratch.
-	Previous  string         `json:"previous,omitempty"`
-	Collapsed []Message      `json:"collapsed"`
-	Recent    []Message      `json:"recent"`
-	Budget    Budget         `json:"budget"`
-	Metadata  map[string]any `json:"metadata,omitempty"`
+	Previous  string    `json:"previous,omitempty"`
+	Collapsed []Message `json:"collapsed"`
+	Recent    []Message `json:"recent"`
+	// Budget is the whole budget the projection must fit.
+	Budget Budget `json:"budget"`
+	// SummaryBudget is what the summary may take of it; a longer summary is
+	// truncated to fit. Zero limits mean no limit.
+	SummaryBudget Budget         `json:"summary_budget"`
+	Metadata      map[string]any `json:"metadata,omitempty"`
 }
 
 type SummarizeResult struct {
@@ -105,6 +109,11 @@ func cloneMessages(messages []Message) []Message {
 }
 
 func cloneMessage(msg Message) Message {
+	if len(msg.ToolCalls) > 0 {
+		msg.ToolCalls = append([]ToolCall(nil), msg.ToolCalls...)
+	} else {
+		msg.ToolCalls = nil
+	}
 	if len(msg.Images) > 0 {
 		msg.Images = append([]Image(nil), msg.Images...)
 	} else {
