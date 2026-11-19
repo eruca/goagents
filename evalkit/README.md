@@ -92,6 +92,49 @@ Use `runkit` or `artifactkit` when a host wants durable trace or artifact
 storage. Use a host adapter to map `goagent.RunDetailed`, workflow runs, or
 service endpoints into `evalkit.Harness`.
 
+## Trajectory graders
+
+Trace adapters should use the shared step types `StepWorkflow`,
+`StepToolCall`, `StepModelCall`, `StepApproval`, and `StepAgentEvent`, and the
+statuses `succeeded`, `failed`, `rejected`, `waiting_approval`, and `running`.
+The trajectory graders read only those fields, the trial's `Outcome.Status`,
+and `Usage`; they never read `Output` or step messages, so they work on
+content-free production traces.
+
+| Grader | Passes when |
+|---|---|
+| `RequireTools(names...)` | every named tool was called |
+| `ForbidTools(names...)` | none of the named tools was called |
+| `ToolOrder(names...)` | the tool calls contain the names as an ordered subsequence |
+| `NoFailedSteps(types...)` | no step of those types (all types when none given) failed or was rejected |
+| `Budget{...}.Grader()` | tool calls, model calls, tokens, and trace duration stay within the non-zero limits |
+| `OutcomeStatus(statuses...)` | `Outcome.Status` is one of the statuses |
+
+Each grader reports one assertion per check, and its score is the fraction of
+assertions that passed. A grader configured without names fails every trial
+instead of passing silently. Budget counts tool and model calls as the larger
+of the matching steps and the `Usage` counter.
+
+`RecordedHarness` maps task IDs to already recorded `RunResult` values, so a
+suite can grade stored production runs without executing them again:
+
+```go
+report, err := evalkit.Runner{Harness: evalkit.RecordedHarness{
+    "wf-1": recordedResult,
+}}.Run(ctx, evalkit.Suite{
+    Name:  "production-regression",
+    Tasks: []evalkit.Task{{ID: "wf-1"}},
+    Graders: []evalkit.Grader{
+        evalkit.OutcomeStatus("succeeded"),
+        evalkit.ForbidTools("delete_account"),
+        evalkit.Budget{MaxModelCalls: 4}.Grader(),
+    },
+})
+```
+
+A task without a recording fails its trial. Runner rejects `RecordedHarness`
+with more than one trial per task.
+
 See `../examples/evalkit-goagent-regression` for a runnable `goagent` regression
 evaluation that uses a mock LLM, repeated trials, and graders.
 

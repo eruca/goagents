@@ -178,6 +178,9 @@ func (r Runner) Run(ctx context.Context, suite Suite) (*SuiteResult, error) {
 	if trialsPerTask <= 0 {
 		trialsPerTask = 1
 	}
+	if _, recorded := r.Harness.(RecordedHarness); recorded && trialsPerTask > 1 {
+		return nil, fmt.Errorf("recorded harness supports one trial per task, got %d", trialsPerTask)
+	}
 	if err := validateSuite(suite); err != nil {
 		return nil, err
 	}
