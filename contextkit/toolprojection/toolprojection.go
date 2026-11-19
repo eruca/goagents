@@ -55,6 +55,11 @@ func Project(msg contextkit.Message, cfg Config) contextkit.Message {
 }
 
 func cloneMessage(msg contextkit.Message) contextkit.Message {
+	if len(msg.ToolCalls) > 0 {
+		msg.ToolCalls = append([]contextkit.ToolCall(nil), msg.ToolCalls...)
+	} else {
+		msg.ToolCalls = nil
+	}
 	if len(msg.Images) > 0 {
 		msg.Images = append([]contextkit.Image(nil), msg.Images...)
 	} else {

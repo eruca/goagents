@@ -26,7 +26,9 @@ func TestStandardCompressionKeepsNewestTurnsThatFitBudget(t *testing.T) {
 	t.Parallel()
 
 	c := New(Config{
-		Budget:       contextkit.Budget{MaxChars: 60},
+		// The kept turns, the system message, and the placeholder summary
+		// of the two dropped messages (66 characters) fit in 120.
+		Budget:       contextkit.Budget{MaxChars: 120},
 		Profile:      contextkit.ProfileStandard,
 		MaxToolChars: 20,
 	})
@@ -153,15 +155,17 @@ func TestDeepCompressionSummarizesIncrementally(t *testing.T) {
 
 	summarizer := &fakeSummarizer{}
 	c := New(Config{
-		Budget:     contextkit.Budget{MaxChars: 40},
-		Profile:    contextkit.ProfileDeep,
-		Summarizer: summarizer,
+		// The window gets 80 characters; the summary may take 70.
+		Budget:         contextkit.Budget{MaxChars: 150},
+		SummaryReserve: contextkit.Budget{MaxChars: 70},
+		Profile:        contextkit.ProfileDeep,
+		Summarizer:     summarizer,
 	})
 	first, err := c.Compress(context.Background(), contextkit.Request{
 		Messages: []contextkit.Message{
 			{ID: "sys", Role: contextkit.RoleSystem, Content: "system"},
-			{ID: "u1", Role: contextkit.RoleUser, Content: strings.Repeat("alpha ", 5)},
-			{ID: "a1", Role: contextkit.RoleAssistant, Content: strings.Repeat("beta ", 5)},
+			{ID: "u1", Role: contextkit.RoleUser, Content: strings.Repeat("alpha ", 20)},
+			{ID: "a1", Role: contextkit.RoleAssistant, Content: strings.Repeat("beta ", 20)},
 			{ID: "u2", Role: contextkit.RoleUser, Content: "current"},
 		},
 	})
@@ -174,7 +178,7 @@ func TestDeepCompressionSummarizesIncrementally(t *testing.T) {
 	if first.AutoCompact == nil || first.AutoCompact.Summary != "facts #1" || len(first.Collapses) != 1 {
 		t.Fatalf("first result = %#v, want auto compact and collapse", first)
 	}
-	if first.Messages[1].Content != "summary of earlier context:\nfacts #1" {
+	if first.Messages[1].Content != "summary of earlier context (2 messages omitted):\nfacts #1" {
 		t.Fatalf("first summary message = %#v", first.Messages[1])
 	}
 
@@ -186,7 +190,7 @@ func TestDeepCompressionSummarizesIncrementally(t *testing.T) {
 		t.Fatal(err)
 	}
 	stored = append(stored,
-		contextkit.Message{ID: "a2", Role: contextkit.RoleAssistant, Content: strings.Repeat("gamma ", 5)},
+		contextkit.Message{ID: "a2", Role: contextkit.RoleAssistant, Content: strings.Repeat("gamma ", 20)},
 		contextkit.Message{ID: "u3", Role: contextkit.RoleUser, Content: "newest"},
 	)
 	second, err := c.Compress(context.Background(), contextkit.Request{Messages: stored})
@@ -196,10 +200,10 @@ func TestDeepCompressionSummarizesIncrementally(t *testing.T) {
 	if len(summarizer.requests) != 2 {
 		t.Fatalf("summarizer calls = %d, want 2", len(summarizer.requests))
 	}
-	if got := summarizer.requests[1]; got.Previous != "summary of earlier context:\nfacts #1" || ids(got.Collapsed) != "u2,a2" {
+	if got := summarizer.requests[1]; got.Previous != "summary of earlier context (2 messages omitted):\nfacts #1" || ids(got.Collapsed) != "u2,a2" {
 		t.Fatalf("second summarize request = %#v, want previous summary plus only new messages", got)
 	}
-	if want := "sys,system:summary of earlier context:\nfacts #2,u3"; ids(second.Messages) != want {
+	if want := "sys,system:summary of earlier context (4 messages omitted):\nfacts #2,u3"; ids(second.Messages) != want {
 		t.Fatalf("second messages = %s, want %s", ids(second.Messages), want)
 	}
 	if !strings.Contains(second.Summary, "facts #2") || second.Messages[1].Metadata["contextkit.dropped_total"] != 4 {
@@ -233,10 +237,21 @@ func TestDeepCompressionWithoutSummarizerStillRecordsCollapse(t *testing.T) {
 	}
 }
 
+func TestConfigDoesNotReadEnvironment(t *testing.T) {
+	t.Setenv(contextkit.EnvDeepCompression, "1")
+
+	got, err := New(Config{Budget: contextkit.Budget{MaxChars: 10}}).Compress(context.Background(), contextkit.Request{
+		Messages: []contextkit.Message{{Role: contextkit.RoleUser, Content: "hello"}},
+	})
+	if err != nil || got.Profile != contextkit.ProfileStandard {
+		t.Fatalf("default profile = %v, %v; want standard regardless of the environment", got, err)
+	}
+}
+
 func TestConfigCanUseProfileFromEnvironment(t *testing.T) {
 	t.Setenv(contextkit.EnvDeepCompression, "1")
 
-	c := New(Config{Budget: contextkit.Budget{MaxChars: 10}})
+	c := New(Config{Budget: contextkit.Budget{MaxChars: 10}, Profile: contextkit.ProfileFromEnv()})
 	got, err := c.Compress(context.Background(), contextkit.Request{
 		Messages: []contextkit.Message{{Role: contextkit.RoleUser, Content: "hello"}},
 	})
@@ -256,12 +271,14 @@ func words(msg contextkit.Message) int {
 func TestEachBudgetLimitMustHold(t *testing.T) {
 	t.Parallel()
 
-	// Words: u1+a1 = 6, u2+a2 = 4, u3 = 1. Characters: u1+a1 = 26, u2+a2 = 7, u3 = 1.
+	// Words: u1+a1 = 31, u2+a2 = 20, u3 = 1, all = 52. Characters: u1+a1 =
+	// 260, u2+a2 = 40, u3 = 1, all = 301. The placeholder for dropping u1
+	// and a1 costs 10 words and 66 characters.
 	messages := []contextkit.Message{
-		{ID: "u1", Role: contextkit.RoleUser, Content: "a b c d e"},
-		{ID: "a1", Role: contextkit.RoleAssistant, Content: "longanswerhere"},
-		{ID: "u2", Role: contextkit.RoleUser, Content: "g h"},
-		{ID: "a2", Role: contextkit.RoleAssistant, Content: "i j"},
+		{ID: "u1", Role: contextkit.RoleUser, Content: strings.Repeat("w ", 30)},
+		{ID: "a1", Role: contextkit.RoleAssistant, Content: strings.Repeat("x", 200)},
+		{ID: "u2", Role: contextkit.RoleUser, Content: strings.Repeat("y ", 10)},
+		{ID: "a2", Role: contextkit.RoleAssistant, Content: strings.Repeat("z ", 10)},
 		{ID: "u3", Role: contextkit.RoleUser, Content: "k"},
 	}
 	cases := []struct {
@@ -269,10 +286,10 @@ func TestEachBudgetLimitMustHold(t *testing.T) {
 		budget contextkit.Budget
 		want   string
 	}{
-		{"tokens bind", contextkit.Budget{MaxChars: 1000, MaxTokens: 6}, "u2,a2,u3"},
-		{"characters bind", contextkit.Budget{MaxChars: 8, MaxTokens: 1000}, "u2,a2,u3"},
-		{"tokens alone", contextkit.Budget{MaxTokens: 11}, "u1,a1,u2,a2,u3"},
-		{"tokens alone, one short", contextkit.Budget{MaxTokens: 10}, "u2,a2,u3"},
+		{"tokens bind", contextkit.Budget{MaxChars: 1000, MaxTokens: 40}, "u2,a2,u3"},
+		{"characters bind", contextkit.Budget{MaxChars: 150, MaxTokens: 1000}, "u2,a2,u3"},
+		{"tokens alone", contextkit.Budget{MaxTokens: 52}, "u1,a1,u2,a2,u3"},
+		{"tokens alone, one short", contextkit.Budget{MaxTokens: 51}, "u2,a2,u3"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -459,5 +476,234 @@ func TestPlaceholderCarriesDroppedImageCount(t *testing.T) {
 	}
 	if !strings.Contains(second.Summary, "3 messages omitted (3 images)") {
 		t.Fatalf("second summary = %q, want counts carried across the JSON round trip", second.Summary)
+	}
+}
+
+type longSummarizer struct{ requests []contextkit.SummarizeRequest }
+
+func (s *longSummarizer) Summarize(_ context.Context, req contextkit.SummarizeRequest) (*contextkit.SummarizeResult, error) {
+	s.requests = append(s.requests, req)
+	return &contextkit.SummarizeResult{Summary: strings.Repeat("s", 5000)}, nil
+}
+
+func turns(n int) []contextkit.Message {
+	var out []contextkit.Message
+	for i := 0; i < n; i++ {
+		out = append(out,
+			contextkit.Message{Role: contextkit.RoleUser, Content: strings.Repeat("u", 300)},
+			contextkit.Message{Role: contextkit.RoleAssistant, Content: strings.Repeat("a", 300)},
+		)
+	}
+	return out
+}
+
+func charsOf(messages []contextkit.Message) int {
+	total := 0
+	for _, msg := range messages {
+		total += msg.CharLen()
+	}
+	return total
+}
+
+func TestSummaryCountsAgainstTheBudget(t *testing.T) {
+	t.Parallel()
+
+	summarizer := &longSummarizer{}
+	c := New(Config{Budget: contextkit.Budget{MaxChars: 1500}, Profile: contextkit.ProfileDeep, Summarizer: summarizer})
+	got, err := c.Compress(context.Background(), contextkit.Request{Messages: turns(6)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A fifth of the budget is reserved for the summary by default.
+	if req := summarizer.requests[0]; req.SummaryBudget.MaxChars != 300 || req.Budget.MaxChars != 1500 {
+		t.Fatalf("summarize budgets = %+v / %+v", req.Budget, req.SummaryBudget)
+	}
+	if total := charsOf(got.Messages); total > 1500 || got.OverBudget {
+		t.Fatalf("projection = %d chars (over budget %v), want within 1500", total, got.OverBudget)
+	}
+	if summary := got.Messages[0]; summary.CharLen() != 300 || !strings.HasPrefix(summary.Content, "summary of earlier context (8 messages omitted):\n") {
+		t.Fatalf("summary = %d chars %q", summary.CharLen(), summary.Content[:60])
+	}
+	if got.AutoCompact == nil || strings.Contains(got.AutoCompact.Summary, "summary of earlier") || len(got.AutoCompact.Summary) >= 5000 {
+		t.Fatalf("auto compact should hold the truncated summary body")
+	}
+}
+
+func TestOverBudgetCountsTheSummary(t *testing.T) {
+	t.Parallel()
+
+	// A reserve too small for the placeholder: the window still fits, but the
+	// projection does not, and OverBudget says so.
+	c := New(Config{Budget: contextkit.Budget{MaxChars: 1000}, SummaryReserve: contextkit.Budget{MaxChars: 1}, Profile: contextkit.ProfileStandard})
+	got, err := c.Compress(context.Background(), contextkit.Request{Messages: turns(3)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total := charsOf(got.Messages); total > 1000 || got.OverBudget {
+		t.Fatalf("truncated placeholder: %d chars, over budget %v", total, got.OverBudget)
+	}
+	if got.Messages[0].CharLen() != 1 {
+		t.Fatalf("placeholder = %q, want truncated to the 1-char reserve", got.Messages[0].Content)
+	}
+}
+
+func TestTokenReserveTruncatesTheSummary(t *testing.T) {
+	t.Parallel()
+
+	summarizer := &fixedSummarizer{summary: strings.Repeat("word ", 100)}
+	c := New(Config{
+		Budget:         contextkit.Budget{MaxTokens: 200},
+		SummaryReserve: contextkit.Budget{MaxTokens: 20},
+		Profile:        contextkit.ProfileDeep, Summarizer: summarizer, CountTokens: words,
+	})
+	var messages []contextkit.Message
+	for i := 0; i < 6; i++ {
+		messages = append(messages,
+			contextkit.Message{Role: contextkit.RoleUser, Content: strings.Repeat("q ", 40)},
+			contextkit.Message{Role: contextkit.RoleAssistant, Content: strings.Repeat("r ", 40)})
+	}
+	got, err := c.Compress(context.Background(), contextkit.Request{Messages: messages})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cost := words(got.Messages[0]); cost > 20 || cost < 15 {
+		t.Fatalf("summary costs %d tokens, want close to the 20-token reserve", cost)
+	}
+	total := 0
+	for _, msg := range got.Messages {
+		total += words(msg)
+	}
+	if total > 200 || got.OverBudget {
+		t.Fatalf("projection = %d tokens, over budget %v", total, got.OverBudget)
+	}
+}
+
+type fixedSummarizer struct{ summary string }
+
+func (s *fixedSummarizer) Summarize(context.Context, contextkit.SummarizeRequest) (*contextkit.SummarizeResult, error) {
+	return &contextkit.SummarizeResult{Summary: s.summary}, nil
+}
+
+func TestSummariesStoredWithoutMetadataDoNotAccumulate(t *testing.T) {
+	t.Parallel()
+
+	for _, profile := range []contextkit.Profile{contextkit.ProfileStandard, contextkit.ProfileDeep} {
+		c := New(Config{Budget: contextkit.Budget{MaxChars: 1500}, Profile: profile, Summarizer: &fixedSummarizer{summary: "facts"}})
+		var transcript []contextkit.Message
+		for round := 0; round < 6; round++ {
+			transcript = append(transcript, turns(1)...)
+			got, err := c.Compress(context.Background(), contextkit.Request{Messages: transcript})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A host that stores only role and content, as goagent does.
+			transcript = transcript[:0]
+			for _, msg := range got.Messages {
+				transcript = append(transcript, contextkit.Message{Role: msg.Role, Content: msg.Content})
+			}
+		}
+		systems := 0
+		for _, msg := range transcript {
+			if msg.Role == contextkit.RoleSystem {
+				systems++
+			}
+		}
+		if systems != 1 || !strings.Contains(transcript[0].Content, "8 messages omitted") {
+			t.Fatalf("%s: %d summaries, first %q; want one carrying the total count", profile, systems, transcript[0].Content)
+		}
+	}
+}
+
+func TestPlaceholderListsAtMostFiveDroppedIDs(t *testing.T) {
+	t.Parallel()
+
+	var messages []contextkit.Message
+	for i := 0; i < 20; i++ {
+		messages = append(messages, contextkit.Message{ID: "m" + string(rune('a'+i)), Role: contextkit.RoleUser, Content: strings.Repeat("x", 50)})
+	}
+	got, err := New(Config{Budget: contextkit.Budget{MaxChars: 200}}).Compress(context.Background(), contextkit.Request{Messages: messages})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(got.Summary, "latest ids: mn, mo, mp, mq, mr") {
+		t.Fatalf("summary = %q", got.Summary)
+	}
+}
+
+func TestToolCallsCountAndStayWithTheirReplies(t *testing.T) {
+	t.Parallel()
+
+	call := contextkit.ToolCall{ID: "c1", Name: "search", Arguments: strings.Repeat("q", 400)}
+	messages := []contextkit.Message{
+		{ID: "u1", Role: contextkit.RoleUser, Content: "old"},
+		{ID: "a1", Role: contextkit.RoleAssistant, Content: "old answer"},
+		{ID: "u2", Role: contextkit.RoleUser, Content: "find it"},
+		{ID: "a2", Role: contextkit.RoleAssistant, ToolCalls: []contextkit.ToolCall{call}},
+		{ID: "t2", Role: contextkit.RoleTool, ToolCallID: "c1", ToolName: "search", Content: "found"},
+		{ID: "a3", Role: contextkit.RoleAssistant, Content: "done"},
+	}
+	if got := messages[3].CharLen(); got != len("search")+400 {
+		t.Fatalf("tool call CharLen = %d", got)
+	}
+	// Within the last turn the window may start at a3: the tool call and its
+	// reply are dropped together, and the turn's user message stays.
+	got, err := New(Config{Budget: contextkit.Budget{MaxChars: 300}}).Compress(context.Background(), contextkit.Request{Messages: messages})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kept := got.Messages[1:]; ids(kept) != "u2,a3" || got.OverBudget {
+		t.Fatalf("kept = %s over budget %v", ids(kept), got.OverBudget)
+	}
+	// With room for everything the tool call is kept, as a copy.
+	got, err = New(Config{Budget: contextkit.Budget{MaxChars: 1000}}).Compress(context.Background(), contextkit.Request{Messages: messages})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := got.Messages
+	if ids(kept) != "u1,a1,u2,a2,t2,a3" {
+		t.Fatalf("kept = %s", ids(kept))
+	}
+	if calls := kept[3].ToolCalls; len(calls) != 1 || calls[0] != call {
+		t.Fatalf("tool calls = %+v", calls)
+	}
+	kept[3].ToolCalls[0].Name = "changed"
+	if messages[3].ToolCalls[0].Name != "search" {
+		t.Fatal("result shares tool calls with the input")
+	}
+}
+
+func TestAgentRunStepsCanBeDroppedWhileTheRequestStays(t *testing.T) {
+	t.Parallel()
+
+	messages := []contextkit.Message{
+		{ID: "u1", Role: contextkit.RoleUser, Content: "read every document"},
+	}
+	for i := 0; i < 6; i++ {
+		id := string(rune('a' + i))
+		messages = append(messages,
+			contextkit.Message{ID: "s" + id, Role: contextkit.RoleAssistant, ToolCalls: []contextkit.ToolCall{{ID: "c" + id, Name: "ocr"}}},
+			contextkit.Message{ID: "t" + id, Role: contextkit.RoleTool, ToolCallID: "c" + id, Content: strings.Repeat("page ", 40)},
+		)
+	}
+	got, err := New(Config{Budget: contextkit.Budget{MaxChars: 900}, MaxToolChars: 2000}).Compress(context.Background(), contextkit.Request{Messages: messages})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := got.Messages[1:]
+	if kept[0].ID != "u1" || got.OverBudget || got.Dropped == 0 {
+		t.Fatalf("kept = %s, dropped %d, over budget %v", ids(kept), got.Dropped, got.OverBudget)
+	}
+	// Every kept tool reply follows the step that called it.
+	calls := map[string]bool{}
+	for _, msg := range kept {
+		for _, call := range msg.ToolCalls {
+			calls[call.ID] = true
+		}
+		if msg.Role == contextkit.RoleTool && !calls[msg.ToolCallID] {
+			t.Fatalf("tool reply %s kept without its call: %s", msg.ID, ids(kept))
+		}
+	}
+	if !strings.HasSuffix(ids(kept), "sf,tf") {
+		t.Fatalf("kept = %s, want the newest steps", ids(kept))
 	}
 }

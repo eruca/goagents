@@ -18,6 +18,7 @@ const modulePath = "github.com/eruca/goagents/"
 var allowedDeps = map[string][]string{
 	"artifactkit":             nil,
 	"contextkit":              nil,
+	"contextkit/agentadapter": {"contextkit", "goagent"},
 	"evalkit":                 nil,
 	"evalkit/runtrace":        {"evalkit", "goagent", "llmkit", "runkit", "workflowkit"},
 	"goagent":                 nil,

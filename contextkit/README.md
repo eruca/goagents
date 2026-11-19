@@ -26,6 +26,9 @@ Setting `CONTEXT_DEEP_COMPRESSION=1` enables levels 1-5.
 
 `CONTEXT_DEEP_COMPRESSION` names the behavior directly: the normal path still
 compresses context, while the flag opts into the deeper, more invasive layers.
+The compressor does not read it on its own: pass
+`Profile: contextkit.ProfileFromEnv()` to `window.Config` to follow it. An
+empty `Profile` means `ProfileStandard`.
 
 ## Five Levels
 
@@ -69,11 +72,25 @@ modelMessages := result.Messages
 ```
 
 The window is chosen from the newest message backwards. It always holds the
-last `MinRecent` messages (default 1), starts at a user message so a tool reply
-never loses its call, and extends over earlier whole turns while system
-messages plus the kept turns fit the budget. The summary message is not
-counted. Without a budget nothing is dropped. When the newest turn alone is too
-large it is kept anyway and `Result.OverBudget` is set.
+last `MinRecent` messages (default 1) and extends over earlier steps while
+system messages, the kept steps, and the summary of the rest fit the budget.
+A step starts at a user message, or, within the last turn, at an assistant
+message, which an agent run extends with tool calls; a tool reply always stays
+in the step of the call it answers. When the window starts inside the last
+turn, the turn's user message is kept too, ahead of the window, so the model
+keeps the request it is working on. A conversation that fits whole is kept
+whole, with no summary. Without a budget nothing is dropped. When the newest
+step alone is too large it is kept anyway and `Result.OverBudget` is set.
+
+The summary counts against the budget, and `Result.OverBudget` reports
+whether the whole projection, summary included, exceeds it. Without a
+`Summarizer` the window leaves room for the placeholder it writes; the
+placeholder names at most the five latest dropped message IDs. With a
+`Summarizer`, `Config.SummaryReserve` (default: a fifth of each budget limit)
+is kept for the summary, passed to the summarizer as
+`SummarizeRequest.SummaryBudget`, and a longer summary is truncated to fit.
+
+`CharLen` counts a message's content and its tool calls' names and arguments.
 
 ## Token Budget
 
@@ -116,11 +133,11 @@ holds does not change the caller's messages.
 Compression is incremental: keep `result.Messages` as the session transcript
 and append new messages to it. The next `Compress` recognizes its own summary,
 summarizes only the newly dropped messages together with it, and carries the
-total dropped count forward. Passing the full raw history each time works too,
-but re-summarizes everything.
-
-If `Profile` is omitted from `window.Config`, the compressor reads
-`CONTEXT_DEEP_COMPRESSION`.
+total dropped count forward. A summary is recognized by its metadata or, when
+a host stored only role and content, by its header (`compressed earlier
+context: N messages omitted` or `summary of earlier context (N messages
+omitted):`), so summaries do not pile up. Passing the full raw history each
+time works too, but re-summarizes everything.
 
 ## Deep Summarization
 
@@ -149,7 +166,7 @@ returned summary replaces the generic placeholder in the model-facing
 projection:
 
 ```text
-summary of earlier context:
+summary of earlier context (12 messages omitted):
 Primary request: ...
 Current state: ...
 Pending tasks: ...
@@ -212,38 +229,41 @@ while preserving the useful observation.
 
 ## Use With goagent
 
-Keep the dependency direction at the application boundary:
-
-```text
-application
-  imports github.com/eruca/goagents/goagent
-  imports github.com/eruca/goagents/contextkit
-  maps goagent messages into contextkit messages
-  uses contextkit output as the model-facing projection
-
-github.com/eruca/goagents/goagent does not import github.com/eruca/goagents/contextkit
-github.com/eruca/goagents/contextkit does not import github.com/eruca/goagents/goagent
-```
-
-Until `goagent` has a native context compression port, use `contextkit` in host
-code around memory or model-request preparation. A future `goagent` stage can
-call the same compressor before `ThinkStage` without moving the algorithms into
-core.
-
-Typical mapping:
+`contextkit/agentadapter` is a goagent `ContextProjector` backed by a
+compressor, so every model request of a run uses the compressed view:
 
 ```go
-func toContextKit(messages []agentcore.Message) []contextkit.Message {
-	out := make([]contextkit.Message, 0, len(messages))
-	for _, msg := range messages {
-		out = append(out, contextkit.Message{
-			Role:    contextkit.Role(msg.Role),
-			Content: msg.Content,
-		})
-	}
-	return out
-}
+projector, err := agentadapter.NewProjector(agentadapter.Config{
+	Compressor: window.New(window.Config{
+		Budget:       contextkit.Budget{MaxTokens: 52000},
+		CountTokens:  countTokens,
+		Profile:      contextkit.ProfileDeep,
+		MaxToolChars: 2000,
+		Summarizer:   summarizer,
+	}),
+	Next: memoryProjector, // optional, for example memorykit's projector
+})
+agent, err := agentcore.NewAgent(agentcore.WithContextProjector(projector), ...)
 ```
+
+- Messages map to contextkit with their tool calls, and tool replies are
+  named after the call they answer; `ToContextKit` and `FromContextKit` do
+  the mapping.
+- goagent projects the whole run before every model call. The projector
+  remembers recent compressions (`CacheSize`, default 32) by a hash of the
+  messages they covered, and compresses a remembered projection plus the new
+  messages, so a `Summarizer` folds in only newly dropped messages. In a test
+  run of eight tool steps with large outputs, the last model request shrank
+  from 80,019 to 2,364 characters under a 3,000-character budget, and each
+  message was summarized once.
+- `Next` receives the compressed messages; putting a memory projector there
+  keeps recalled memory out of the summaries.
+- `UseAgentBudget` compresses to the run's `Budget.MaxInputTokens` (the
+  compressor then needs `CountTokens`). The compiled system prompt is added
+  after projection and is not part of the budget.
+- `OnCompress` receives each `Result`, for example to keep deep-mode
+  `Collapses`. The result metadata reports `contextkit.dropped`,
+  `contextkit.over_budget`, and `contextkit.reused_messages`.
 
 For large tools such as OCR or retrieval, pair `contextkit` with bounded tool
 results:

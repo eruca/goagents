@@ -29,6 +29,7 @@ Kits with an allowed dependency:
 
 Adapter packages that connect a kit to `goagent`:
 
+- `contextkit/agentadapter` may import `contextkit` and `goagent`.
 - `llmkit/adapters/goagent` may import `llmkit` and `goagent`.
 - `memorykit/agentadapter` may import `memorykit` and `goagent`.
 - `skillkit/agentadapter` may import `skillkit` and `goagent`.
