@@ -673,10 +673,28 @@ func TestRememberMemoryConcurrentProvidersConvergeOnDeterministicIdentity(t *tes
 			t.Errorf("observation = %q, want ID %s", observation, expectedID)
 		}
 	}
+	// ExpectedActive depends on timing: a writer that reads after another
+	// writer's create sees that record as the active one it may replace. The
+	// identity, content, and idempotency key must still agree, and the store
+	// must end with the one record.
+	first := store.createRequests[0]
+	first.ExpectedActive = nil
 	for index := 1; index < len(store.createRequests); index++ {
-		if !reflect.DeepEqual(store.createRequests[0], store.createRequests[index]) {
+		request := store.createRequests[index]
+		request.ExpectedActive = nil
+		if !reflect.DeepEqual(first, request) {
 			t.Fatalf("concurrent requests differ: %#v", store.createRequests)
 		}
+	}
+	listed, err := store.delegate.List(context.Background(), memorykit.ListQuery{
+		Scope: memorykit.Scope{TenantID: "tenant-1", SubjectType: memorykit.SubjectProject, SubjectID: "project-1"},
+		Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0].ID != expectedID || listed[0].Status != memorykit.StatusActive || listed[0].Version != 1 {
+		t.Fatalf("stored memories = %+v, want one active record %s", listed, expectedID)
 	}
 }
 
