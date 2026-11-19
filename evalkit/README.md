@@ -84,9 +84,18 @@ is defensively copied into each Trial.
 Host adapters decide how persisted runtime data becomes `TraceStep` values.
 They should use fixed metadata and label allowlists, store only host-owned
 artifact references, and exclude prompts, tool inputs/outputs, credentials,
-absolute trust paths, and arbitrary event messages. The host-api example maps
-its existing SQLite workflow and run stores this way without adding a production
-HTTP endpoint.
+absolute trust paths, and arbitrary event messages.
+
+`evalkit/runtrace` is that adapter for the GoAgents stores. `BuildWorkflow`
+reads a `workflowkit` run, the events of its `runkit` agent runs, and,
+optionally, its `llmkit` route audits; `BuildRun` does the same for a single
+agent run. Tool start and completion events become one `tool_call` step,
+approval requests and their resolution (also across a resume) become one
+`approval` step, and selected routes become `model_call` steps named by model
+alias. Only allowlisted identifiers, statuses, timestamps, and counters are
+copied; inputs, outputs, prompts, tool arguments, event messages, approval
+reasons, and free-text errors are dropped. The host-api example builds its
+eval traces with it.
 
 Use `runkit` or `artifactkit` when a host wants durable trace or artifact
 storage. Use a host adapter to map `goagent.RunDetailed`, workflow runs, or
