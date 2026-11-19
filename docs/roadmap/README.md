@@ -26,7 +26,10 @@ ADR-0001 是在分 kit 发版、旧 CJK 检索方案下写的，已经不适用�
 - PR #2–#4 完成三轮审查修复（P0–P3），覆盖租约、审批绑定、记忆写入原子性、
   流式错误统计和 host-api 安全加固；随后 contextkit 支持按 token 计预算。
 - memorykit 中英文召回评测集 v2（#8）已合入：exact+FTS 召回 19/22，
-  禁止召回 1/30（词面匹配的已知限制，见 #9）。
+  禁止召回 1/30（词面匹配的已知限制，见 #9）。用本机 Ollama bge-m3 跑了真实
+  向量评测（[`docs/evals`](../evals/memorykit-v2-ollama-bge-m3.md)）：三路融合、
+  阈值 0.5 时召回 22/22，同义改写从 1/4 到 4/4；#9 的草稿主题误召回向量也
+  挡不住，需要 reranker。
 - v0.7.0 发版，升级说明见 [`docs/upgrading.md`](../upgrading.md)。其中从旧分支
   移植并合入：llmkit `CascadeExecutor`（#5，按验收测试逐级升级模型，门槛可配置）、
   `examples/memory-ingest`（#6）、memory worker 可观测性与 `GET /workers/memory`（#10）。
@@ -46,7 +49,7 @@ ADR-0001 是在分 kit 发版、旧 CJK 检索方案下写的，已经不适用�
 | Kit | 成熟度 | 已知缺口 |
 |---|---|---|
 | goagent | 高 | — |
-| memorykit | 高 | 全文检索是词面匹配，分不清词面相同、语义不同的记忆（#9）；还没用真实 embedding 跑过评测集 |
+| memorykit | 高 | 词面和向量都分不清"草稿"与"已批准"这类语义相近、结论不同的记忆（#9），需要宿主侧 reranker；全文通道命中数并列时按 ID 排序，预算边界上的结果带偶然性 |
 | workflowkit (+agentstep) | 高 | — |
 | llmkit | 高 | 没有项目/账户级预算扣减 |
 | runkit | 高 | — |
@@ -75,7 +78,6 @@ ADR-0001 是在分 kit 发版、旧 CJK 检索方案下写的，已经不适用�
 
 - todo 仍依赖分 kit 时代的 v0.1.x 模块；把它迁到单 module 的最新版本，是获得
   真实宿主反馈、决定后续公共 API 的最直接途径（需要改 todo 仓库，另行授权）。
-- 接入真实 embedding provider 后用评测集验证向量检索能不能挡住已知误召回（#9 的后续，需要另外授权调用费用）。
 - 项目/账户级成本预算扣减（边界见 [`docs/llmkit-budget-governance.md`](../llmkit-budget-governance.md)）。
 - 更新 [`docs/llmkit-orchestration-design-review.md`](../llmkit-orchestration-design-review.md)
   中"是否为 llmkit 单独打 tag"等单 module 之前的结论。

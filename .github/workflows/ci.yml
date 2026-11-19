@@ -65,5 +65,5 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
-      - run: go test -race -p 1 ./memorykit/... ./runkit/... ./workflowkit/... ./llmkit/... ./artifactkit/...
+      - run: go test -race -p 1 ./memorykit/... ./runkit/... ./workflowkit/... ./llmkit/... ./artifactkit/... ./examples/memory-embedding-eval/...
       - run: go test -race -run '^(TestHostMemoryPostgresBlackBox|TestHostAPISharedBackendsAcrossProcesses|TestHostAPIMultiReplicaProcesses)$' ./examples/host-api

@@ -1,0 +1,1255 @@
+{
+  "evaluator_version": "memory-embedding-eval/v1",
+  "generated_at": "2026-11-19T09:07:15.873619Z",
+  "corpus": {
+    "version": "project-memory-retrieval-v2",
+    "sha256": "960c9da924826a718b058b131aeb8a3f178ff7e3e65f47edcc55f1db35c5fb07",
+    "memories": 36,
+    "cases": 24
+  },
+  "embedding": {
+    "provider": "ollama",
+    "model": "bge-m3",
+    "profile_id": "ollama-bge-m3-1024",
+    "dimensions": 1024,
+    "embedded_memories": 33
+  },
+  "max_items": 4,
+  "policies": [
+    {
+      "name": "exact-only",
+      "overall": {
+        "Cases": 24,
+        "ExpectedFound": 11,
+        "ExpectedTotal": 22,
+        "ForbiddenInjected": 0,
+        "ForbiddenTotal": 30,
+        "RecallAtBudget": 0.5,
+        "FalseInjectionRate": 0
+      },
+      "categories": {
+        "chinese_phrase": {
+          "expected_found": 0,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "english": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "hard_negative": {
+          "expected_found": 0,
+          "expected_total": 3,
+          "forbidden_injected": 0,
+          "forbidden_total": 6
+        },
+        "lifecycle": {
+          "expected_found": 3,
+          "expected_total": 3,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        },
+        "scope": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 6
+        },
+        "synonym": {
+          "expected_found": 0,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        }
+      },
+      "misses": [
+        "q-cn-scope/m-cn-scope",
+        "q-cn-approval/m-cn-approval",
+        "q-cn-erase/m-cn-erase",
+        "q-cn-restart/m-cn-restart",
+        "q-syn-pg/m-syn-pg",
+        "q-syn-intent/m-syn-intent",
+        "q-syn-closed/m-syn-fail-closed",
+        "q-syn-review/m-syn-review",
+        "q-noise-vector/m-syn-pg",
+        "q-noise-memory/m-en-budget",
+        "q-noise-scope/m-syn-fail-closed"
+      ]
+    },
+    {
+      "name": "fts-only",
+      "overall": {
+        "Cases": 24,
+        "ExpectedFound": 16,
+        "ExpectedTotal": 22,
+        "ForbiddenInjected": 1,
+        "ForbiddenTotal": 30,
+        "RecallAtBudget": 0.7272727272727273,
+        "FalseInjectionRate": 0.03333333333333333
+      },
+      "categories": {
+        "chinese_phrase": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "english": {
+          "expected_found": 2,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "hard_negative": {
+          "expected_found": 3,
+          "expected_total": 3,
+          "forbidden_injected": 1,
+          "forbidden_total": 6
+        },
+        "lifecycle": {
+          "expected_found": 2,
+          "expected_total": 3,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        },
+        "scope": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 6
+        },
+        "synonym": {
+          "expected_found": 1,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        }
+      },
+      "misses": [
+        "q-syn-intent/m-syn-intent",
+        "q-syn-closed/m-syn-fail-closed",
+        "q-syn-review/m-syn-review",
+        "q-en-fallback/m-en-fallback",
+        "q-en-budget/m-en-budget",
+        "q-life-deploy/m-life-deploy-current"
+      ],
+      "injections": [
+        "q-abstain-theme/m-noise-theme"
+      ]
+    },
+    {
+      "name": "exact+fts",
+      "overall": {
+        "Cases": 24,
+        "ExpectedFound": 19,
+        "ExpectedTotal": 22,
+        "ForbiddenInjected": 1,
+        "ForbiddenTotal": 30,
+        "RecallAtBudget": 0.8636363636363636,
+        "FalseInjectionRate": 0.03333333333333333
+      },
+      "categories": {
+        "chinese_phrase": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "english": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "hard_negative": {
+          "expected_found": 3,
+          "expected_total": 3,
+          "forbidden_injected": 1,
+          "forbidden_total": 6
+        },
+        "lifecycle": {
+          "expected_found": 3,
+          "expected_total": 3,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        },
+        "scope": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 6
+        },
+        "synonym": {
+          "expected_found": 1,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        }
+      },
+      "misses": [
+        "q-syn-intent/m-syn-intent",
+        "q-syn-closed/m-syn-fail-closed",
+        "q-syn-review/m-syn-review"
+      ],
+      "injections": [
+        "q-abstain-theme/m-noise-theme"
+      ]
+    },
+    {
+      "name": "vector-only",
+      "min_vector_similarity": 0,
+      "overall": {
+        "Cases": 24,
+        "ExpectedFound": 22,
+        "ExpectedTotal": 22,
+        "ForbiddenInjected": 2,
+        "ForbiddenTotal": 30,
+        "RecallAtBudget": 1,
+        "FalseInjectionRate": 0.06666666666666667
+      },
+      "categories": {
+        "chinese_phrase": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "english": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "hard_negative": {
+          "expected_found": 3,
+          "expected_total": 3,
+          "forbidden_injected": 2,
+          "forbidden_total": 6
+        },
+        "lifecycle": {
+          "expected_found": 3,
+          "expected_total": 3,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        },
+        "scope": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 6
+        },
+        "synonym": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        }
+      },
+      "injections": [
+        "q-noise-scope/m-noise-java-scope",
+        "q-abstain-theme/m-noise-theme"
+      ]
+    },
+    {
+      "name": "exact+fts+vector",
+      "min_vector_similarity": 0,
+      "overall": {
+        "Cases": 24,
+        "ExpectedFound": 22,
+        "ExpectedTotal": 22,
+        "ForbiddenInjected": 2,
+        "ForbiddenTotal": 30,
+        "RecallAtBudget": 1,
+        "FalseInjectionRate": 0.06666666666666667
+      },
+      "categories": {
+        "chinese_phrase": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "english": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "hard_negative": {
+          "expected_found": 3,
+          "expected_total": 3,
+          "forbidden_injected": 2,
+          "forbidden_total": 6
+        },
+        "lifecycle": {
+          "expected_found": 3,
+          "expected_total": 3,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        },
+        "scope": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 6
+        },
+        "synonym": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        }
+      },
+      "injections": [
+        "q-noise-scope/m-noise-java-scope",
+        "q-abstain-theme/m-noise-theme"
+      ]
+    },
+    {
+      "name": "vector-only",
+      "min_vector_similarity": 0.4,
+      "overall": {
+        "Cases": 24,
+        "ExpectedFound": 22,
+        "ExpectedTotal": 22,
+        "ForbiddenInjected": 2,
+        "ForbiddenTotal": 30,
+        "RecallAtBudget": 1,
+        "FalseInjectionRate": 0.06666666666666667
+      },
+      "categories": {
+        "chinese_phrase": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "english": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "hard_negative": {
+          "expected_found": 3,
+          "expected_total": 3,
+          "forbidden_injected": 2,
+          "forbidden_total": 6
+        },
+        "lifecycle": {
+          "expected_found": 3,
+          "expected_total": 3,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        },
+        "scope": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 6
+        },
+        "synonym": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        }
+      },
+      "injections": [
+        "q-noise-scope/m-noise-java-scope",
+        "q-abstain-theme/m-noise-theme"
+      ]
+    },
+    {
+      "name": "exact+fts+vector",
+      "min_vector_similarity": 0.4,
+      "overall": {
+        "Cases": 24,
+        "ExpectedFound": 22,
+        "ExpectedTotal": 22,
+        "ForbiddenInjected": 2,
+        "ForbiddenTotal": 30,
+        "RecallAtBudget": 1,
+        "FalseInjectionRate": 0.06666666666666667
+      },
+      "categories": {
+        "chinese_phrase": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "english": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "hard_negative": {
+          "expected_found": 3,
+          "expected_total": 3,
+          "forbidden_injected": 2,
+          "forbidden_total": 6
+        },
+        "lifecycle": {
+          "expected_found": 3,
+          "expected_total": 3,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        },
+        "scope": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 6
+        },
+        "synonym": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        }
+      },
+      "injections": [
+        "q-noise-scope/m-noise-java-scope",
+        "q-abstain-theme/m-noise-theme"
+      ]
+    },
+    {
+      "name": "vector-only",
+      "min_vector_similarity": 0.5,
+      "overall": {
+        "Cases": 24,
+        "ExpectedFound": 20,
+        "ExpectedTotal": 22,
+        "ForbiddenInjected": 1,
+        "ForbiddenTotal": 30,
+        "RecallAtBudget": 0.9090909090909091,
+        "FalseInjectionRate": 0.03333333333333333
+      },
+      "categories": {
+        "chinese_phrase": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "english": {
+          "expected_found": 2,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "hard_negative": {
+          "expected_found": 3,
+          "expected_total": 3,
+          "forbidden_injected": 1,
+          "forbidden_total": 6
+        },
+        "lifecycle": {
+          "expected_found": 3,
+          "expected_total": 3,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        },
+        "scope": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 6
+        },
+        "synonym": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        }
+      },
+      "misses": [
+        "q-en-sot/m-en-sot",
+        "q-en-fallback/m-en-fallback"
+      ],
+      "injections": [
+        "q-abstain-theme/m-noise-theme"
+      ]
+    },
+    {
+      "name": "exact+fts+vector",
+      "min_vector_similarity": 0.5,
+      "overall": {
+        "Cases": 24,
+        "ExpectedFound": 22,
+        "ExpectedTotal": 22,
+        "ForbiddenInjected": 1,
+        "ForbiddenTotal": 30,
+        "RecallAtBudget": 1,
+        "FalseInjectionRate": 0.03333333333333333
+      },
+      "categories": {
+        "chinese_phrase": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "english": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "hard_negative": {
+          "expected_found": 3,
+          "expected_total": 3,
+          "forbidden_injected": 1,
+          "forbidden_total": 6
+        },
+        "lifecycle": {
+          "expected_found": 3,
+          "expected_total": 3,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        },
+        "scope": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 6
+        },
+        "synonym": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        }
+      },
+      "injections": [
+        "q-abstain-theme/m-noise-theme"
+      ]
+    },
+    {
+      "name": "vector-only",
+      "min_vector_similarity": 0.55,
+      "overall": {
+        "Cases": 24,
+        "ExpectedFound": 20,
+        "ExpectedTotal": 22,
+        "ForbiddenInjected": 1,
+        "ForbiddenTotal": 30,
+        "RecallAtBudget": 0.9090909090909091,
+        "FalseInjectionRate": 0.03333333333333333
+      },
+      "categories": {
+        "chinese_phrase": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "english": {
+          "expected_found": 2,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "hard_negative": {
+          "expected_found": 3,
+          "expected_total": 3,
+          "forbidden_injected": 1,
+          "forbidden_total": 6
+        },
+        "lifecycle": {
+          "expected_found": 3,
+          "expected_total": 3,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        },
+        "scope": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 6
+        },
+        "synonym": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        }
+      },
+      "misses": [
+        "q-en-sot/m-en-sot",
+        "q-en-fallback/m-en-fallback"
+      ],
+      "injections": [
+        "q-abstain-theme/m-noise-theme"
+      ]
+    },
+    {
+      "name": "exact+fts+vector",
+      "min_vector_similarity": 0.55,
+      "overall": {
+        "Cases": 24,
+        "ExpectedFound": 22,
+        "ExpectedTotal": 22,
+        "ForbiddenInjected": 1,
+        "ForbiddenTotal": 30,
+        "RecallAtBudget": 1,
+        "FalseInjectionRate": 0.03333333333333333
+      },
+      "categories": {
+        "chinese_phrase": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "english": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "hard_negative": {
+          "expected_found": 3,
+          "expected_total": 3,
+          "forbidden_injected": 1,
+          "forbidden_total": 6
+        },
+        "lifecycle": {
+          "expected_found": 3,
+          "expected_total": 3,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        },
+        "scope": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 6
+        },
+        "synonym": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        }
+      },
+      "injections": [
+        "q-abstain-theme/m-noise-theme"
+      ]
+    },
+    {
+      "name": "vector-only",
+      "min_vector_similarity": 0.6,
+      "overall": {
+        "Cases": 24,
+        "ExpectedFound": 18,
+        "ExpectedTotal": 22,
+        "ForbiddenInjected": 0,
+        "ForbiddenTotal": 30,
+        "RecallAtBudget": 0.8181818181818182,
+        "FalseInjectionRate": 0
+      },
+      "categories": {
+        "chinese_phrase": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "english": {
+          "expected_found": 1,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "hard_negative": {
+          "expected_found": 3,
+          "expected_total": 3,
+          "forbidden_injected": 0,
+          "forbidden_total": 6
+        },
+        "lifecycle": {
+          "expected_found": 3,
+          "expected_total": 3,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        },
+        "scope": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 6
+        },
+        "synonym": {
+          "expected_found": 3,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        }
+      },
+      "misses": [
+        "q-syn-closed/m-syn-fail-closed",
+        "q-en-sot/m-en-sot",
+        "q-en-fallback/m-en-fallback",
+        "q-en-budget/m-en-budget"
+      ]
+    },
+    {
+      "name": "exact+fts+vector",
+      "min_vector_similarity": 0.6,
+      "overall": {
+        "Cases": 24,
+        "ExpectedFound": 21,
+        "ExpectedTotal": 22,
+        "ForbiddenInjected": 1,
+        "ForbiddenTotal": 30,
+        "RecallAtBudget": 0.9545454545454546,
+        "FalseInjectionRate": 0.03333333333333333
+      },
+      "categories": {
+        "chinese_phrase": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "english": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "hard_negative": {
+          "expected_found": 3,
+          "expected_total": 3,
+          "forbidden_injected": 1,
+          "forbidden_total": 6
+        },
+        "lifecycle": {
+          "expected_found": 3,
+          "expected_total": 3,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        },
+        "scope": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 6
+        },
+        "synonym": {
+          "expected_found": 3,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        }
+      },
+      "misses": [
+        "q-syn-closed/m-syn-fail-closed"
+      ],
+      "injections": [
+        "q-abstain-theme/m-noise-theme"
+      ]
+    },
+    {
+      "name": "vector-only",
+      "min_vector_similarity": 0.65,
+      "overall": {
+        "Cases": 24,
+        "ExpectedFound": 16,
+        "ExpectedTotal": 22,
+        "ForbiddenInjected": 0,
+        "ForbiddenTotal": 30,
+        "RecallAtBudget": 0.7272727272727273,
+        "FalseInjectionRate": 0
+      },
+      "categories": {
+        "chinese_phrase": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "english": {
+          "expected_found": 1,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "hard_negative": {
+          "expected_found": 3,
+          "expected_total": 3,
+          "forbidden_injected": 0,
+          "forbidden_total": 6
+        },
+        "lifecycle": {
+          "expected_found": 2,
+          "expected_total": 3,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        },
+        "scope": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 6
+        },
+        "synonym": {
+          "expected_found": 2,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        }
+      },
+      "misses": [
+        "q-syn-closed/m-syn-fail-closed",
+        "q-syn-review/m-syn-review",
+        "q-en-sot/m-en-sot",
+        "q-en-fallback/m-en-fallback",
+        "q-en-budget/m-en-budget",
+        "q-life-deploy/m-life-deploy-current"
+      ]
+    },
+    {
+      "name": "exact+fts+vector",
+      "min_vector_similarity": 0.65,
+      "overall": {
+        "Cases": 24,
+        "ExpectedFound": 20,
+        "ExpectedTotal": 22,
+        "ForbiddenInjected": 1,
+        "ForbiddenTotal": 30,
+        "RecallAtBudget": 0.9090909090909091,
+        "FalseInjectionRate": 0.03333333333333333
+      },
+      "categories": {
+        "chinese_phrase": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "english": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "hard_negative": {
+          "expected_found": 3,
+          "expected_total": 3,
+          "forbidden_injected": 1,
+          "forbidden_total": 6
+        },
+        "lifecycle": {
+          "expected_found": 3,
+          "expected_total": 3,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        },
+        "scope": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 6
+        },
+        "synonym": {
+          "expected_found": 2,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        }
+      },
+      "misses": [
+        "q-syn-closed/m-syn-fail-closed",
+        "q-syn-review/m-syn-review"
+      ],
+      "injections": [
+        "q-abstain-theme/m-noise-theme"
+      ]
+    },
+    {
+      "name": "vector-only",
+      "min_vector_similarity": 0.7,
+      "overall": {
+        "Cases": 24,
+        "ExpectedFound": 12,
+        "ExpectedTotal": 22,
+        "ForbiddenInjected": 0,
+        "ForbiddenTotal": 30,
+        "RecallAtBudget": 0.5454545454545454,
+        "FalseInjectionRate": 0
+      },
+      "categories": {
+        "chinese_phrase": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "english": {
+          "expected_found": 0,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "hard_negative": {
+          "expected_found": 1,
+          "expected_total": 3,
+          "forbidden_injected": 0,
+          "forbidden_total": 6
+        },
+        "lifecycle": {
+          "expected_found": 2,
+          "expected_total": 3,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        },
+        "scope": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 6
+        },
+        "synonym": {
+          "expected_found": 1,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        }
+      },
+      "misses": [
+        "q-syn-intent/m-syn-intent",
+        "q-syn-closed/m-syn-fail-closed",
+        "q-syn-review/m-syn-review",
+        "q-en-test/m-en-test",
+        "q-en-sot/m-en-sot",
+        "q-en-fallback/m-en-fallback",
+        "q-en-budget/m-en-budget",
+        "q-life-deploy/m-life-deploy-current",
+        "q-noise-vector/m-syn-pg",
+        "q-noise-memory/m-en-budget"
+      ]
+    },
+    {
+      "name": "exact+fts+vector",
+      "min_vector_similarity": 0.7,
+      "overall": {
+        "Cases": 24,
+        "ExpectedFound": 19,
+        "ExpectedTotal": 22,
+        "ForbiddenInjected": 1,
+        "ForbiddenTotal": 30,
+        "RecallAtBudget": 0.8636363636363636,
+        "FalseInjectionRate": 0.03333333333333333
+      },
+      "categories": {
+        "chinese_phrase": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "english": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 4
+        },
+        "hard_negative": {
+          "expected_found": 3,
+          "expected_total": 3,
+          "forbidden_injected": 1,
+          "forbidden_total": 6
+        },
+        "lifecycle": {
+          "expected_found": 3,
+          "expected_total": 3,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        },
+        "scope": {
+          "expected_found": 4,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 6
+        },
+        "synonym": {
+          "expected_found": 1,
+          "expected_total": 4,
+          "forbidden_injected": 0,
+          "forbidden_total": 5
+        }
+      },
+      "misses": [
+        "q-syn-intent/m-syn-intent",
+        "q-syn-closed/m-syn-fail-closed",
+        "q-syn-review/m-syn-review"
+      ],
+      "injections": [
+        "q-abstain-theme/m-noise-theme"
+      ]
+    }
+  ],
+  "case_similarities": [
+    {
+      "case_id": "q-cn-scope",
+      "category": "chinese_phrase",
+      "expected": {
+        "m-cn-scope": 0.924
+      },
+      "top_other": "m-cn-restart",
+      "top_other_similarity": 0.611
+    },
+    {
+      "case_id": "q-cn-approval",
+      "category": "chinese_phrase",
+      "expected": {
+        "m-cn-approval": 0.959
+      },
+      "top_other": "m-syn-intent",
+      "top_other_similarity": 0.649
+    },
+    {
+      "case_id": "q-cn-erase",
+      "category": "chinese_phrase",
+      "expected": {
+        "m-cn-erase": 0.949
+      },
+      "top_other": "m-scope-erase-p1",
+      "top_other_similarity": 0.523
+    },
+    {
+      "case_id": "q-cn-restart",
+      "category": "chinese_phrase",
+      "expected": {
+        "m-cn-restart": 0.881
+      },
+      "top_other": "m-cn-approval",
+      "top_other_similarity": 0.675
+    },
+    {
+      "case_id": "q-syn-pg",
+      "category": "synonym",
+      "expected": {
+        "m-syn-pg": 0.73
+      },
+      "forbidden_in_scope": {
+        "m-noise-svg": 0.424,
+        "m-noise-vector-graphics": 0.399
+      },
+      "top_other": "m-scope-command-p1",
+      "top_other_similarity": 0.568
+    },
+    {
+      "case_id": "q-syn-intent",
+      "category": "synonym",
+      "expected": {
+        "m-syn-intent": 0.699
+      },
+      "top_other": "m-cn-approval",
+      "top_other_similarity": 0.76
+    },
+    {
+      "case_id": "q-syn-closed",
+      "category": "synonym",
+      "expected": {
+        "m-syn-fail-closed": 0.579
+      },
+      "forbidden_in_scope": {
+        "m-noise-java-scope": 0.485
+      },
+      "top_other": "m-cn-approval",
+      "top_other_similarity": 0.507
+    },
+    {
+      "case_id": "q-syn-review",
+      "category": "synonym",
+      "expected": {
+        "m-syn-review": 0.624
+      },
+      "top_other": "m-scope-approval-p1",
+      "top_other_similarity": 0.662
+    },
+    {
+      "case_id": "q-en-test",
+      "category": "english",
+      "expected": {
+        "m-en-test": 0.668
+      },
+      "top_other": "m-life-deploy-current",
+      "top_other_similarity": 0.512
+    },
+    {
+      "case_id": "q-en-sot",
+      "category": "english",
+      "expected": {
+        "m-en-sot": 0.49
+      },
+      "forbidden_in_scope": {
+        "m-noise-memory-leak": 0.274
+      },
+      "top_other": "m-cn-approval",
+      "top_other_similarity": 0.468
+    },
+    {
+      "case_id": "q-en-fallback",
+      "category": "english",
+      "expected": {
+        "m-en-fallback": 0.445
+      },
+      "forbidden_in_scope": {
+        "m-noise-vector-graphics": 0.359
+      },
+      "top_other": "m-syn-fail-closed",
+      "top_other_similarity": 0.468
+    },
+    {
+      "case_id": "q-en-budget",
+      "category": "english",
+      "expected": {
+        "m-en-budget": 0.569
+      },
+      "forbidden_in_scope": {
+        "m-noise-token-sheet": 0.389
+      },
+      "top_other": "m-syn-intent",
+      "top_other_similarity": 0.65
+    },
+    {
+      "case_id": "q-life-deploy",
+      "category": "lifecycle",
+      "expected": {
+        "m-life-deploy-current": 0.632
+      },
+      "top_other": "m-scope-command-p1",
+      "top_other_similarity": 0.546
+    },
+    {
+      "case_id": "q-life-db",
+      "category": "lifecycle",
+      "expected": {
+        "m-life-db-current": 0.711
+      },
+      "top_other": "m-cn-restart",
+      "top_other_similarity": 0.566
+    },
+    {
+      "case_id": "q-life-candidate",
+      "category": "lifecycle",
+      "top_other": "m-cn-approval",
+      "top_other_similarity": 0.668
+    },
+    {
+      "case_id": "q-life-provider",
+      "category": "lifecycle",
+      "expected": {
+        "m-life-provider": 0.791
+      },
+      "top_other": "m-syn-pg",
+      "top_other_similarity": 0.556
+    },
+    {
+      "case_id": "q-scope-command",
+      "category": "scope",
+      "expected": {
+        "m-scope-command-p1": 0.836
+      },
+      "top_other": "m-scope-approval-p1",
+      "top_other_similarity": 0.736
+    },
+    {
+      "case_id": "q-scope-approval",
+      "category": "scope",
+      "expected": {
+        "m-scope-approval-p1": 0.792
+      },
+      "top_other": "m-scope-command-p1",
+      "top_other_similarity": 0.736
+    },
+    {
+      "case_id": "q-scope-erase",
+      "category": "scope",
+      "expected": {
+        "m-scope-erase-p1": 0.748
+      },
+      "top_other": "m-scope-restart-p1",
+      "top_other_similarity": 0.646
+    },
+    {
+      "case_id": "q-scope-restart",
+      "category": "scope",
+      "expected": {
+        "m-scope-restart-p1": 0.774
+      },
+      "top_other": "m-scope-erase-p1",
+      "top_other_similarity": 0.633
+    },
+    {
+      "case_id": "q-noise-vector",
+      "category": "hard_negative",
+      "expected": {
+        "m-syn-pg": 0.664
+      },
+      "forbidden_in_scope": {
+        "m-noise-svg": 0.408,
+        "m-noise-vector-graphics": 0.512
+      },
+      "top_other": "m-scope-command-p1",
+      "top_other_similarity": 0.55
+    },
+    {
+      "case_id": "q-noise-memory",
+      "category": "hard_negative",
+      "expected": {
+        "m-en-budget": 0.667
+      },
+      "forbidden_in_scope": {
+        "m-noise-memory-leak": 0.451,
+        "m-noise-token-sheet": 0.398
+      },
+      "top_other": "m-cn-approval",
+      "top_other_similarity": 0.574
+    },
+    {
+      "case_id": "q-noise-scope",
+      "category": "hard_negative",
+      "expected": {
+        "m-syn-fail-closed": 0.723
+      },
+      "forbidden_in_scope": {
+        "m-noise-java-scope": 0.472
+      },
+      "top_other": "m-en-fallback",
+      "top_other_similarity": 0.497
+    },
+    {
+      "case_id": "q-abstain-theme",
+      "category": "hard_negative",
+      "forbidden_in_scope": {
+        "m-noise-theme": 0.584
+      },
+      "top_other": "m-scope-approval-p1",
+      "top_other_similarity": 0.454
+    }
+  ],
+  "latency_ms": {
+    "query_embedding": {
+      "count": 336,
+      "p50": 19.509,
+      "p95": 21.353,
+      "max": 26.552
+    },
+    "recall_with_vector": {
+      "count": 336,
+      "p50": 21.585,
+      "p95": 23.919,
+      "max": 29.673
+    }
+  }
+}
