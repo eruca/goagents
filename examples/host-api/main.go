@@ -34,6 +34,9 @@ type hostSettings struct {
 	agentApprovalKeyring         string
 	workflowPostgresDSN          string
 	llmkitHealthPostgresDSN      string
+	artifactPostgresDSN          string
+	agentRunPostgresDSN          string
+	llmkitAuditPostgresDSN       string
 }
 
 func loadHostSettings(getenv func(string) string) (hostSettings, error) {
@@ -47,6 +50,9 @@ func loadHostSettings(getenv func(string) string) (hostSettings, error) {
 		agentApprovalKeyring:         getenv(agentApprovalKeyringEnv),
 		workflowPostgresDSN:          getenv(workflowPostgresDSNEnv),
 		llmkitHealthPostgresDSN:      getenv(llmkitHealthPostgresDSNEnv),
+		artifactPostgresDSN:          getenv(artifactPostgresDSNEnv),
+		agentRunPostgresDSN:          getenv(agentRunPostgresDSNEnv),
+		llmkitAuditPostgresDSN:       getenv(llmkitAuditPostgresDSNEnv),
 	}
 	if settings.addr == "" {
 		settings.addr = defaultHostAddr
@@ -101,6 +107,9 @@ func initializeHostConfig(
 		AgentApprovalKeyring:         settings.agentApprovalKeyring,
 		WorkflowPostgresDSN:          settings.workflowPostgresDSN,
 		LLMKitHealthPostgresDSN:      settings.llmkitHealthPostgresDSN,
+		ArtifactPostgresDSN:          settings.artifactPostgresDSN,
+		AgentRunPostgresDSN:          settings.agentRunPostgresDSN,
+		LLMKitAuditPostgresDSN:       settings.llmkitAuditPostgresDSN,
 		SkillCatalog:                 catalog,
 		SkillGateContext:             skillGate,
 	}, nil
