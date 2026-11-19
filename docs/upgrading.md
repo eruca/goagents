@@ -3,6 +3,20 @@
 按版本从新到旧排列。每节只列升级时需要处理的变化；完整改动见对应 tag 和
 `git log`。
 
+## Unreleased
+
+### 新增，可选
+
+- `evalkit`：轨迹步骤类型与状态常量（`StepToolCall`、`StepModelCall` 等）、
+  轨迹评分器 `RequireTools`、`ForbidTools`、`ToolOrder`、`NoFailedSteps`、
+  `Budget{}.Grader()`、`OutcomeStatus`，以及对已记录结果打分的
+  `RecordedHarness`。
+- `evalkit/runtrace`：`BuildWorkflow` / `BuildRun` 从 workflowkit、runkit 和
+  llmkit 审计的存储记录生成无正文轨迹。
+- host-api：`GET /workflows/{id}/trace`；新示例 `examples/trajectory-eval`。
+
+没有需要处理的不兼容变化。
+
 ## v0.6.x → v0.7.0
 
 ### 需要处理
