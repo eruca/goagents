@@ -18,6 +18,9 @@ import (
 
 type Store struct {
 	db *sql.DB
+	// ownsDB is true for a Store from Open, whose Close closes the pool, and
+	// false for one from OpenDB, which leaves the caller's pool open.
+	ownsDB bool
 }
 
 var (
@@ -37,16 +40,31 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	store, err := OpenDB(ctx, db)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	store.ownsDB = true
+	return store, nil
+}
+
+// OpenDB migrates and uses a caller-owned pool, so several stores can share
+// one pool. Close then leaves the pool open.
+func OpenDB(ctx context.Context, db *sql.DB) (*Store, error) {
+	if db == nil {
+		return nil, fmt.Errorf("PostgreSQL database is required")
+	}
 	store := &Store{db: db}
 	if err := store.migrate(ctx); err != nil {
-		_ = db.Close()
 		return nil, err
 	}
 	return store, nil
 }
 
+// Close closes the pool if Open created it.
 func (s *Store) Close() error {
-	if s == nil || s.db == nil {
+	if s == nil || s.db == nil || !s.ownsDB {
 		return nil
 	}
 	return s.db.Close()

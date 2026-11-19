@@ -298,3 +298,28 @@ VALUES ('cp-legacy', 'run-legacy', 'tenant', 'hash', 'secret'::bytea, 'pending',
 		t.Fatalf("Events after reopen = %+v, %v", events, err)
 	}
 }
+
+func TestOpenDBSharesCallerPool(t *testing.T) {
+	dsn := isolatedSchemaDSN(t)
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := OpenDB(context.Background(), nil); err == nil {
+		t.Fatal("OpenDB accepted a nil pool")
+	}
+	store, err := OpenDB(context.Background(), db)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if err := store.Create(context.Background(), runkit.RunRecord{RunID: "run-shared-pool", WorkflowID: "wf"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := db.PingContext(context.Background()); err != nil {
+		t.Fatalf("Close closed the caller's pool: %v", err)
+	}
+}
