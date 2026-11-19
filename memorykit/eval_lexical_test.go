@@ -80,7 +80,11 @@ func TestEvaluateRetrievalV2LexicalAblations(t *testing.T) {
 		t.Fatalf("exact+fts did not improve exact-only: exact=%+v exact+fts=%+v",
 			reports["exact-only"], reports["exact+fts"])
 	}
-	wantFound := map[string]int{"exact-only": 11, "fts-only": 16, "exact+fts": 19}
+	// fts-only misses q-life-db: its expected memory shares only the common
+	// word "memory" with the query, which BM25 weighs low. The old
+	// matched-term count tied it with three other memories and let memory IDs
+	// decide.
+	wantFound := map[string]int{"exact-only": 11, "fts-only": 15, "exact+fts": 19}
 	for _, name := range sortedLexicalPolicyNames(reports) {
 		got := reports[name]
 		if got.ExpectedFound != wantFound[name] || got.ExpectedTotal != 22 || got.ForbiddenTotal != 30 {

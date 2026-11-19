@@ -28,6 +28,13 @@ func TestFullTextRecallConformance(t *testing.T) {
 	})
 }
 
+func TestFullTextRankingConformance(t *testing.T) {
+	storetest.RunFullTextRankingConformance(t, func(t *testing.T) storetest.FullTextStore {
+		t.Helper()
+		return openIsolatedStore(t)
+	})
+}
+
 func TestRevisionSnapshotUsesPrivateSnakeCaseContentKey(t *testing.T) {
 	store := openIsolatedStore(t)
 	created, err := store.Create(context.Background(), lifecycleCreateRequest(
