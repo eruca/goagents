@@ -78,7 +78,7 @@ func (p *Projector) Project(ctx context.Context, request agentcore.ContextProjec
 		if err != nil {
 			return nil, err
 		}
-		return p.projectNext(ctx, canonical.Messages, canonical.Budget, metadata)
+		return p.projectNext(ctx, canonical.Messages, canonical.Budget, canonical.SystemPrompt, metadata)
 	}
 	result, err := p.cfg.Recall.Recall(ctx, memorykit.RecallRequest{
 		Scope: scope,
@@ -101,7 +101,7 @@ func (p *Projector) Project(ctx context.Context, request agentcore.ContextProjec
 		metadata = ensureMetadata(metadata)
 		metadata["memory.degraded"] = true
 		p.record(ctx, "memory.degraded", map[string]any{"memory.degraded": true})
-		return p.projectNext(ctx, canonical.Messages, canonical.Budget, metadata)
+		return p.projectNext(ctx, canonical.Messages, canonical.Budget, canonical.SystemPrompt, metadata)
 	}
 
 	metadata, err := successMetadata(canonical.Metadata, result)
@@ -128,7 +128,7 @@ func (p *Projector) Project(ctx context.Context, request agentcore.ContextProjec
 		return nil, err
 	}
 	p.record(ctx, event, eventPayload)
-	return p.projectNext(ctx, messages, canonical.Budget, metadata)
+	return p.projectNext(ctx, messages, canonical.Budget, canonical.SystemPrompt, metadata)
 }
 
 // lastRunes keeps the end of an oversized query, where a pasted log or
@@ -273,7 +273,7 @@ func memoryEventPayload(result memorykit.RecallResult) (map[string]any, error) {
 	return successMetadata(nil, result)
 }
 
-func (p *Projector) projectNext(ctx context.Context, messages []agentcore.Message, budget agentcore.Budget, metadata map[string]any) (*agentcore.ContextProjectionResult, error) {
+func (p *Projector) projectNext(ctx context.Context, messages []agentcore.Message, budget agentcore.Budget, systemPrompt string, metadata map[string]any) (*agentcore.ContextProjectionResult, error) {
 	if p.cfg.Next == nil {
 		resultMetadata, err := cloneMetadata(metadata)
 		if err != nil {
@@ -288,7 +288,7 @@ func (p *Projector) projectNext(ctx context.Context, messages []agentcore.Messag
 		return nil, err
 	}
 	nextResult, err := p.cfg.Next.Project(ctx, agentcore.ContextProjectionRequest{
-		Messages: cloneMessages(messages), Budget: budget, Metadata: nextMetadata,
+		Messages: cloneMessages(messages), Budget: budget, Metadata: nextMetadata, SystemPrompt: systemPrompt,
 	})
 	if err != nil {
 		return nil, err

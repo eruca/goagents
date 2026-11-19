@@ -37,6 +37,8 @@ type hostSettings struct {
 	artifactPostgresDSN          string
 	agentRunPostgresDSN          string
 	llmkitAuditPostgresDSN       string
+	contextMaxChars              int
+	contextMaxToolChars          int
 }
 
 func loadHostSettings(getenv func(string) string) (hostSettings, error) {
@@ -67,6 +69,13 @@ func loadHostSettings(getenv func(string) string) (hostSettings, error) {
 	}
 	if settings.shutdownTimeout <= 0 {
 		return settings, fmt.Errorf("%s must be positive", hostShutdownTimeoutEnv)
+	}
+	var err error
+	if settings.contextMaxChars, err = parseContextLimit(getenv, contextMaxCharsEnv); err != nil {
+		return settings, err
+	}
+	if settings.contextMaxToolChars, err = parseContextLimit(getenv, contextMaxToolCharsEnv); err != nil {
+		return settings, err
 	}
 	if _, _, err := resolveAgentApprovalKeys(Config{
 		AgentApprovalKeychainService: settings.agentApprovalKeychainService,
@@ -110,6 +119,8 @@ func initializeHostConfig(
 		ArtifactPostgresDSN:          settings.artifactPostgresDSN,
 		AgentRunPostgresDSN:          settings.agentRunPostgresDSN,
 		LLMKitAuditPostgresDSN:       settings.llmkitAuditPostgresDSN,
+		ContextMaxChars:              settings.contextMaxChars,
+		ContextMaxToolChars:          settings.contextMaxToolChars,
 		SkillCatalog:                 catalog,
 		SkillGateContext:             skillGate,
 	}, nil

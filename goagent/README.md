@@ -91,7 +91,7 @@ Use `WithModule` when a business module provides system prompts, skills, and req
 
 Use `WithEventSink` when a host application needs to observe run lifecycle events for logs, traces, metrics, or UI status. The core emits stage lifecycle events, tool events, memory events, and finalization events. Event sink errors are ignored so observability failures do not fail agent runs.
 
-Use `WithContextProjector` when a host application needs to compress or reshape the model-facing message view before each LLM call. The projector receives the full run messages and returns a projection for `ThinkStage`; it does not mutate the original run state. Concrete compression algorithms should live outside `agentcore`, for example in a sibling module such as `contextkit`.
+Use `WithContextProjector` when a host application needs to compress or reshape the model-facing message view before each LLM call. The projector receives the full run messages and returns a projection for `ThinkStage`; it does not mutate the original run state. The request's `SystemPrompt` is the compiled system prompt the call will start with: `ThinkStage` adds it after projection, so a projector should count it against a budget but not add it to the messages. Concrete compression algorithms live outside `agentcore`: `contextkit/agentadapter` is a ready projector backed by `contextkit`.
 
 Pass `RunRequest.RunID` when the caller already has a trace ID; otherwise `Agent.Run` generates a typed `RunID` backed by `github.com/google/uuid` and returns it on `RunResult.RunID`.
 

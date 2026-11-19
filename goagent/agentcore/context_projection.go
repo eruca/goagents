@@ -10,6 +10,10 @@ type ContextProjectionRequest struct {
 	Messages []Message
 	Budget   Budget
 	Metadata map[string]any
+	// SystemPrompt is the compiled system prompt the model call will start
+	// with. ThinkStage adds it after projection, so a projector must not add
+	// it to Messages; one that sizes the view to a budget should count it.
+	SystemPrompt string
 }
 
 type ContextProjectionResult struct {
@@ -31,11 +35,15 @@ func (s ContextProjectionStage) Run(ctx context.Context, state *RunState) (Stage
 		state.ContextProjection = nil
 		return StageContinue, nil
 	}
-	projected, err := s.Projector.Project(ctx, ContextProjectionRequest{
+	request := ContextProjectionRequest{
 		Messages: append([]Message(nil), state.Messages...),
 		Budget:   s.Budget,
 		Metadata: cloneMetadata(state.Metadata),
-	})
+	}
+	if state.CompiledPrompt != nil {
+		request.SystemPrompt = state.CompiledPrompt.Content
+	}
+	projected, err := s.Projector.Project(ctx, request)
 	if err != nil {
 		return StageAbort, err
 	}

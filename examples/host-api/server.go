@@ -47,6 +47,13 @@ type Config struct {
 	// LLMKitAuditPostgresDSN records LLM routes and outcomes in PostgreSQL
 	// instead of JSONL files under LLMKitHome.
 	LLMKitAuditPostgresDSN string
+	// ContextMaxChars, when positive, compresses each agent model request
+	// with contextkit to this many characters, the compiled system prompt
+	// included; ContextMaxToolChars, when positive, truncates each tool
+	// result in the model's view. Recalled memory is inserted after
+	// compression and is bounded by the memory recall policy instead.
+	ContextMaxChars     int
+	ContextMaxToolChars int
 	// AgentApprovalKeyring is a static keyring ("id:base64,..." of 32-byte
 	// keys) used instead of Keychain. AgentApprovalKeyID names its active key.
 	AgentApprovalKeyring string
@@ -256,6 +263,16 @@ func NewServer(config Config) (*Server, error) {
 		skillCatalog:     config.SkillCatalog,
 		skillGateContext: config.SkillGateContext,
 		memory:           memoryConfig,
+	}
+	if config.ContextMaxChars > 0 {
+		var next agentcore.ContextProjector
+		if memoryConfig != nil {
+			next = memoryConfig.Projector()
+		}
+		if runner.contextProjector, err = newContextProjector(config, next); err != nil {
+			closeStores()
+			return nil, err
+		}
 	}
 	agentApprovals, err := newHostAgentApprovalService(runs, approvalCipher, runner, approvalKeychain)
 	if err != nil {

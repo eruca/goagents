@@ -23,7 +23,13 @@ import (
 	"github.com/eruca/goagents/goagent/ports"
 )
 
-const defaultCacheSize = 32
+const (
+	defaultCacheSize = 32
+	// systemPromptKey marks the compiled system prompt the projector adds
+	// for compression only: it counts against the budget and is removed
+	// again, because goagent adds the prompt to the model call itself.
+	systemPromptKey = "contextkit/agentadapter.system_prompt"
+)
 
 // Config configures a Projector.
 type Config struct {
@@ -35,8 +41,12 @@ type Config struct {
 	Next agentcore.ContextProjector
 	// UseAgentBudget compresses to the run's agentcore.Budget.MaxInputTokens
 	// when it is set, instead of the compressor's own budget. The compressor
-	// then needs a token counter. The compiled system prompt is added after
-	// projection and is not part of that budget.
+	// then needs a token counter.
+	//
+	// Either budget covers the compiled system prompt (the request's
+	// SystemPrompt), which is counted and then left out of the projection
+	// because goagent adds it to the model call. Tool schemas and anything
+	// Next adds, such as recalled memory, are not counted.
 	UseAgentBudget bool
 	// OnCompress, when set, receives every compression result, for example
 	// to keep deep-mode Collapses. It must not modify the result.
@@ -81,12 +91,19 @@ func (p *Projector) Project(ctx context.Context, req agentcore.ContextProjection
 		budget.MaxTokens = req.Budget.MaxInputTokens
 	}
 	messages := ToContextKit(req.Messages)
-	prefixes := prefixHashes(budget, messages)
+	prefixes := prefixHashes(budget, req.SystemPrompt, messages)
 
 	input, reused := messages, 0
 	if cached, length := p.lookup(prefixes); length > 0 {
 		input = append(cached, cloneMessages(messages[length:])...)
 		reused = length
+	}
+	if req.SystemPrompt != "" {
+		prompt := contextkit.Message{
+			Role: contextkit.RoleSystem, Content: req.SystemPrompt,
+			Metadata: map[string]any{systemPromptKey: true},
+		}
+		input = append([]contextkit.Message{prompt}, input...)
 	}
 	result, err := p.cfg.Compressor.Compress(ctx, contextkit.Request{
 		Messages: input,
@@ -99,6 +116,7 @@ func (p *Projector) Project(ctx context.Context, req agentcore.ContextProjection
 	if result == nil {
 		return nil, errors.New("contextkit/agentadapter: compressor returned no result")
 	}
+	result.Messages = withoutSystemPrompt(result.Messages)
 	p.store(prefixes[len(messages)], result.Messages)
 	if p.cfg.OnCompress != nil {
 		p.cfg.OnCompress(ctx, result)
@@ -116,7 +134,7 @@ func (p *Projector) Project(ctx context.Context, req agentcore.ContextProjection
 		return &agentcore.ContextProjectionResult{Messages: projected, Metadata: metadata}, nil
 	}
 	next, err := p.cfg.Next.Project(ctx, agentcore.ContextProjectionRequest{
-		Messages: projected, Budget: req.Budget, Metadata: metadata,
+		Messages: projected, Budget: req.Budget, Metadata: metadata, SystemPrompt: req.SystemPrompt,
 	})
 	if err != nil || next == nil {
 		return next, err
@@ -163,13 +181,24 @@ func (p *Projector) store(key [sha256.Size]byte, projected []contextkit.Message)
 	}
 }
 
+func withoutSystemPrompt(messages []contextkit.Message) []contextkit.Message {
+	out := messages[:0:0]
+	for _, msg := range messages {
+		if marked, _ := msg.Metadata[systemPromptKey].(bool); !marked {
+			out = append(out, msg)
+		}
+	}
+	return out
+}
+
 // prefixHashes returns, for each n from 0 to len(messages), a hash of the
-// budget and the first n messages.
-func prefixHashes(budget contextkit.Budget, messages []contextkit.Message) [][sha256.Size]byte {
+// budget, the system prompt, and the first n messages.
+func prefixHashes(budget contextkit.Budget, systemPrompt string, messages []contextkit.Message) [][sha256.Size]byte {
 	hashes := make([][sha256.Size]byte, len(messages)+1)
 	seed := sha256.New()
 	writeInt(seed, budget.MaxChars)
 	writeInt(seed, budget.MaxTokens)
+	writeString(seed, systemPrompt)
 	copy(hashes[0][:], seed.Sum(nil))
 	for index, msg := range messages {
 		h := sha256.New()

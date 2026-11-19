@@ -30,6 +30,10 @@
 
 ### 新增，可选
 
+- `goagent`：`agentcore.ContextProjectionRequest.SystemPrompt`，投影阶段填入
+  编译好的系统提示，供投影器计入预算；memorykit 投影器把它转给 `Next`。
+- host-api：`HOST_API_CONTEXT_MAX_CHARS`、`HOST_API_CONTEXT_MAX_TOOL_CHARS`
+  开启上下文压缩（默认关闭）。
 - `contextkit`：`Message.ToolCalls`、`ToolCall`、`SummarizeRequest.SummaryBudget`、
   `window.Config.SummaryReserve`；新包 `contextkit/agentadapter`，把压缩器
   接入 goagent 的 `ContextProjector`。

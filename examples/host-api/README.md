@@ -571,6 +571,21 @@ workflow step fails instead of moving to `waiting_approval` with broken refs.
 See `../../docs/host-api-contract.md` for the prose contract and
 `openapi.yaml` for the machine-readable HTTP contract.
 
+## Context compression
+
+Set `HOST_API_CONTEXT_MAX_CHARS` to compress each agent model request with
+`contextkit/agentadapter` to that many characters, the compiled system prompt
+included, and `HOST_API_CONTEXT_MAX_TOOL_CHARS` to truncate each tool result
+in the model's view. Both default to 0 (off). With memory enabled, the
+compressed messages then go to the memory projector, so recalled memory is
+inserted after compression and bounded by the memory recall policy.
+
+The host's agent runs are short today (one request and at most one
+`record_review` call), so compression mostly bounds oversized tool results;
+it starts dropping and summarizing older steps once runs take several tool
+steps. Compression is standard: dropped steps become a placeholder, not a
+model-written summary.
+
 ## Run the long-lived service
 
 `go run .` is not a zero-configuration command. The service fails closed

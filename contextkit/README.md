@@ -259,8 +259,11 @@ agent, err := agentcore.NewAgent(agentcore.WithContextProjector(projector), ...)
 - `Next` receives the compressed messages; putting a memory projector there
   keeps recalled memory out of the summaries.
 - `UseAgentBudget` compresses to the run's `Budget.MaxInputTokens` (the
-  compressor then needs `CountTokens`). The compiled system prompt is added
-  after projection and is not part of the budget.
+  compressor then needs `CountTokens`).
+- The budget covers the compiled system prompt: goagent passes it as the
+  request's `SystemPrompt`, the projector counts it as a leading system
+  message, and leaves it out of the projection because goagent adds it to the
+  model call. Tool schemas and whatever `Next` adds are not counted.
 - `OnCompress` receives each `Result`, for example to keep deep-mode
   `Collapses`. The result metadata reports `contextkit.dropped`,
   `contextkit.over_budget`, and `contextkit.reused_messages`.

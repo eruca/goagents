@@ -156,7 +156,8 @@ func TestProjectorFiltersCallerMemoryNamespaceFromNextAndResult(t *testing.T) {
 		Next:       next,
 	})
 	got, err := projector.Project(context.Background(), agentcore.ContextProjectionRequest{
-		Messages: []agentcore.Message{{Role: "user", Content: "question"}},
+		Messages:     []agentcore.Message{{Role: "user", Content: "question"}},
+		SystemPrompt: "compiled prompt",
 		Metadata: map[string]any{
 			"trace_id":                     "trace-kept",
 			"memory.query_tags":            []any{"zeta", "alpha"},
@@ -189,6 +190,9 @@ func TestProjectorFiltersCallerMemoryNamespaceFromNextAndResult(t *testing.T) {
 		if !reflect.DeepEqual(metadata, want) {
 			t.Fatalf("unsafe metadata envelope = %#v, want %#v", metadata, want)
 		}
+	}
+	if next.got.SystemPrompt != "compiled prompt" {
+		t.Fatalf("Next got system prompt %q", next.got.SystemPrompt)
 	}
 }
 
