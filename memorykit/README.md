@@ -85,8 +85,18 @@ query's words but answers a different question. In the v2 evaluation corpus,
 "theme". A minimum score cutoff does not fix this: on the same corpus, any
 cutoff on the share of query terms that keeps this memory out also drops at
 least four correct results, some of which match only one or two of the query's
-terms. The evaluation tests pin this case as a known injection. Separating such
-cases needs the vector channel or a Host-side reranker.
+terms. The evaluation tests pin this case as a known injection.
+
+The vector channel does not separate it either. With bge-m3 (see
+[`docs/evals/memorykit-v2-ollama-bge-m3.md`](../docs/evals/memorykit-v2-ollama-bge-m3.md)),
+the draft is more similar to the query (0.584) than several correct answers
+are to theirs, so no `MinVectorSimilarity` keeps it out without losing them.
+Telling a draft from an approved decision needs a Host-side reranker. The same
+evaluation shows what the vector channel does add: fusing all three channels
+at a 0.5 threshold recalls 22 of 22 expected memories, against 19 for exact
+plus full text, including all four paraphrase cases, with no new injection.
+Run `examples/memory-embedding-eval` to measure another model; thresholds do
+not carry over between models.
 
 On-demand recall uses request-scoped `search_memory` and `read_memory` tools.
 Their schemas contain no Scope fields. `remember_project_memory` is registered
