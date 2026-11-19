@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/eruca/goagents/evalkit"
+	"github.com/eruca/goagents/evalkit/runtrace"
 	"github.com/eruca/goagents/runkit"
 	"github.com/eruca/goagents/skillkit"
 	"github.com/eruca/goagents/workflowkit"
@@ -87,7 +87,7 @@ func TestHostEvalSuiteUsesPersistedTrajectoryAndOutcome(t *testing.T) {
 		t.Fatalf("append persisted sanitization probe: %v", err)
 	}
 
-	fingerprint := hostEvalFingerprint{
+	fingerprint := runtrace.Fingerprint{
 		GitCommit:           "test-commit",
 		Provider:            "local",
 		ModelAlias:          "local-free",
@@ -96,7 +96,7 @@ func TestHostEvalSuiteUsesPersistedTrajectoryAndOutcome(t *testing.T) {
 		VisibleToolIDs:      []string{"record_review", "artifact.read", "record_review"},
 	}
 	runner := evalkit.Runner{Harness: evalkit.HarnessFunc(func(ctx context.Context, _ evalkit.Task) (*evalkit.RunResult, error) {
-		return buildHostEvalResult(ctx, created.ID, server.workflows, server.runs, fingerprint)
+		return buildHostEvalResult(ctx, created.ID, server.workflows, server.runs, server.auditStore(), fingerprint)
 	})}
 	suite := evalkit.Suite{
 		Name: "host-persisted-trajectory",
@@ -130,68 +130,11 @@ func TestHostEvalSuiteUsesPersistedTrajectoryAndOutcome(t *testing.T) {
 }
 
 func TestBuildHostEvalResultRequiresStores(t *testing.T) {
-	if _, err := buildHostEvalResult(t.Context(), "wf-1", nil, nil, hostEvalFingerprint{}); err == nil || !strings.Contains(err.Error(), "workflow store") {
+	if _, err := buildHostEvalResult(t.Context(), "wf-1", nil, nil, nil, runtrace.Fingerprint{}); err == nil || !strings.Contains(err.Error(), "workflow store") {
 		t.Fatalf("missing workflow store error = %v", err)
 	}
-	if _, err := buildHostEvalResult(t.Context(), "wf-1", workflowkit.NewMemoryStore(), nil, hostEvalFingerprint{}); err == nil || !strings.Contains(err.Error(), "run store") {
+	if _, err := buildHostEvalResult(t.Context(), "wf-1", workflowkit.NewMemoryStore(), nil, nil, runtrace.Fingerprint{}); err == nil || !strings.Contains(err.Error(), "run store") {
 		t.Fatalf("missing run store error = %v", err)
-	}
-}
-
-func TestNormalizedAgentEventStatus(t *testing.T) {
-	tests := []struct {
-		eventType string
-		want      string
-	}{
-		{eventType: "stage.started", want: "running"},
-		{eventType: "tool.completed", want: "succeeded"},
-		{eventType: "finalized", want: "succeeded"},
-		{eventType: "output.validated", want: "succeeded"},
-		{eventType: "stage.failed", want: "failed"},
-		{eventType: "approval.denied", want: "failed"},
-		{eventType: "input.rejected", want: "failed"},
-		{eventType: "approval.pending", want: "waiting_approval"},
-		{eventType: "approval.requested", want: "waiting_approval"},
-		{eventType: "memory.loaded", want: ""},
-	}
-	for _, test := range tests {
-		t.Run(test.eventType, func(t *testing.T) {
-			if got := normalizedAgentEventStatus(test.eventType); got != test.want {
-				t.Fatalf("normalized status = %q, want %q", got, test.want)
-			}
-		})
-	}
-}
-
-func TestWorkflowEvalErrorCode(t *testing.T) {
-	if got := workflowEvalErrorCode(workflowkit.StatusFailed); got != "workflow_failed" {
-		t.Fatalf("failed error code = %q", got)
-	}
-	if got := workflowEvalErrorCode(workflowkit.StatusCancelled); got != "workflow_cancelled" {
-		t.Fatalf("cancelled error code = %q", got)
-	}
-	if got := workflowEvalErrorCode(workflowkit.StatusSucceeded); got != "" {
-		t.Fatalf("succeeded error code = %q, want empty", got)
-	}
-}
-
-func TestSortTraceStepsOrdersTimedBeforeUntimedAndPreservesTies(t *testing.T) {
-	base := time.Date(2026, 7, 14, 2, 0, 0, 0, time.UTC)
-	steps := []evalkit.TraceStep{
-		{Name: "untimed-first"},
-		{Name: "late", StartedAt: base.Add(time.Minute)},
-		{Name: "same-first", StartedAt: base},
-		{Name: "untimed-second"},
-		{Name: "same-second", StartedAt: base},
-	}
-
-	sortTraceSteps(steps)
-	names := make([]string, 0, len(steps))
-	for _, step := range steps {
-		names = append(names, step.Name)
-	}
-	if got := strings.Join(names, ","); got != "same-first,same-second,late,untimed-first,untimed-second" {
-		t.Fatalf("sorted steps = %q", got)
 	}
 }
 
@@ -281,11 +224,15 @@ func agentEventSequencesOrdered(trace evalkit.Trace) bool {
 
 func traceMetadataIsAllowlisted(trace evalkit.Trace) bool {
 	workflowKeys := map[string]bool{"attempt": true, "output_ref": true, "agent_run_id": true, "audit_ref": true, "approval_ref": true}
-	agentKeys := map[string]bool{"sequence": true, "stage": true, "iteration": true, "tool": true, "ref": true}
+	agentKeys := map[string]bool{"sequence": true, "stage": true, "iteration": true, "index": true, "ref": true}
+	modelKeys := map[string]bool{"route_id": true, "attempt": true, "provider": true, "account_alias": true, "error_class": true, "error_code": true, "business_outcome": true, "latency_ms": true, "input_tokens": true, "output_tokens": true}
 	for _, step := range trace.Steps {
 		allowed := agentKeys
-		if step.Type == "workflow_step" {
+		switch step.Type {
+		case evalkit.StepWorkflow:
 			allowed = workflowKeys
+		case evalkit.StepModelCall:
+			allowed = modelKeys
 		}
 		for key := range step.Metadata {
 			if !allowed[key] {

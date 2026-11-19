@@ -36,6 +36,10 @@ Adapter packages that connect a kit to `goagent`:
 - `mcpkit/officialsdk` may import `mcpkit`, `goagent`, and the official MCP Go
   SDK.
 
+`evalkit/runtrace` may import `evalkit`, `runkit` (and so `goagent`),
+`workflowkit`, and `llmkit`: it builds evaluation traces from their stored
+records.
+
 Example programs live in `examples/` directories, at the root or inside a kit,
 and may import anything. They double as smoke tests and are not runtime
 dependencies.
