@@ -20,7 +20,6 @@ import (
 	goagentadapter "github.com/eruca/goagents/llmkit/adapters/goagent"
 	"github.com/eruca/goagents/runkit"
 	"github.com/eruca/goagents/runkit/goagentapproval"
-	runsqlite "github.com/eruca/goagents/runkit/sqlitestore"
 	"github.com/eruca/goagents/skillkit"
 	"github.com/eruca/goagents/workflowkit"
 )
@@ -39,6 +38,15 @@ type Config struct {
 	// Keychain item. They identify key material but never contain it.
 	AgentApprovalKeychainService string
 	AgentApprovalKeyID           string
+	// ArtifactPostgresDSN stores artifacts in PostgreSQL instead of files
+	// under ArtifactRoot.
+	ArtifactPostgresDSN string
+	// AgentRunPostgresDSN stores agent runs, their events, and approval
+	// checkpoints in PostgreSQL instead of the SQLite file at AgentRunDBPath.
+	AgentRunPostgresDSN string
+	// LLMKitAuditPostgresDSN records LLM routes and outcomes in PostgreSQL
+	// instead of JSONL files under LLMKitHome.
+	LLMKitAuditPostgresDSN string
 	// AgentApprovalKeyring is a static keyring ("id:base64,..." of 32-byte
 	// keys) used instead of Keychain. AgentApprovalKeyID names its active key.
 	AgentApprovalKeyring string
@@ -68,14 +76,20 @@ type Server struct {
 	workflows workflowkit.Store
 	// creatingWorkflows holds the ids of workflows this process is creating,
 	// so two concurrent requests for one id cannot both write its input.
-	creatingWorkflows       sync.Map
-	workflowCloser          io.Closer
-	queries                 workflowkit.WorkflowQueryStore
-	queue                   workflowkit.QueueLeaseStore
-	executor                *workflowkit.Executor
-	executions              *executionRegistry
-	health                  llmkit.HealthStore
-	healthCloser            io.Closer
+	creatingWorkflows sync.Map
+	workflowCloser    io.Closer
+	queries           workflowkit.WorkflowQueryStore
+	queue             workflowkit.QueueLeaseStore
+	executor          *workflowkit.Executor
+	executions        *executionRegistry
+	health            llmkit.HealthStore
+	healthCloser      io.Closer
+	// backendClosers close the shared artifact and audit stores, then the
+	// PostgreSQL pools every shared store uses.
+	backendClosers []io.Closer
+	// audit is nil in tests that build a Server directly; auditStore then
+	// falls back to the JSONL files under llmHome.
+	audit                   auditBackend
 	llmHome                 string
 	models                  []llmkit.Candidate
 	providers               map[string]goagentadapter.ProviderClient
@@ -99,6 +113,8 @@ type Server struct {
 	runCloseErr             error
 	healthClosed            bool
 	healthCloseErr          error
+	backendsClosed          bool
+	backendCloseErr         error
 }
 
 type RunMode string
@@ -167,32 +183,59 @@ func NewServer(config Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	artifacts, err := artifactkit.NewFileStore(resolved.ArtifactRoot)
-	if err != nil {
-		return nil, err
-	}
-	runs, err := runsqlite.Open(resolved.AgentRunDBPath)
-	if err != nil {
-		return nil, err
-	}
-	workflows, err := openWorkflowStore(resolved)
-	if err != nil {
-		_ = runs.Close()
-		return nil, err
-	}
-	health, healthCloser, err := openHealthStore(resolved)
-	if err != nil {
-		_ = workflows.Close()
-		_ = runs.Close()
-		return nil, err
-	}
+	// opened collects every backend opened so far, so a later failure closes
+	// them all and Close closes the shared ones.
+	// Stores close before the pools they share: opened closes in reverse.
+	pools := &pgPools{}
+	opened := []io.Closer{pools}
 	closeStores := func() {
-		if healthCloser != nil {
-			_ = healthCloser.Close()
+		for i := len(opened) - 1; i >= 0; i-- {
+			_ = opened[i].Close()
 		}
-		_ = workflows.Close()
-		_ = runs.Close()
 	}
+	artifacts, artifactCloser, err := openArtifactStore(resolved, pools)
+	if err != nil {
+		return nil, err
+	}
+	if artifactCloser != nil {
+		opened = append(opened, artifactCloser)
+	}
+	audit, auditCloser, err := openAuditBackend(resolved, pools)
+	if err != nil {
+		closeStores()
+		return nil, err
+	}
+	if auditCloser != nil {
+		opened = append(opened, auditCloser)
+	}
+	runs, err := openRunStore(resolved, pools)
+	if err != nil {
+		closeStores()
+		return nil, err
+	}
+	opened = append(opened, runs)
+	workflows, err := openWorkflowStore(resolved, pools)
+	if err != nil {
+		closeStores()
+		return nil, err
+	}
+	opened = append(opened, workflows)
+	health, healthCloser, err := openHealthStore(resolved, pools)
+	if err != nil {
+		closeStores()
+		return nil, err
+	}
+	if healthCloser != nil {
+		opened = append(opened, healthCloser)
+	}
+	var backendClosers []io.Closer
+	for _, closer := range []io.Closer{artifactCloser, auditCloser} {
+		if closer != nil {
+			backendClosers = append(backendClosers, closer)
+		}
+	}
+	// Close closes the stores first and the shared pools last.
+	backendClosers = append(backendClosers, pools)
 	var memoryConfig *memoryRuntime
 	if config.Memory != nil {
 		memoryConfig, err = newMemoryRuntime(config.Memory, runs, artifacts)
@@ -202,14 +245,13 @@ func NewServer(config Config) (*Server, error) {
 		}
 	}
 	runner := routingAgentRunner{
-		llmkitHome: resolved.LLMKitHome,
-		runs:       runs,
-		artifacts:  artifacts,
-		health:     health,
-		candidates: models,
-		statsProvider: func(ctx context.Context) (*llmkit.ModelStats, error) {
-			return llmkit.RefreshModelStats(resolved.LLMKitHome)
-		},
+		llmkitHome:       resolved.LLMKitHome,
+		audit:            audit,
+		runs:             runs,
+		artifacts:        artifacts,
+		health:           health,
+		candidates:       models,
+		statsProvider:    audit.ModelStats,
 		providers:        providers,
 		skillCatalog:     config.SkillCatalog,
 		skillGateContext: config.SkillGateContext,
@@ -231,6 +273,8 @@ func NewServer(config Config) (*Server, error) {
 		executions:              newExecutionRegistry(),
 		health:                  health,
 		healthCloser:            healthCloser,
+		backendClosers:          backendClosers,
+		audit:                   audit,
 		llmHome:                 resolved.LLMKitHome,
 		models:                  models,
 		providers:               providers,
@@ -292,10 +336,16 @@ func (s *Server) Close(ctx context.Context) error {
 		s.healthClosed = true
 		s.healthCloseErr = s.healthCloser.Close()
 	}
-	if err := ctx.Err(); err != nil {
-		return errors.Join(s.workflowCloseErr, s.runCloseErr, s.healthCloseErr, err)
+	if !s.backendsClosed {
+		s.backendsClosed = true
+		for _, closer := range s.backendClosers {
+			s.backendCloseErr = errors.Join(s.backendCloseErr, closer.Close())
+		}
 	}
-	return errors.Join(s.workflowCloseErr, s.runCloseErr, s.healthCloseErr)
+	if err := ctx.Err(); err != nil {
+		return errors.Join(s.workflowCloseErr, s.runCloseErr, s.healthCloseErr, s.backendCloseErr, err)
+	}
+	return errors.Join(s.workflowCloseErr, s.runCloseErr, s.healthCloseErr, s.backendCloseErr)
 }
 
 func resolveRuntimeConfig(config Config) (Config, error) {
@@ -471,4 +521,11 @@ func writeHostDraining(w http.ResponseWriter) {
 			Message: "host is draining",
 		},
 	})
+}
+
+func (s *Server) auditStore() auditBackend {
+	if s.audit != nil {
+		return s.audit
+	}
+	return fileAudit{home: s.llmHome}
 }

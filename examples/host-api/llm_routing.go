@@ -101,7 +101,7 @@ func (s *Server) handleGetWorkflowLLMRoutes(w http.ResponseWriter, r *http.Reque
 	if _, ok := s.authorizeStoredWorkflow(w, r, run, memoryRead); !ok {
 		return
 	}
-	records, err := llmkit.ReadRouteAudits(s.llmHome, llmkit.AuditFilter{TaskID: id})
+	records, err := s.auditStore().ReadRouteAudits(r.Context(), llmkit.AuditFilter{TaskID: id})
 	if err != nil {
 		writeInternalError(w, "llm_audit_error", err)
 		return
@@ -117,7 +117,7 @@ func (s *Server) handleGetWorkflowLLMRoutes(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
-	stats, err := llmkit.RefreshModelStats(s.llmHome)
+	stats, err := s.auditStore().ModelStats(r.Context())
 	if err != nil {
 		writeInternalError(w, "llm_audit_error", err)
 		return
@@ -140,7 +140,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) recordBusinessOutcome(ctx context.Context, workflowID string) error {
-	records, err := llmkit.ReadRouteAudits(s.llmHome, llmkit.AuditFilter{TaskID: workflowID})
+	records, err := s.auditStore().ReadRouteAudits(ctx, llmkit.AuditFilter{TaskID: workflowID})
 	if err != nil {
 		return err
 	}
@@ -166,7 +166,7 @@ func (s *Server) recordBusinessOutcome(ctx context.Context, workflowID string) e
 		outcome.SuccessSignal = llmkit.SuccessSignalHumanAccepted
 		outcome.FailureReason = ""
 	}
-	recorder, err := llmkit.NewJSONLRecorder(s.llmHome)
+	recorder, err := s.auditStore().Recorder()
 	if err != nil {
 		return err
 	}

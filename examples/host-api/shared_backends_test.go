@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -160,51 +161,50 @@ func hostPostgresDSN(t *testing.T) string {
 	return parsed.String()
 }
 
-// TestHostAPISharedBackendsAcrossProcesses runs two Hosts on one PostgreSQL
-// workflow and health store with one approval keyring. A workflow queued
-// through the first Host is executed by the second Host's worker. Both use
-// the same runtime home, because artifacts and agent runs are still local.
+// TestHostAPISharedBackendsAcrossProcesses runs two Hosts with separate
+// runtime homes on one PostgreSQL database for every backend and one approval
+// keyring. A workflow queued through the first Host runs on the second Host's
+// worker, and both Hosts then read the same workflow, output artifact, and
+// LLM route audit.
 func TestHostAPISharedBackendsAcrossProcesses(t *testing.T) {
 	dsn := hostPostgresDSN(t)
-	runtimeHome := t.TempDir()
-	config := Config{
-		RuntimeHome:             runtimeHome,
-		WorkflowPostgresDSN:     dsn,
-		LLMKitHealthPostgresDSN: dsn,
-		AgentApprovalKeyring:    testKeyring(t, "shared"),
-		AgentApprovalKeyID:      "shared",
+	keyring := testKeyring(t, "shared")
+	config := func() Config {
+		return Config{
+			RuntimeHome:             t.TempDir(),
+			WorkflowPostgresDSN:     dsn,
+			LLMKitHealthPostgresDSN: dsn,
+			ArtifactPostgresDSN:     dsn,
+			AgentRunPostgresDSN:     dsn,
+			LLMKitAuditPostgresDSN:  dsn,
+			AgentApprovalKeyring:    keyring,
+			AgentApprovalKeyID:      "shared",
+		}
 	}
-	first, err := NewServer(config)
+	first, err := NewServer(config())
 	if err != nil {
 		t.Fatalf("first NewServer: %v", err)
 	}
 	t.Cleanup(func() { _ = first.Close(context.Background()) })
+	second, err := NewServer(config())
+	if err != nil {
+		t.Fatalf("second NewServer: %v", err)
+	}
 	if _, ok := first.workflows.(*workflowpg.Store); !ok {
 		t.Fatalf("workflow store = %T, want PostgreSQL", first.workflows)
 	}
 	if _, ok := first.health.(*pghealth.Store); !ok {
 		t.Fatalf("health store = %T, want PostgreSQL", first.health)
 	}
-
-	inputRef := "artifact:wf-shared-pg:input"
-	if err := putTextArtifact(context.Background(), first.artifacts, inputRef, "Review shared backends."); err != nil {
-		t.Fatalf("put input artifact: %v", err)
-	}
-	if err := first.workflows.Save(context.Background(), workflowkit.WorkflowRun{
-		ID: "wf-shared-pg", Status: workflowkit.StatusPending, InputRef: inputRef,
-		Metadata: map[string]any{"input_ref": inputRef},
-	}); err != nil {
-		t.Fatalf("Save pending workflow: %v", err)
-	}
-	// The first Host's SQLite run store holds the runtime home's file lock;
-	// close it so the second Host can open the same local files.
-	if err := first.Close(context.Background()); err != nil {
-		t.Fatalf("close first Host: %v", err)
+	if _, ok := first.audit.(pgAudit); !ok {
+		t.Fatalf("audit = %T, want PostgreSQL", first.audit)
 	}
 
-	second, err := NewServer(config)
-	if err != nil {
-		t.Fatalf("second NewServer: %v", err)
+	created := doJSON[workflowResponse](t, first.Handler(), http.MethodPost, "/workflows", map[string]any{
+		"id": "wf-shared-pg", "input": "Review shared backends.", "run_mode": "queued",
+	})
+	if created.Status != string(workflowkit.StatusPending) {
+		t.Fatalf("queued create = %+v", created)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	stopWorkerOnCleanup(t, second, cancel)
@@ -217,5 +217,20 @@ func TestHostAPISharedBackendsAcrossProcesses(t *testing.T) {
 	stored := waitForWorkflowLeaseCleared(t, second.workflows, "wf-shared-pg")
 	if stored.Status != workflowkit.StatusWaitingApproval {
 		t.Fatalf("stored workflow = %+v", stored)
+	}
+	// The first Host never ran the workflow, yet reads everything it produced.
+	seen := doJSON[workflowResponse](t, first.Handler(), http.MethodGet, "/workflows/wf-shared-pg", nil)
+	if seen.Status != loaded.Status || seen.OutputRef != loaded.OutputRef || seen.AgentRunID != loaded.AgentRunID {
+		t.Fatalf("first Host sees %+v, second Host %+v", seen, loaded)
+	}
+	if _, err := first.artifacts.Get(context.Background(), loaded.OutputRef); err != nil {
+		t.Fatalf("first Host reads output artifact: %v", err)
+	}
+	if _, err := first.runs.Get(context.Background(), loaded.AgentRunID); err != nil {
+		t.Fatalf("first Host reads agent run: %v", err)
+	}
+	routes := doJSON[llmRoutesResponse](t, first.Handler(), http.MethodGet, "/workflows/wf-shared-pg/llm-routes", nil)
+	if len(routes.Routes) == 0 {
+		t.Fatal("first Host reads no LLM routes for a workflow the second Host ran")
 	}
 }

@@ -472,32 +472,50 @@ keyring or an active key ID it does not contain. Every process that must read
 another's checkpoints needs the same keyring; Keychain creates a separate key
 on each machine.
 
-## Shared backends
+## Shared backends and multiple replicas
 
-Three optional switches move one backend each to storage several processes can
-share. Without them the Host behaves exactly as before.
+Each optional switch moves one backend to PostgreSQL. Without them the Host
+behaves exactly as before. Switches given the same DSN share one connection
+pool.
 
 | Variable | Effect |
 |---|---|
-| `HOST_API_WORKFLOW_POSTGRES_DSN` | workflows, queue leases, and recovery in PostgreSQL (`workflowkit/pgstore`) instead of `workflow.db` |
-| `HOST_API_LLMKIT_HEALTH_POSTGRES_DSN` | provider health and concurrency slots in PostgreSQL (`llmkit/pghealth`) instead of process memory |
+| `HOST_API_WORKFLOW_POSTGRES_DSN` | workflows, queue leases, and recovery (`workflowkit/pgstore`) instead of `workflow.db` |
+| `HOST_API_AGENT_RUN_POSTGRES_DSN` | agent runs, run events, and approval checkpoints (`runkit/pgstore`) instead of `agent-runs.db` |
+| `HOST_API_ARTIFACT_POSTGRES_DSN` | artifacts (`artifactkit/pgstore`) instead of files under the runtime home |
+| `HOST_API_LLMKIT_AUDIT_POSTGRES_DSN` | LLM route and outcome audit and model statistics (`llmkit/pgaudit`) instead of JSONL files under `LLMKIT_HOME` |
+| `HOST_API_LLMKIT_HEALTH_POSTGRES_DSN` | provider health and concurrency slots (`llmkit/pghealth`) instead of process memory |
 | `HOST_API_AGENT_APPROVAL_KEYRING` | static approval keyring instead of Keychain (see above) |
 
-These switches do **not** make the Host safe to run as several replicas behind
-a load balancer. These remain local to one process or machine:
+With **all six** set, several Host processes, each with its own runtime home,
+can run behind one load balancer as one deployment:
 
-- artifacts (`artifactkit.FileStore` under the runtime home);
-- agent runs and approval checkpoints (`agent-runs.db`; `runkit/pgstore`
-  exists but is not wired here);
-- llmkit route audit and model statistics (JSONL files under `LLMKIT_HOME`),
-  which `GET /workflows/{id}/llm-routes` reads;
-- the in-process guard that keeps two requests from creating one workflow id;
-- the memory embedding worker, which every process would run on the same rows.
+- a queued workflow runs on exactly one process, whichever claims it, and every
+  process reads the same workflow, artifacts, agent run, and LLM routes;
+- two processes creating one workflow id at once: one gets `202`, the other
+  `409`, and the workflow keeps the winner's input (input refs carry a random
+  suffix);
+- a process that dies mid-step leaves a lease that expires; another process
+  then fails that workflow (`queued_lease_expired`) and never replays the step.
 
-Replica clocks must stay in sync (NTP) to well within the queue lease duration
-and the pghealth lease TTL. `TestHostAPISharedBackendsAcrossProcesses` runs
-two Hosts against one PostgreSQL database when `HOST_API_POSTGRES_TEST_DSN` is
-set (`HOST_API_REQUIRE_POSTGRES=1` turns a missing DSN into a failure).
+Requirements and remaining per-process behavior:
+
+- every process needs the same `LLMKIT_HOME/config.yaml`, skill roots, keyring,
+  and OIDC settings;
+- replica clocks must stay in sync (NTP) to well within the queue lease
+  duration and the pghealth lease TTL;
+- waking the queued worker on create only reaches the receiving process;
+  others pick the workflow up on their next poll;
+- `/workers/queued` and `/workers/memory` report the receiving process only;
+- every process runs the approval-expiry janitor; the sweep is idempotent;
+- a host that sets `Config.Memory` with `memorykit/pgstore` should pass
+  `store.EmbeddingRunGate()` as the embedding worker's `RunGate`, so only one
+  process embeds at a time.
+
+`TestHostAPISharedBackendsAcrossProcesses` (two in-process Hosts) and
+`TestHostAPIMultiReplicaProcesses` (two real Host processes, including a
+`SIGKILL` mid-step) run when `HOST_API_POSTGRES_TEST_DSN` is set;
+`HOST_API_REQUIRE_POSTGRES=1` turns a missing DSN into a failure.
 
 On an interactive macOS login session, run the optional real-process smoke to
 exercise the actual binary, local OIDC discovery/JWKS verification, SQLite
@@ -530,7 +548,7 @@ workflow waiting so the next sweep retries reconciliation.
 `GET /llmkit/models` returns:
 
 - `models`: current routable model aliases and coarse capability metadata.
-- `health`: in-memory provider health snapshot.
+- `health`: provider health snapshot, from process memory or, with `HOST_API_LLMKIT_HEALTH_POSTGRES_DSN`, shared through PostgreSQL.
 - `stats`: generated model statistics grouped by task type, account, model,
   and provider.
 

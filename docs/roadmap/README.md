@@ -1,8 +1,8 @@
 # GoAgents Roadmap
 
-- 更新日期：2026-11-18
-- 对应代码：`main` @ `8eece4c`（v0.6.0 之后）
-- 状态：维护者已选定先做多副本部署；其 kit 层已完成，host-api 部分见"下一阶段"。
+- 更新日期：2026-11-19
+- 对应代码：`main` @ `1314599` 加本次多副本 PR（v0.6.0 之后）
+- 状态：多副本部署已完成；下一项方向待维护者选定（见"下一阶段"）。
 
 本文以当前 `main` 为准。2026-07 的 memorykit/v0.1.0 产品基线、roadmap 和
 ADR-0001 是在分 kit 发版、旧 CJK 检索方案下写的，已经不适用，原文保留在分支
@@ -30,8 +30,13 @@ ADR-0001 是在分 kit 发版、旧 CJK 检索方案下写的，已经不适用�
 - v0.6.0 之后从旧分支移植并合入：llmkit `CascadeExecutor`（#5，按验收测试逐级
   升级模型，门槛可配置）、`examples/memory-ingest`（#6）、memory worker
   可观测性与 `GET /workers/memory`（#10）。
-- `examples/host-api` 是单机 MVP：有进程级黑盒验收和 3×50 工作流的稳定性测试，
-  worker 一次处理一个任务，不是生产网关。
+- 多副本部署已完成：五个后端都有 PostgreSQL 实现（`workflowkit/pgstore`
+  #13、`llmkit/pghealth` #14、`artifactkit/pgstore` #17、`runkit/pgstore`
+  run 存储 #18、`llmkit/pgaudit` #20），加上静态审批 keyring（#12）、
+  embedding 互斥执行（#19）和带随机后缀的 input_ref（#16）。host-api 打开
+  六个开关后可以多进程部署，有两进程黑盒测试（含执行中 SIGKILL）覆盖。
+- `examples/host-api` 仍是示例而不是生产网关：每个进程的 worker 一次处理一个
+  任务，没有限流，也没有独立的可执行程序和镜像。
 
 | Kit | 成熟度 | 已知缺口 |
 |---|---|---|
@@ -41,17 +46,14 @@ ADR-0001 是在分 kit 发版、旧 CJK 检索方案下写的，已经不适用�
 | llmkit | 高 | 没有项目/账户级预算扣减 |
 | runkit | 高 | — |
 | contextkit / ocrs / skillkit / mcpkit | 中 | — |
-| artifactkit / evalkit / hostkit | 基础 | artifactkit 只有 FileStore |
+| artifactkit / evalkit / hostkit | 基础 | artifactkit 没有对象存储（S3）实现 |
 
 ## 下一阶段
 
-1. **多副本部署**（进行中）。kit 层已完成：`workflowkit/pgstore`（#13）、
-   `llmkit/healthtest` + `llmkit/pghealth`（#14）、`runkit/approvalcrypto`
-   静态 keyring（#12）；host-api 可通过配置开关选用它们（#15）。
-   host-api 要真正多副本运行，还需要：artifact 共享存储（artifactkit 对象存储
-   实现）、agent run 接入已有的 `runkit/pgstore`、llmkit 审计与统计改为共享存储、
-   跨副本的工作流创建去重、embedding worker 改为领取式，以及两个 Host 进程同时
-   运行的黑盒测试。副本之间需要时钟同步。这是第 2 项的前提。
+1. ~~**多副本部署**~~：已完成（见"当前状态"）。剩余的小问题记在 host-api
+   README 的 "Shared backends and multiple replicas" 一节：创建时的 worker
+   唤醒只在本进程、`/workers/*` 只报告本进程、审计统计每次全量重算、审计表
+   只增不减。
 2. **生产化 host runtime**：原 Week 18 计划中的 wire/client/server、UDS/mTLS、
    Control/Tool Bridge、Host 可执行程序和 OCI 镜像。目前完全没有开始。
 3. **补强基础 kit**：artifactkit 对象存储、evalkit 和 production tracing /

@@ -25,14 +25,13 @@ import (
 
 func (s *Server) agentStep() workflowkit.Step {
 	runner := routingAgentRunner{
-		llmkitHome: s.llmHome,
-		runs:       s.runs,
-		artifacts:  s.artifacts,
-		health:     s.health,
-		candidates: s.models,
-		statsProvider: func(ctx context.Context) (*llmkit.ModelStats, error) {
-			return llmkit.RefreshModelStats(s.llmHome)
-		},
+		llmkitHome:       s.llmHome,
+		audit:            s.auditStore(),
+		runs:             s.runs,
+		artifacts:        s.artifacts,
+		health:           s.health,
+		candidates:       s.models,
+		statsProvider:    s.auditStore().ModelStats,
 		providers:        s.providers,
 		skillCatalog:     s.skillCatalog,
 		skillGateContext: s.skillGateContext,
@@ -212,7 +211,10 @@ func completeFailedAgentRun(ctx context.Context, store runkit.Store, result *age
 }
 
 type routingAgentRunner struct {
-	llmkitHome       string
+	llmkitHome string
+	// audit is nil in tests that build a runner directly; the runner then
+	// records to the JSONL files under llmkitHome.
+	audit            auditBackend
 	runs             runkit.Store
 	artifacts        artifactkit.Store
 	health           llmkit.HealthStore
@@ -270,7 +272,11 @@ func (r routingAgentRunner) ResumeDetailed(ctx context.Context, checkpoint agent
 }
 
 func (r routingAgentRunner) newAgent(workflowID, agentRunID string, completedLLMCalls int, profile llmkit.TaskProfile, activation *skillkit.Activation) (*agentcore.Agent, error) {
-	recorder, err := llmkit.NewJSONLRecorder(r.llmkitHome)
+	audit := r.audit
+	if audit == nil {
+		audit = fileAudit{home: r.llmkitHome}
+	}
+	recorder, err := audit.Recorder()
 	if err != nil {
 		return nil, err
 	}
