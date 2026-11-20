@@ -39,16 +39,19 @@ func (n *recordingContextNext) Project(_ context.Context, req agentcore.ContextP
 
 func TestContextProjectorCompressesBeforeTheMemoryProjector(t *testing.T) {
 	next := &recordingContextNext{}
-	off, err := newContextProjector(Config{}, next)
-	if err != nil || off != next {
+	off, offTools, err := newContextCompression(Config{}, next, nil)
+	if err != nil || off != next || offTools != nil {
 		t.Fatalf("compression off should return the next projector unchanged: %v", err)
 	}
-	projector, err := newContextProjector(Config{ContextMaxChars: 300, ContextMaxToolChars: 50}, next)
+	projector, tools, err := newContextCompression(Config{ContextMaxChars: 300, ContextMaxToolChars: 50}, next, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := projector.(*contextagentadapter.Projector); !ok {
 		t.Fatalf("projector = %T", projector)
+	}
+	if _, ok := tools.(*contextagentadapter.ContextTools); !ok {
+		t.Fatalf("tools = %T", tools)
 	}
 	_, err = projector.Project(context.Background(), agentcore.ContextProjectionRequest{
 		Messages: []agentcore.Message{
@@ -86,6 +89,9 @@ func TestHostRunsWorkflowsWithContextCompression(t *testing.T) {
 	if _, ok := runner.contextProjector.(*contextagentadapter.Projector); !ok {
 		t.Fatalf("runner projector = %T", runner.contextProjector)
 	}
+	if _, ok := runner.contextTools.(*contextagentadapter.ContextTools); !ok {
+		t.Fatalf("runner tools = %T", runner.contextTools)
+	}
 	provider := &skillEvalProvider{}
 	server.providers["local-free"] = provider
 	created := doJSON[workflowResponse](t, server.Handler(), http.MethodPost, "/workflows", map[string]string{
@@ -93,5 +99,17 @@ func TestHostRunsWorkflowsWithContextCompression(t *testing.T) {
 	})
 	if created.Status != string(workflowkit.StatusWaitingApproval) || len(provider.requests) != 1 {
 		t.Fatalf("workflow = %+v after %d model calls", created, len(provider.requests))
+	}
+	// The local test model takes no tools, so check the provider itself.
+	provided, err := runner.contextTools.Tools(context.Background(), agentcore.RunRequest{Metadata: map[string]any{"workflow_id": "wf-context"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	offered := map[string]bool{}
+	for _, tool := range provided {
+		offered[tool.Spec().Name] = true
+	}
+	if !offered[contextagentadapter.ContextReadTool] || !offered[contextagentadapter.ContextSearchTool] {
+		t.Fatalf("tools provided = %v", offered)
 	}
 }

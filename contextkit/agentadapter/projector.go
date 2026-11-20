@@ -19,6 +19,7 @@ import (
 	"sync"
 
 	"github.com/eruca/goagents/contextkit"
+	"github.com/eruca/goagents/contextkit/window"
 	"github.com/eruca/goagents/goagent/agentcore"
 	"github.com/eruca/goagents/goagent/ports"
 )
@@ -53,6 +54,12 @@ type Config struct {
 	OnCompress func(context.Context, *contextkit.Result)
 	// CacheSize bounds the remembered compressions; zero means 32.
 	CacheSize int
+	// Scope, when set, names the conversation a request belongs to from its
+	// run metadata, for example a session or workflow ID. Compression then
+	// runs with that archive scope (contextkit.WithArchiveScope), so an
+	// Archive set as the compressor's Offload keeps each conversation's
+	// removed content apart. Use the same function for ContextTools.
+	Scope func(metadata map[string]any) string
 }
 
 // Projector is an agentcore.ContextProjector backed by a contextkit
@@ -91,7 +98,12 @@ func (p *Projector) Project(ctx context.Context, req agentcore.ContextProjection
 		budget.MaxTokens = req.Budget.MaxInputTokens
 	}
 	messages := ToContextKit(req.Messages)
-	prefixes := prefixHashes(budget, req.SystemPrompt, messages)
+	scope := ""
+	if p.cfg.Scope != nil {
+		scope = p.cfg.Scope(req.Metadata)
+		ctx = contextkit.WithArchiveScope(ctx, scope)
+	}
+	prefixes := prefixHashes(budget, scope+"\x00"+req.SystemPrompt, messages)
 
 	input, reused := messages, 0
 	if cached, length := p.lookup(prefixes); length > 0 {
@@ -252,6 +264,9 @@ func ToContextKit(messages []agentcore.Message) []contextkit.Message {
 		}
 		if converted.Role == contextkit.RoleTool {
 			converted.ToolName = toolNames[msg.ToolCallID]
+			if converted.ToolName == ContextReadTool || converted.ToolName == ContextSearchTool {
+				converted.Metadata = map[string]any{window.ReadBackKey: true}
+			}
 		}
 		for _, call := range msg.ToolCalls {
 			converted.ToolCalls = append(converted.ToolCalls, contextkit.ToolCall{

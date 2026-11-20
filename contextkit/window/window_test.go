@@ -55,8 +55,8 @@ func TestStandardCompressionKeepsNewestTurnsThatFitBudget(t *testing.T) {
 	if summary := got.Messages[1]; summary.Role != contextkit.RoleSystem || summary.Metadata["contextkit.kind"] != "window_summary" {
 		t.Fatalf("summary message = %#v, want system window summary", summary)
 	}
-	if !strings.Contains(got.Summary, "2 messages omitted") || !strings.Contains(got.Summary, "u1, a1") {
-		t.Fatalf("summary = %q, want count and dropped ids", got.Summary)
+	if !strings.Contains(got.Summary, "2 messages omitted") {
+		t.Fatalf("summary = %q, want the count", got.Summary)
 	}
 	if len(got.Collapses) != 0 || got.AutoCompact != nil {
 		t.Fatalf("standard mode emitted collapse %#v / compact %#v", got.Collapses, got.AutoCompact)
@@ -614,22 +614,71 @@ func TestSummariesStoredWithoutMetadataDoNotAccumulate(t *testing.T) {
 	}
 }
 
-func TestPlaceholderListsAtMostFiveDroppedIDs(t *testing.T) {
+func TestCatalogListsDroppedStepsWithRefs(t *testing.T) {
 	t.Parallel()
 
-	var messages []contextkit.Message
-	for i := 0; i < 20; i++ {
-		messages = append(messages, contextkit.Message{ID: "m" + string(rune('a'+i)), Role: contextkit.RoleUser, Content: strings.Repeat("x", 50)})
-	}
-	got, err := New(Config{Budget: contextkit.Budget{MaxChars: 200}}).Compress(context.Background(), contextkit.Request{Messages: messages})
+	offload := &recordingOffload{}
+	c := New(Config{Budget: contextkit.Budget{MaxChars: 30000}, Offload: offload, KeepRecentToolResults: -1, CatalogEntries: 4})
+	run := agentRun(20, 2000)
+	run[1].ToolCalls[0].Arguments = `{"path": "docs/a.md"}`
+	got, err := c.Compress(context.Background(), contextkit.Request{Messages: run})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasSuffix(got.Summary, "latest ids: mn, mo, mp, mq, mr") {
-		t.Fatalf("summary = %q", got.Summary)
+	if got.Dropped == 0 {
+		t.Fatal("nothing dropped")
+	}
+	lines := strings.Split(got.Summary, "\n")
+	if !strings.HasPrefix(lines[1], catalogHeader+"; read a ref") || !strings.HasPrefix(lines[2], "- (") {
+		t.Fatalf("catalog = %q", got.Summary)
+	}
+	entries := lines[3:]
+	if len(entries) != 4 {
+		t.Fatalf("entries = %q, want the newest 4", entries)
+	}
+	for _, entry := range entries {
+		ref := entry[strings.LastIndex(entry, "ref=")+4:]
+		if !strings.HasPrefix(entry, "- read") || !strings.Contains(entry, "→ 2000 chars") || offload.stored[ref] == "" {
+			t.Fatalf("entry %q has no readable ref", entry)
+		}
+	}
+
+	// Feeding the projection back carries the listed entries and the count
+	// of unlisted ones into the next summary.
+	firstUnlisted := unlistedCount(t, got.Summary)
+	next := append(append([]contextkit.Message(nil), got.Messages...), agentRun(12, 2000)[1:]...)
+	for index := len(got.Messages); index < len(next); index++ {
+		next[index].ID += "-next"
+		for call := range next[index].ToolCalls {
+			next[index].ToolCalls[call].ID += "-next"
+		}
+		if next[index].ToolCallID != "" {
+			next[index].ToolCallID += "-next"
+		}
+	}
+	second, err := c.Compress(context.Background(), contextkit.Request{Messages: next})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := unlistedCount(t, second.Summary)+4, firstUnlisted+4+second.Dropped/2; got != want {
+		t.Fatalf("catalog accounts for %d entries, want %d:\n%s", got, want, second.Summary)
+	}
+
+	// The catalog takes at most a tenth of a small budget.
+	small, err := New(Config{Budget: contextkit.Budget{MaxChars: 1000}}).Compress(context.Background(), contextkit.Request{Messages: run})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, catalog, _ := strings.Cut(small.Summary, "\n"); len([]rune(catalog)) > 100 || small.OverBudget {
+		t.Fatalf("catalog of %d chars over its share: %q", len([]rune(catalog)), small.Summary)
 	}
 }
 
+func unlistedCount(t *testing.T, summary string) int {
+	t.Helper()
+	_, unlisted := catalogEntries(summary)
+	return unlisted
+}
 func TestToolCallsCountAndStayWithTheirReplies(t *testing.T) {
 	t.Parallel()
 

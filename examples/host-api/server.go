@@ -265,11 +265,12 @@ func NewServer(config Config) (*Server, error) {
 		memory:           memoryConfig,
 	}
 	if config.ContextMaxChars > 0 {
-		var next agentcore.ContextProjector
+		var nextProjector agentcore.ContextProjector
+		var nextTools agentcore.ToolProvider
 		if memoryConfig != nil {
-			next = memoryConfig.Projector()
+			nextProjector, nextTools = memoryConfig.Projector(), memoryConfig.ToolProvider()
 		}
-		if runner.contextProjector, err = newContextProjector(config, next); err != nil {
+		if runner.contextProjector, runner.contextTools, err = newContextCompression(config, nextProjector, nextTools); err != nil {
 			closeStores()
 			return nil, err
 		}

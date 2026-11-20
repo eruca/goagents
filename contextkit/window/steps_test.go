@@ -69,7 +69,8 @@ func TestToolResultsAreClearedOldestFirstUntilItFits(t *testing.T) {
 	messages := agentRun(6, 1000)
 	full := charCost(messages)
 	budget := full - 1000 - 1800 // five reasonings and about two results
-	got, err := New(Config{Budget: contextkit.Budget{MaxChars: budget}}).Compress(context.Background(), contextkit.Request{Messages: messages})
+	// ClearTarget 1 clears only until it fits.
+	got, err := New(Config{Budget: contextkit.Budget{MaxChars: budget}, ClearTarget: 1}).Compress(context.Background(), contextkit.Request{Messages: messages})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,6 +88,21 @@ func TestToolResultsAreClearedOldestFirstUntilItFits(t *testing.T) {
 	}
 	if strings.Join(cleared, ",") != "tc0,tc1" {
 		t.Fatalf("cleared %v, want the two oldest", cleared)
+	}
+	// By default clearing aims for 70% of the budget, so the next calls keep
+	// the same cleared results: here it clears every result it may.
+	got, err = New(Config{Budget: contextkit.Budget{MaxChars: budget}}).Compress(context.Background(), contextkit.Request{Messages: messages})
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := 0
+	for _, msg := range got.Messages {
+		if msg.Metadata[clearedKey] == true {
+			batch++
+		}
+	}
+	if batch != 3 || got.Dropped != 0 {
+		t.Fatalf("batch clearing cleared %d, dropped %d", batch, got.Dropped)
 	}
 	// The three newest results are never cleared, whatever the budget.
 	got, err = New(Config{Budget: contextkit.Budget{MaxChars: 500}}).Compress(context.Background(), contextkit.Request{Messages: messages})
@@ -108,6 +124,9 @@ func (o *recordingOffload) Offload(_ context.Context, msg contextkit.Message) (s
 		o.stored = map[string]string{}
 	}
 	ref := "offload:" + msg.ToolCallID
+	if msg.ToolCallID == "" || msg.Role != contextkit.RoleTool {
+		ref = "offload:" + string(msg.Role) + ":" + msg.ID
+	}
 	o.stored[ref] = msg.Content
 	return ref, nil
 }
@@ -119,8 +138,14 @@ func TestOffloadKeepsFullToolResults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Applied[0] != contextkit.StepToolBudget || len(offload.stored) != 5 {
-		t.Fatalf("applied %v, offloaded %d", got.Applied, len(offload.stored))
+	tools := 0
+	for ref := range offload.stored {
+		if strings.HasPrefix(ref, "offload:c") {
+			tools++
+		}
+	}
+	if got.Applied[0] != contextkit.StepToolBudget || tools != 5 {
+		t.Fatalf("applied %v, offloaded %d tool results", got.Applied, tools)
 	}
 	for _, msg := range got.Messages {
 		if msg.Role == contextkit.RoleTool && (!strings.Contains(msg.Content, "ref=offload:") || msg.Ref == "") {
