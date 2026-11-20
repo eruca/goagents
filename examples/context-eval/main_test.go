@@ -228,3 +228,36 @@ func TestDocumentsAndGrading(t *testing.T) {
 		}
 	}
 }
+
+// windowedModel rejects requests over its window like a provider whose
+// context is smaller than the compressor's budget.
+type windowedModel struct {
+	ports.LLMClient
+	window int
+}
+
+func (m windowedModel) Chat(ctx context.Context, req ports.ChatRequest) (*ports.ChatResponse, error) {
+	size := 0
+	for _, msg := range req.Messages {
+		size += len(msg.Content)
+	}
+	if size > m.window {
+		return nil, fmt.Errorf("provider: %w", ports.ErrContextTooLong)
+	}
+	return m.LLMClient.Chat(ctx, req)
+}
+
+func TestOverflowsAreRecoveredAndCounted(t *testing.T) {
+	model := windowedModel{LLMClient: &visibleModel{}, window: 6000}
+	report, err := evaluate(context.Background(), mustOptions(t, "--seeds", "1", "--pages", "6", "--page-chars", "1500", "--budget", "1000000", "--strategies", "none,pull"), model, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	none, pull := report.Strategies[0], report.Strategies[1]
+	if none.OverflowFailures != 3 || none.ContextOverflows != 0 {
+		t.Fatalf("none = %+v", none)
+	}
+	if pull.ContextOverflows == 0 || pull.OverflowFailures != 0 || pull.CorrectByKind["lookup"] != 1 {
+		t.Fatalf("pull = %+v", pull)
+	}
+}

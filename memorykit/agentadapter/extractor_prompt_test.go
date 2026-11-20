@@ -24,6 +24,10 @@ func TestExtractorPromptStatesTheFormatAndLimits(t *testing.T) {
 			t.Fatalf("prompt lacks %q:\n%s", want, system)
 		}
 	}
+	user := llm.request.Messages[1].Content
+	if !strings.HasSuffix(user, extractionReminder) || strings.Index(user, "</source_text_json>") > strings.Index(user, extractionReminder) {
+		t.Fatalf("the reminder must follow the source: %q", user)
+	}
 	if llm.request.MaxOutputTokens != defaultExtractorOutputTokens {
 		t.Fatalf("max output tokens = %d", llm.request.MaxOutputTokens)
 	}
