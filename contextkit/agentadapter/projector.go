@@ -33,6 +33,11 @@ const (
 	// notesKey marks the pinned notes message, which is projected every
 	// call from the Notes store rather than remembered with a compression.
 	notesKey = "contextkit/agentadapter.notes"
+	// overflowShrink is the share of a rejected request's size the projector
+	// aims for after the provider reports a context window overflow.
+	overflowShrink = 0.7
+	// maxOverflowLimits bounds the conversations whose learned limit is kept.
+	maxOverflowLimits = 1000
 )
 
 // Config configures a Projector.
@@ -77,6 +82,10 @@ type Projector struct {
 	mu      sync.Mutex
 	order   *list.List
 	entries map[[sha256.Size]byte]*list.Element
+	// limits holds the character limit learned from overflows per scope;
+	// limitOrder evicts the oldest when there are too many.
+	limits     map[string]int
+	limitOrder []string
 }
 
 type cacheEntry struct {
@@ -92,10 +101,15 @@ func NewProjector(cfg Config) (*Projector, error) {
 	if cfg.CacheSize <= 0 {
 		cfg.CacheSize = defaultCacheSize
 	}
-	return &Projector{cfg: cfg, order: list.New(), entries: map[[sha256.Size]byte]*list.Element{}}, nil
+	return &Projector{cfg: cfg, order: list.New(), entries: map[[sha256.Size]byte]*list.Element{}, limits: map[string]int{}}, nil
 }
 
 // Project compresses the run's messages and hands the result to Next.
+//
+// When the request reports a context overflow (agentcore.ContextOverflow),
+// the projector compresses to 70% of the rejected request's characters and
+// keeps that as a character limit for the conversation (by Scope), so later
+// calls stay under it instead of overflowing again.
 func (p *Projector) Project(ctx context.Context, req agentcore.ContextProjectionRequest) (*agentcore.ContextProjectionResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -109,6 +123,14 @@ func (p *Projector) Project(ctx context.Context, req agentcore.ContextProjection
 	if p.cfg.Scope != nil {
 		scope = p.cfg.Scope(req.Metadata)
 		ctx = contextkit.WithArchiveScope(ctx, scope)
+	}
+	if req.Overflow != nil && req.Overflow.RejectedChars > 0 {
+		p.learnLimit(scope, int(float64(req.Overflow.RejectedChars)*overflowShrink))
+	}
+	if limit := p.limit(scope); limit > 0 && (budget.MaxChars == 0 || limit < budget.MaxChars) {
+		// The request budget replaces the compressor's own, so a learned
+		// limit keeps only the agent's token budget beside it.
+		budget.MaxChars = limit
 	}
 	prefixes := prefixHashes(budget, scope+"\x00"+req.SystemPrompt, messages)
 
@@ -157,6 +179,9 @@ func (p *Projector) Project(ctx context.Context, req agentcore.ContextProjection
 	metadata["contextkit.dropped"] = result.Dropped
 	metadata["contextkit.over_budget"] = result.OverBudget
 	metadata["contextkit.reused_messages"] = reused
+	if budget.MaxChars > 0 && p.limit(scope) == budget.MaxChars {
+		metadata["contextkit.overflow_limit"] = budget.MaxChars
+	}
 	projected := FromContextKit(result.Messages)
 	if p.cfg.Next == nil {
 		return &agentcore.ContextProjectionResult{Messages: projected, Metadata: metadata}, nil
@@ -177,6 +202,33 @@ func (p *Projector) Project(ctx context.Context, req agentcore.ContextProjection
 		}
 	}
 	return &agentcore.ContextProjectionResult{Messages: next.Messages, Metadata: merged}, nil
+}
+
+// learnLimit lowers the scope's learned character limit to limit.
+func (p *Projector) learnLimit(scope string, limit int) {
+	if limit <= 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	current, known := p.limits[scope]
+	if known && current <= limit {
+		return
+	}
+	if !known {
+		p.limitOrder = append(p.limitOrder, scope)
+		if len(p.limitOrder) > maxOverflowLimits {
+			delete(p.limits, p.limitOrder[0])
+			p.limitOrder = p.limitOrder[1:]
+		}
+	}
+	p.limits[scope] = limit
+}
+
+func (p *Projector) limit(scope string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.limits[scope]
 }
 
 // lookup returns a copy of the projection remembered for the longest prefix

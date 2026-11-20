@@ -120,8 +120,8 @@ func (c *Client) post(ctx context.Context, payload []byte) (*http.Response, erro
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		resp.Body.Close()
-		return nil, &ResponseError{StatusCode: resp.StatusCode}
+		defer resp.Body.Close()
+		return nil, &ResponseError{StatusCode: resp.StatusCode, ContextTooLong: contextTooLong(resp)}
 	}
 	return resp, nil
 }

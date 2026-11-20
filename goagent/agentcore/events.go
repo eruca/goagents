@@ -18,6 +18,10 @@ const (
 	EventOutputValidated EventType = "output.validated"
 	EventInputValidated  EventType = "input.validated"
 	EventInputRejected   EventType = "input.rejected"
+	// EventContextOverflow reports that the provider rejected a model call
+	// as too long for the context window and the run projects its context
+	// again to retry. Metadata: attempt, rejected_chars.
+	EventContextOverflow EventType = "context.overflow"
 
 	EventApprovalRequested EventType = "approval.requested"
 	EventApprovalCompleted EventType = "approval.completed"

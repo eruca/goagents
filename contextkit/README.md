@@ -330,6 +330,15 @@ agent, err := agentcore.NewAgent(agentcore.WithContextProjector(projector), ...)
 - `OnCompress` receives each `Result`, for example to keep deep-mode
   `Collapses`. The result metadata reports `contextkit.dropped`,
   `contextkit.over_budget`, and `contextkit.reused_messages`.
+- When the provider rejects a call as too long for the model's context window
+  (`ports.ErrContextTooLong`), goagent projects again with the request's
+  `Overflow` set and retries, at most twice. The projector compresses to 70%
+  of the rejected request's characters and keeps that as a character limit
+  for the conversation (by `Scope`; one shared limit without it), so later
+  calls stay under it instead of overflowing again. Limits only go down, and
+  the projection metadata reports one in use as `contextkit.overflow_limit`.
+  The limit replaces the compressor's own budget for that conversation; with
+  `UseAgentBudget` the agent's token budget still applies beside it.
 
 For large tools such as OCR or retrieval, pair `contextkit` with bounded tool
 results:

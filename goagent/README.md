@@ -93,6 +93,8 @@ Use `WithEventSink` when a host application needs to observe run lifecycle event
 
 Use `WithContextProjector` when a host application needs to compress or reshape the model-facing message view before each LLM call. The projector receives the full run messages and returns a projection for `ThinkStage`; it does not mutate the original run state. The request's `SystemPrompt` is the compiled system prompt the call will start with: `ThinkStage` adds it after projection, so a projector should count it against a budget but not add it to the messages. Concrete compression algorithms live outside `agentcore`: `contextkit/agentadapter` is a ready projector backed by `contextkit`.
 
+When a provider rejects a call because the request does not fit the model's context window, the LLM client returns an error matching `ports.ErrContextTooLong` (openaiapi recognizes the messages of OpenAI, vLLM, SGLang, llama.cpp and similar servers without exposing the body). With a projector configured, `ThinkStage` emits `context.overflow`, projects again with `ContextProjectionRequest.Overflow` describing the rejected request, and retries the call, at most `MaxContextOverflowRetries` (2) times. It stops early when the new projection is no smaller, and never retries a streamed call that already delivered output. Without a projector the error ends the run.
+
 Pass `RunRequest.RunID` when the caller already has a trace ID; otherwise `Agent.Run` generates a typed `RunID` backed by `github.com/google/uuid` and returns it on `RunResult.RunID`.
 
 When a memory provider is configured and `RunRequest.SessionID` is set, the runner loads session memory before the current input and appends the run's new messages after a successful run.

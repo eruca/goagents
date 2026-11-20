@@ -80,6 +80,10 @@ const (
 	ErrorClassUsageMissing       ErrorClass = "usage_missing"
 	ErrorClassRedirectBlocked    ErrorClass = "redirect_blocked"
 	ErrorClassInvalidResponse    ErrorClass = "invalid_response"
+	// ErrorClassContextTooLong marks a request the provider rejected because
+	// it does not fit the model's context window (ports.ErrContextTooLong).
+	// The caller can shrink the request; it says nothing about provider health.
+	ErrorClassContextTooLong ErrorClass = "context_too_long"
 	// ErrorClassProviderBusy marks a candidate HealthStore.Acquire turned
 	// away; no call was made.
 	ErrorClassProviderBusy ErrorClass = "provider_busy"

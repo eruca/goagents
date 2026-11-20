@@ -46,6 +46,16 @@
 
 ### 新增，可选
 
+- **被动压缩。** `goagent`：`ports.ErrContextTooLong`；`openaiapi.ResponseError`
+  新增 `ContextTooLong` 字段和 `Unwrap`，错误正文说明上下文超出窗口时匹配
+  `ErrContextTooLong`（只读取正文用于分类，不进入错误信息）；
+  `agentcore.ContextProjectionRequest.Overflow`、`ContextOverflow`、
+  `EventContextOverflow`（`context.overflow`）、`MaxContextOverflowRetries`、
+  `ThinkStage.Projection`。配了投影器时，模型服务报上下文过长会重新投影并
+  重试，最多 2 次。`contextkit/agentadapter` 收到 `Overflow` 时压到被拒请求
+  字符数的 70%，并按会话记住这个上限。`llmkit`：`ErrorClassContextTooLong`
+  （`context_too_long`），不计入 provider 健康。经 llmkit 路由时，未开
+  `FailClosed` 会先换下一个候选模型，所有候选都失败后才由 agent 压缩重试。
 - `goagent`：`ChatResponse.Reasoning`、`ChatMessage.Reasoning`、
   `ChatDelta.Reasoning`、`Usage.ReasoningTokens`、`ports.SplitThinkTags`；
   `agentcore.Message.Reasoning`、`RunResult.Reasoning`、`ModelDelta.Reasoning`、

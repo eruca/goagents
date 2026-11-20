@@ -12,6 +12,12 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
+// ErrContextTooLong reports that the provider rejected a request because its
+// messages do not fit the model's context window. An LLMClient returns an
+// error that matches it with errors.Is, so a caller can shrink the request
+// and try again.
+var ErrContextTooLong = errors.New("request exceeds the model context window")
+
 type LLMClient interface {
 	Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error)
 }

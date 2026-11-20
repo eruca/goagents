@@ -26,6 +26,7 @@ func TestDefaultErrorClassifier(t *testing.T) {
 		{name: "internal server error", err: &openaiapi.ResponseError{StatusCode: http.StatusInternalServerError}, want: llmkit.ErrorClassTransient},
 		{name: "service unavailable", err: &openaiapi.ResponseError{StatusCode: http.StatusServiceUnavailable}, want: llmkit.ErrorClassTransient},
 		{name: "bad request", err: &openaiapi.ResponseError{StatusCode: http.StatusBadRequest}, want: llmkit.ErrorClassUnknown},
+		{name: "context too long", err: &openaiapi.ResponseError{StatusCode: http.StatusBadRequest, ContextTooLong: true}, want: llmkit.ErrorClassContextTooLong},
 		{name: "canceled", err: context.Canceled, want: llmkit.ErrorClassCanceled},
 		{name: "request too large", err: classifiedProviderError{class: "request_too_large"}, want: llmkit.ErrorClassRequestTooLarge},
 		{name: "response too large", err: classifiedProviderError{class: "response_too_large"}, want: llmkit.ErrorClassResponseTooLarge},

@@ -98,6 +98,7 @@ func NewReActRunner(config ReActConfig) *ReActRunner {
 		registry = tools.NewRegistry()
 	}
 	budget := budgetFromGuard(config.BudgetGuard)
+	projection := ContextProjectionStage{Projector: config.ContextProjector, Budget: budget, ReasoningReplay: config.ReasoningReplay}
 	return &ReActRunner{
 		maxIterations:  maxIterations,
 		memoryProvider: config.MemoryProvider,
@@ -110,8 +111,8 @@ func NewReActRunner(config ReActConfig) *ReActRunner {
 			ToolProviderStage{Provider: config.ToolProvider, Registry: registry},
 			OutputFormatStage{Format: config.OutputFormat},
 			PromptStage{Compiler: config.PromptCompiler, Blocks: config.PromptBlocks},
-			ContextProjectionStage{Projector: config.ContextProjector, Budget: budget, ReasoningReplay: config.ReasoningReplay},
-			ThinkStage{LLM: config.LLM, ToolRegistry: registry, MaxOutputTokens: config.MaxOutputTokens, ReasoningReplay: config.ReasoningReplay},
+			projection,
+			ThinkStage{LLM: config.LLM, ToolRegistry: registry, MaxOutputTokens: config.MaxOutputTokens, ReasoningReplay: config.ReasoningReplay, Projection: projection},
 			BudgetStage{Guard: config.BudgetGuard},
 			PolicyStage{Engine: config.PolicyEngine, ToolRegistry: registry},
 			ApprovalStage{Approver: config.ToolApprover},

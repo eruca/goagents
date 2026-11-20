@@ -17,30 +17,36 @@ type ThinkStage struct {
 	ToolRegistry    ports.ToolRegistry
 	MaxOutputTokens int
 	ReasoningReplay ReasoningReplay
+	// Projection, when it has a Projector, projects the context again with
+	// ContextProjectionRequest.Overflow set after the provider rejects a call
+	// as too long (ports.ErrContextTooLong), and the call is retried, up to
+	// MaxContextOverflowRetries times. Without one the error ends the run.
+	Projection ContextProjectionStage
 }
+
+// MaxContextOverflowRetries bounds how often one model call is projected
+// again and retried after the provider reports a context window overflow.
+const MaxContextOverflowRetries = 2
 
 func (s ThinkStage) Name() string {
 	return "think"
 }
 
 func (s ThinkStage) Run(ctx context.Context, state *RunState) (StageResult, error) {
-	req := ports.ChatRequest{
-		Messages:        chatMessages(state, s.ReasoningReplay),
-		Tools:           chatToolSpecs(s.ToolRegistry),
-		MaxOutputTokens: s.MaxOutputTokens,
-	}
-	var resp *ports.ChatResponse
-	var err error
-	if streaming, ok := s.LLM.(ports.StreamingLLMClient); ok && state.onDelta != nil {
-		iteration := state.Iteration
-		resp, err = streaming.ChatStream(ctx, req, func(delta ports.ChatDelta) error {
-			if delta.Content != "" || delta.Reasoning != "" || delta.ToolCall != nil {
-				state.onDelta(ModelDelta{Iteration: iteration, Content: delta.Content, Reasoning: delta.Reasoning, ToolCall: delta.ToolCall})
-			}
-			return nil
-		})
-	} else {
-		resp, err = s.LLM.Chat(ctx, req)
+	resp, delivered, err := s.call(ctx, state)
+	for attempt := 1; err != nil && errors.Is(err, ports.ErrContextTooLong) && !delivered &&
+		s.Projection.Projector != nil && attempt <= MaxContextOverflowRetries; attempt++ {
+		rejected := requestChars(chatMessages(state, s.ReasoningReplay))
+		state.Emit(ctx, Event{Type: EventContextOverflow, Metadata: map[string]any{"attempt": attempt, "rejected_chars": rejected}})
+		if projectErr := s.Projection.project(ctx, state, &ContextOverflow{Attempt: attempt, RejectedChars: rejected}); projectErr != nil {
+			return StageAbort, projectErr
+		}
+		if requestChars(chatMessages(state, s.ReasoningReplay)) >= rejected {
+			// The projector could not make the request smaller; sending it
+			// again would fail the same way.
+			break
+		}
+		resp, delivered, err = s.call(ctx, state)
 	}
 	if err != nil {
 		return StageAbort, err
@@ -80,6 +86,43 @@ func (s ThinkStage) Run(ctx context.Context, state *RunState) (StageResult, erro
 		state.Messages = append(state.Messages, Message{Role: "assistant", Content: resp.Content, Reasoning: resp.Reasoning})
 	}
 	return StageContinue, nil
+}
+
+// call sends the current request to the model. delivered reports whether any
+// output reached the stream consumer, after which the call is not retried.
+func (s ThinkStage) call(ctx context.Context, state *RunState) (*ports.ChatResponse, bool, error) {
+	req := ports.ChatRequest{
+		Messages:        chatMessages(state, s.ReasoningReplay),
+		Tools:           chatToolSpecs(s.ToolRegistry),
+		MaxOutputTokens: s.MaxOutputTokens,
+	}
+	if streaming, ok := s.LLM.(ports.StreamingLLMClient); ok && state.onDelta != nil {
+		iteration := state.Iteration
+		delivered := false
+		resp, err := streaming.ChatStream(ctx, req, func(delta ports.ChatDelta) error {
+			if delta.Content != "" || delta.Reasoning != "" || delta.ToolCall != nil {
+				delivered = true
+				state.onDelta(ModelDelta{Iteration: iteration, Content: delta.Content, Reasoning: delta.Reasoning, ToolCall: delta.ToolCall})
+			}
+			return nil
+		})
+		return resp, delivered, err
+	}
+	resp, err := s.LLM.Chat(ctx, req)
+	return resp, false, err
+}
+
+// requestChars measures a request's messages the way ContextOverflow reports
+// them.
+func requestChars(messages []ports.ChatMessage) int {
+	total := 0
+	for _, msg := range messages {
+		total += len(msg.Content) + len(msg.Reasoning)
+		for _, call := range msg.ToolCalls {
+			total += len(call.Name) + len(call.Input)
+		}
+	}
+	return total
 }
 
 // normalizeToolCallInputs makes every call's arguments valid JSON before they
