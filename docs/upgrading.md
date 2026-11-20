@@ -56,6 +56,9 @@
   编译好的系统提示，供投影器计入预算；memorykit 投影器把它转给 `Next`。
 - host-api：`HOST_API_CONTEXT_MAX_CHARS`、`HOST_API_CONTEXT_MAX_TOOL_CHARS`
   开启上下文压缩（默认关闭）。
+- `contextkit/agentadapter`：`LLMSummarizer`（结构化摘要，用 goagent LLM 写
+  摘要）、`Notes` 与 `context_note` 工具（笔记固定在上下文顶部）；
+  `context_search` 返回命中词附近的片段。新示例 `examples/context-eval`。
 - `contextkit`：`Archive`、`ArchiveHit`、`WithArchiveScope`、
   `ErrArchiveNotFound`；`contextkit/archive.Memory`；`window.Config` 的
   `CatalogEntries`、`ClearTarget`，`window.ReadBackKey`；

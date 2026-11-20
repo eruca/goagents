@@ -167,3 +167,131 @@ type toolProviderFunc func(context.Context, agentcore.RunRequest) ([]tools.Tool,
 func (f toolProviderFunc) Tools(ctx context.Context, req agentcore.RunRequest) ([]tools.Tool, error) {
 	return f(ctx, req)
 }
+
+type promptRecorder struct {
+	requests []ports.ChatRequest
+	reply    string
+}
+
+func (p *promptRecorder) Chat(_ context.Context, req ports.ChatRequest) (*ports.ChatResponse, error) {
+	p.requests = append(p.requests, req)
+	return &ports.ChatResponse{Content: p.reply, Reasoning: "thinking that must not leak", Usage: ports.Usage{InputTokens: 10, OutputTokens: 4}}, nil
+}
+
+func TestLLMSummarizerFoldsMessagesIntoTheSummary(t *testing.T) {
+	llm := &promptRecorder{reply: "  Request: total invoices\nFacts: INV-2 = 4300  "}
+	summarizer, err := NewLLMSummarizer(LLMSummarizerConfig{LLM: llm, MaxMessageChars: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := summarizer.Summarize(context.Background(), contextkit.SummarizeRequest{
+		Previous: "Request: total invoices",
+		Collapsed: []contextkit.Message{
+			{Role: contextkit.RoleAssistant, ToolCalls: []contextkit.ToolCall{{Name: "ocr", Arguments: `{"page":2}`}}},
+			{Role: contextkit.RoleTool, ToolName: "ocr", Ref: "ctx:abc", Content: "INV-2 total 4300 " + strings.Repeat("filler ", 20)},
+		},
+		Recent:        []contextkit.Message{{Role: contextkit.RoleUser, Content: "total the invoices"}},
+		SummaryBudget: contextkit.Budget{MaxChars: 500},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Summary != "Request: total invoices\nFacts: INV-2 = 4300" {
+		t.Fatalf("summary = %q", got.Summary)
+	}
+	prompt := llm.requests[0].Messages[1].Content
+	for _, want := range []string{"current request (kept in context, for reference): total the invoices", "under 500 characters", "Previous summary:\nRequest: total invoices", `calls ocr {"page":2}`, "[tool ocr] INV-2 total 4300", "…[cut]", "(ref=ctx:abc)"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt lacks %q:\n%s", want, prompt)
+		}
+	}
+	if llm.requests[0].Messages[0].Role != "system" || llm.requests[0].MaxOutputTokens != 4096 {
+		t.Fatalf("request = %+v", llm.requests[0])
+	}
+	llm.reply = "  "
+	if _, err := summarizer.Summarize(context.Background(), contextkit.SummarizeRequest{}); err == nil {
+		t.Fatal("empty summary accepted")
+	}
+	if _, err := NewLLMSummarizer(LLMSummarizerConfig{}); err == nil {
+		t.Fatal("missing LLM accepted")
+	}
+}
+
+func TestSearchShowsWhereTheQueryMatches(t *testing.T) {
+	long := strings.Repeat("filler text ", 300) + "Invoice INV-102 was issued by Beiming Paper for a total of 5900 yuan. " + strings.Repeat("more filler ", 300)
+	got := matchSnippets(long, "Beiming Paper total", 600)
+	if !strings.Contains(got, "Beiming Paper for a total of 5900 yuan") || len([]rune(got)) > 620 {
+		t.Fatalf("snippet = %q", got)
+	}
+	if matchSnippets("short", "x", 100) != "short" {
+		t.Fatal("short text changed")
+	}
+	if got := matchSnippets(long, "kubernetes", 50); got != long[:50] {
+		t.Fatalf("no match = %q", got)
+	}
+	if got := matchSnippets(strings.Repeat("无关内容", 200)+"数据库端口是55432"+strings.Repeat("无关内容", 200), "数据库端口", 300); !strings.Contains(got, "数据库端口是55432") {
+		t.Fatalf("chinese snippet = %q", got)
+	}
+}
+
+func TestNotesArePinnedAndNeverCompressed(t *testing.T) {
+	notes := NewNotes(NotesConfig{MaxChars: 60})
+	store := archive.New(archive.Config{})
+	projector, err := NewProjector(Config{
+		Compressor: window.New(window.Config{Budget: contextkit.Budget{MaxChars: 400}, Offload: store}),
+		Scope:      scopeFromWorkflow, Notes: notes,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, _ := NewContextTools(ContextToolsConfig{Archive: store, Scope: scopeFromWorkflow, Notes: notes})
+	runTools, _ := provider.Tools(context.Background(), agentcore.RunRequest{Metadata: map[string]any{"workflow_id": "wf"}})
+	var note tools.Tool
+	for _, tool := range runTools {
+		if tool.Spec().Name == ContextNoteTool {
+			note = tool
+		}
+	}
+	if note == nil {
+		t.Fatal("context_note not offered")
+	}
+	messages := []agentcore.Message{{Role: "user", Content: "audit"}}
+	project := func() *agentcore.ContextProjectionResult {
+		t.Helper()
+		got, err := projector.Project(context.Background(), agentcore.ContextProjectionRequest{Messages: messages, Metadata: map[string]any{"workflow_id": "wf"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if got := project(); strings.Contains(got.Messages[0].Content, "Your notes") {
+		t.Fatal("notes shown before any were written")
+	}
+	if _, err := note.Execute(context.Background(), json.RawMessage(`{"note":"INV-102: Beiming Paper, 5900 yuan"}`), tools.Env{}); err != nil {
+		t.Fatal(err)
+	}
+	// Many large steps later, the note is still at the top.
+	for i := 0; i < 6; i++ {
+		messages = append(messages,
+			agentcore.Message{Role: "assistant", ToolCalls: []ports.ToolCall{{ID: fmt.Sprint("c", i), Name: "ocr", Input: json.RawMessage(`{}`)}}},
+			agentcore.Message{Role: "tool", ToolCallID: fmt.Sprint("c", i), Content: strings.Repeat("page text ", 30)})
+	}
+	got := project()
+	if got.Messages[0].Role != "system" || !strings.Contains(got.Messages[0].Content, "INV-102: Beiming Paper, 5900 yuan") || got.Metadata["contextkit.dropped"] == 0 {
+		t.Fatalf("projection = %+v", got.Messages[0])
+	}
+	// A newer note pushes out the oldest beyond MaxChars; the next
+	// projection shows it, not a cached copy.
+	_, _ = note.Execute(context.Background(), json.RawMessage(`{"note":"INV-103: Qinghe Foods, 7200 yuan, the largest so far"}`), tools.Env{})
+	got = project()
+	if strings.Contains(got.Messages[0].Content, "INV-102") || !strings.Contains(got.Messages[0].Content, "INV-103") {
+		t.Fatalf("notes after eviction = %q", got.Messages[0].Content)
+	}
+	if notes.List("other") != nil {
+		t.Fatal("notes leaked across scopes")
+	}
+	notes.Delete("wf")
+	if len(notes.List("wf")) != 0 {
+		t.Fatal("deleted notes remain")
+	}
+}

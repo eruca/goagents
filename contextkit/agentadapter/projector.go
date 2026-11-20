@@ -30,6 +30,9 @@ const (
 	// for compression only: it counts against the budget and is removed
 	// again, because goagent adds the prompt to the model call itself.
 	systemPromptKey = "contextkit/agentadapter.system_prompt"
+	// notesKey marks the pinned notes message, which is projected every
+	// call from the Notes store rather than remembered with a compression.
+	notesKey = "contextkit/agentadapter.notes"
 )
 
 // Config configures a Projector.
@@ -60,6 +63,10 @@ type Config struct {
 	// Archive set as the compressor's Offload keeps each conversation's
 	// removed content apart. Use the same function for ContextTools.
 	Scope func(metadata map[string]any) string
+	// Notes, when set with Scope, pins the conversation's notes to the top
+	// of every projection as a system message, counted against the budget
+	// and never dropped. Use the same store for ContextTools.
+	Notes *Notes
 }
 
 // Projector is an agentcore.ContextProjector backed by a contextkit
@@ -110,6 +117,15 @@ func (p *Projector) Project(ctx context.Context, req agentcore.ContextProjection
 		input = append(cached, cloneMessages(messages[length:])...)
 		reused = length
 	}
+	if p.cfg.Notes != nil && scope != "" {
+		if notes := p.cfg.Notes.List(scope); len(notes) > 0 {
+			pinned := contextkit.Message{
+				Role: contextkit.RoleSystem, Content: renderNotes(notes),
+				Metadata: map[string]any{notesKey: true},
+			}
+			input = append([]contextkit.Message{pinned}, input...)
+		}
+	}
 	if req.SystemPrompt != "" {
 		prompt := contextkit.Message{
 			Role: contextkit.RoleSystem, Content: req.SystemPrompt,
@@ -128,8 +144,8 @@ func (p *Projector) Project(ctx context.Context, req agentcore.ContextProjection
 	if result == nil {
 		return nil, errors.New("contextkit/agentadapter: compressor returned no result")
 	}
-	result.Messages = withoutSystemPrompt(result.Messages)
-	p.store(prefixes[len(messages)], result.Messages)
+	result.Messages = without(result.Messages, systemPromptKey)
+	p.store(prefixes[len(messages)], without(result.Messages, notesKey))
 	if p.cfg.OnCompress != nil {
 		p.cfg.OnCompress(ctx, result)
 	}
@@ -193,10 +209,10 @@ func (p *Projector) store(key [sha256.Size]byte, projected []contextkit.Message)
 	}
 }
 
-func withoutSystemPrompt(messages []contextkit.Message) []contextkit.Message {
+func without(messages []contextkit.Message, key string) []contextkit.Message {
 	out := messages[:0:0]
 	for _, msg := range messages {
-		if marked, _ := msg.Metadata[systemPromptKey].(bool); !marked {
+		if marked, _ := msg.Metadata[key].(bool); !marked {
 			out = append(out, msg)
 		}
 	}

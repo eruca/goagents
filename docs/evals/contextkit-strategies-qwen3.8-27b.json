@@ -1,0 +1,364 @@
+{
+  "model": "qwen3.8-27b",
+  "pages": 8,
+  "page_chars": 2500,
+  "budget_chars": 8000,
+  "tasks": 6,
+  "trials": 1,
+  "strategies": [
+    {
+      "name": "none",
+      "runs": 6,
+      "correct": 6,
+      "correct_by_kind": {
+        "lookup": 2,
+        "max": 2,
+        "sum": 2
+      },
+      "failed_runs": 0,
+      "input_tokens": 115330,
+      "output_tokens": 5177,
+      "model_calls": 49,
+      "tool_calls": 48,
+      "context_tool_calls": 0,
+      "summarizer_calls": 0,
+      "summarizer_tokens": 0,
+      "seconds": 39.960949375,
+      "answers": [
+        {
+          "task": "INV-1-lookup",
+          "want": "5900",
+          "got": "5900",
+          "correct": true
+        },
+        {
+          "task": "INV-1-sum",
+          "want": "49960",
+          "got": "49960",
+          "correct": true
+        },
+        {
+          "task": "INV-1-max",
+          "want": "Yunfan Textiles",
+          "got": "Yunfan Textiles",
+          "correct": true
+        },
+        {
+          "task": "INV-2-lookup",
+          "want": "9600",
+          "got": "9600",
+          "correct": true
+        },
+        {
+          "task": "INV-2-sum",
+          "want": "35200",
+          "got": "35200",
+          "correct": true
+        },
+        {
+          "task": "INV-2-max",
+          "want": "Mingyue Printing",
+          "got": "Mingyue Printing",
+          "correct": true
+        }
+      ]
+    },
+    {
+      "name": "drop",
+      "runs": 6,
+      "correct": 2,
+      "correct_by_kind": {
+        "lookup": 2
+      },
+      "failed_runs": 3,
+      "input_tokens": 71338,
+      "output_tokens": 10102,
+      "model_calls": 43,
+      "tool_calls": 114,
+      "context_tool_calls": 0,
+      "summarizer_calls": 0,
+      "summarizer_tokens": 0,
+      "seconds": 221.588722458,
+      "answers": [
+        {
+          "task": "INV-1-lookup",
+          "want": "5900",
+          "got": "5900",
+          "correct": true
+        },
+        {
+          "task": "INV-1-sum",
+          "want": "49960",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-1-max",
+          "want": "Yunfan Textiles",
+          "got": "Yunjin Paper",
+          "correct": false
+        },
+        {
+          "task": "INV-2-lookup",
+          "want": "9600",
+          "got": "9600",
+          "correct": true
+        },
+        {
+          "task": "INV-2-sum",
+          "want": "35200",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-2-max",
+          "want": "Mingyue Printing",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        }
+      ]
+    },
+    {
+      "name": "summary",
+      "runs": 6,
+      "correct": 6,
+      "correct_by_kind": {
+        "lookup": 2,
+        "max": 2,
+        "sum": 2
+      },
+      "failed_runs": 0,
+      "input_tokens": 94914,
+      "output_tokens": 8840,
+      "model_calls": 61,
+      "tool_calls": 86,
+      "context_tool_calls": 0,
+      "summarizer_calls": 29,
+      "summarizer_tokens": 100476,
+      "seconds": 421.986315625,
+      "answers": [
+        {
+          "task": "INV-1-lookup",
+          "want": "5900",
+          "got": "5900",
+          "correct": true
+        },
+        {
+          "task": "INV-1-sum",
+          "want": "49960",
+          "got": "49960",
+          "correct": true
+        },
+        {
+          "task": "INV-1-max",
+          "want": "Yunfan Textiles",
+          "got": "Yunfan Textiles",
+          "correct": true
+        },
+        {
+          "task": "INV-2-lookup",
+          "want": "9600",
+          "got": "9600",
+          "correct": true
+        },
+        {
+          "task": "INV-2-sum",
+          "want": "35200",
+          "got": "35200",
+          "correct": true
+        },
+        {
+          "task": "INV-2-max",
+          "want": "Mingyue Printing",
+          "got": "Mingyue Printing",
+          "correct": true
+        }
+      ]
+    },
+    {
+      "name": "pull",
+      "runs": 6,
+      "correct": 5,
+      "correct_by_kind": {
+        "lookup": 2,
+        "max": 2,
+        "sum": 1
+      },
+      "failed_runs": 1,
+      "input_tokens": 139326,
+      "output_tokens": 14420,
+      "model_calls": 74,
+      "tool_calls": 115,
+      "context_tool_calls": 90,
+      "summarizer_calls": 0,
+      "summarizer_tokens": 0,
+      "seconds": 169.884126875,
+      "answers": [
+        {
+          "task": "INV-1-lookup",
+          "want": "5900",
+          "got": "5900",
+          "correct": true
+        },
+        {
+          "task": "INV-1-sum",
+          "want": "49960",
+          "got": "49960",
+          "correct": true
+        },
+        {
+          "task": "INV-1-max",
+          "want": "Yunfan Textiles",
+          "got": "Yunfan Textiles",
+          "correct": true
+        },
+        {
+          "task": "INV-2-lookup",
+          "want": "9600",
+          "got": "9600",
+          "correct": true
+        },
+        {
+          "task": "INV-2-sum",
+          "want": "35200",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-2-max",
+          "want": "Mingyue Printing",
+          "got": "Mingyue Printing",
+          "correct": true
+        }
+      ]
+    },
+    {
+      "name": "push",
+      "runs": 6,
+      "correct": 3,
+      "correct_by_kind": {
+        "lookup": 2,
+        "max": 1
+      },
+      "failed_runs": 3,
+      "input_tokens": 68492,
+      "output_tokens": 4683,
+      "model_calls": 32,
+      "tool_calls": 34,
+      "context_tool_calls": 128,
+      "summarizer_calls": 0,
+      "summarizer_tokens": 0,
+      "seconds": 190.0058765,
+      "answers": [
+        {
+          "task": "INV-1-lookup",
+          "want": "5900",
+          "got": "5900",
+          "correct": true
+        },
+        {
+          "task": "INV-1-sum",
+          "want": "49960",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-1-max",
+          "want": "Yunfan Textiles",
+          "got": "Yunfan Textiles",
+          "correct": true
+        },
+        {
+          "task": "INV-2-lookup",
+          "want": "9600",
+          "got": "9600",
+          "correct": true
+        },
+        {
+          "task": "INV-2-sum",
+          "want": "35200",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-2-max",
+          "want": "Mingyue Printing",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        }
+      ]
+    },
+    {
+      "name": "notes",
+      "runs": 6,
+      "correct": 4,
+      "correct_by_kind": {
+        "lookup": 2,
+        "max": 1,
+        "sum": 1
+      },
+      "failed_runs": 1,
+      "input_tokens": 125688,
+      "output_tokens": 8861,
+      "model_calls": 58,
+      "tool_calls": 76,
+      "context_tool_calls": 66,
+      "summarizer_calls": 0,
+      "summarizer_tokens": 0,
+      "seconds": 112.7381425,
+      "answers": [
+        {
+          "task": "INV-1-lookup",
+          "want": "5900",
+          "got": "5900",
+          "correct": true
+        },
+        {
+          "task": "INV-1-sum",
+          "want": "49960",
+          "got": "49960",
+          "correct": true
+        },
+        {
+          "task": "INV-1-max",
+          "want": "Yunfan Textiles",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-2-lookup",
+          "want": "9600",
+          "got": "9600",
+          "correct": true
+        },
+        {
+          "task": "INV-2-sum",
+          "want": "35200",
+          "got": "37690",
+          "correct": false
+        },
+        {
+          "task": "INV-2-max",
+          "want": "Mingyue Printing",
+          "got": "Mingyue Printing",
+          "correct": true
+        }
+      ]
+    }
+  ],
+  "generated_at": "2026-11-20T08:09:35.484129Z",
+  "task_kinds": {
+    "lookup": "the amount of one early page's invoice",
+    "max": "the vendor with the largest invoice",
+    "sum": "the sum of every invoice"
+  },
+  "note": "none, drop and summary from one run; pull, push and notes rerun through the engine-switch proxy after the first run lost its connection."
+}
