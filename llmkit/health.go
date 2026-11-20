@@ -291,7 +291,7 @@ func ApplyHealthOutcome(policy HealthPolicy, entry ProviderHealthEntry, outcome 
 // An unclassified failure counts, which keeps the conservative default.
 func CountsTowardProviderHealth(class ErrorClass) bool {
 	switch class {
-	case ErrorClassCanceled, ErrorClassRequestTooLarge, ErrorClassBudgetExceeded,
+	case ErrorClassCanceled, ErrorClassRequestTooLarge, ErrorClassContextTooLong, ErrorClassBudgetExceeded,
 		ErrorClassPolicyBlocked, ErrorClassCapabilityMismatch, ErrorClassPostCall,
 		ErrorClassProviderBusy, ErrorClassStreamConsumer:
 		return false

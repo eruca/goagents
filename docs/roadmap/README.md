@@ -54,7 +54,7 @@ ADR-0001 是在分 kit 发版、旧 CJK 检索方案下写的，已经不适用�
 | workflowkit (+agentstep) | 高 | — |
 | llmkit | 高 | 没有项目/账户级预算扣减 |
 | runkit | 高 | — |
-| contextkit | 中 | 递进式压缩、会话存档与读回、LLM 摘要器、笔记；qwen3.8-27b 评测：LLM 摘要 6/6、读回 5/6、推送 3/6、只丢弃 2/6（[docs/evals](../evals/contextkit-strategies-qwen3.8-27b.md)，样本小）；存档只有进程内实现；缺被动压缩、更大规模评测、run 结束时抽取长期知识到 memorykit |
+| contextkit | 中 | 递进式压缩、会话存档与读回、LLM 摘要器、笔记；qwen3.8-27b 评测：LLM 摘要 6/6、读回 5/6、推送 3/6、只丢弃 2/6（[docs/evals](../evals/contextkit-strategies-qwen3.8-27b.md)，样本小）；模型服务报上下文过长时重新压缩并重试，按会话记住上限；存档只有进程内实现；缺更大规模评测、run 结束时抽取长期知识到 memorykit |
 | ocrs / skillkit / mcpkit | 中 | — |
 | evalkit (+runtrace) | 中 | 不导出 OpenTelemetry；没有 model-as-judge 评分器 |
 | artifactkit / hostkit | 基础 | artifactkit 没有对象存储（S3）实现，等真实宿主遇到 artifact 体积问题再做 |

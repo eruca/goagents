@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/eruca/goagents/goagent/extensions/providers/openaiapi"
+	"github.com/eruca/goagents/goagent/ports"
 	"github.com/eruca/goagents/llmkit"
 )
 
@@ -74,6 +75,10 @@ func DefaultErrorClassifier(err error) llmkit.ErrorClass {
 	var networkErr net.Error
 	if errors.As(err, &networkErr) && networkErr.Timeout() {
 		return llmkit.ErrorClassTimeout
+	}
+
+	if errors.Is(err, ports.ErrContextTooLong) {
+		return llmkit.ErrorClassContextTooLong
 	}
 
 	var responseErr *openaiapi.ResponseError

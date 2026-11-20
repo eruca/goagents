@@ -1,8 +1,13 @@
 package openaiapi
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+
+	"github.com/eruca/goagents/goagent/ports"
 )
 
 var (
@@ -54,9 +59,55 @@ func newProviderError(class string, dispatched bool, cause error) error {
 }
 
 // ResponseError reports a non-2xx HTTP status. It keeps only the status code
-// so provider response bodies never reach host errors or logs.
+// and whether the body said the request does not fit the model's context
+// window, so provider response bodies never reach host errors or logs.
 type ResponseError struct {
 	StatusCode int
+	// ContextTooLong is set when the error body names a context window
+	// overflow; the error then matches ports.ErrContextTooLong.
+	ContextTooLong bool
+}
+
+// Unwrap lets errors.Is(err, ports.ErrContextTooLong) match an overflow.
+func (e *ResponseError) Unwrap() error {
+	if e != nil && e.ContextTooLong {
+		return ports.ErrContextTooLong
+	}
+	return nil
+}
+
+// maxErrorBodyBytes bounds how much of an error body is read to classify it.
+const maxErrorBodyBytes = 16 << 10
+
+// contextOverflowMarkers are the phrases OpenAI-compatible servers use when a
+// prompt does not fit the context window, lowercased.
+var contextOverflowMarkers = [][]byte{
+	[]byte("context_length_exceeded"),            // OpenAI error code
+	[]byte("maximum context length"),             // OpenAI, vLLM, DeepSeek
+	[]byte("longer than the model's context"),    // vLLM, SGLang
+	[]byte("exceed_context_size_error"),          // llama.cpp error type
+	[]byte("exceeds the available context size"), // llama.cpp
+	[]byte("context window"),                     // "exceeds the context window"
+	[]byte("prompt is too long"),                 // Anthropic-compatible gateways
+	[]byte("input length exceeds the context length"),
+	[]byte("too many tokens"),
+}
+
+// contextTooLong reads the start of an error body and reports whether it
+// describes a context window overflow. The body itself is discarded.
+func contextTooLong(resp *http.Response) bool {
+	// 429 bodies such as "too many tokens per minute" are rate limits.
+	if resp.StatusCode < 400 || resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
+		return false
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+	body = bytes.ToLower(body)
+	for _, marker := range contextOverflowMarkers {
+		if bytes.Contains(body, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *ResponseError) Error() string {
