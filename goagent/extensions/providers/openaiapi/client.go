@@ -21,6 +21,16 @@ type Config struct {
 	HTTPClient *http.Client
 	Headers    map[string]string
 	Limits     Limits
+	// KeepThinkTags leaves <think>...</think> blocks in the content instead
+	// of moving them to the response's Reasoning (see ports.SplitThinkTags).
+	// Reasoning a server returns in reasoning_content or reasoning is always
+	// kept apart.
+	KeepThinkTags bool
+	// SendReasoning sends an assistant message's Reasoning back as
+	// reasoning_content, for servers that want reasoning returned within a
+	// tool-call loop. Leave it off for servers that reject the field, such as
+	// DeepSeek.
+	SendReasoning bool
 }
 
 // Limits bounds provider requests and responses. A zero field disables that bound.
@@ -88,7 +98,7 @@ func (c *Client) Chat(ctx context.Context, req ports.ChatRequest) (*ports.ChatRe
 	if err != nil {
 		return nil, err
 	}
-	return parseChatResponse(data)
+	return c.parseChatResponse(data)
 }
 
 // post sends a chat completions body and returns a successful response.
@@ -116,7 +126,7 @@ func (c *Client) post(ctx context.Context, payload []byte) (*http.Response, erro
 	return resp, nil
 }
 
-func parseChatResponse(data []byte) (*ports.ChatResponse, error) {
+func (c *Client) parseChatResponse(data []byte) (*ports.ChatResponse, error) {
 	var decoded chatCompletionsResponse
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return nil, newProviderError("invalid_json", true, ErrInvalidJSON)
@@ -128,11 +138,17 @@ func parseChatResponse(data []byte) (*ports.ChatResponse, error) {
 		return nil, newProviderError("invalid_response", true, ErrInvalidResponse)
 	}
 	message := decoded.Choices[0].Message
-	return chatResponse(message.Content, message.ToolCalls, *decoded.Usage)
+	return c.chatResponse(message.Content, message.reasoning(), message.ToolCalls, *decoded.Usage)
 }
 
-func chatResponse(content string, calls []chatToolCall, usage chatUsage) (*ports.ChatResponse, error) {
-	result := &ports.ChatResponse{Content: content}
+// chatResponse builds a response. Reasoning from a dedicated field is kept;
+// without one, a <think> block in the content becomes the reasoning unless
+// KeepThinkTags is set.
+func (c *Client) chatResponse(content, reasoning string, calls []chatToolCall, usage chatUsage) (*ports.ChatResponse, error) {
+	if reasoning == "" && !c.config.KeepThinkTags {
+		reasoning, content = ports.SplitThinkTags(content)
+	}
+	result := &ports.ChatResponse{Content: content, Reasoning: reasoning}
 	for _, call := range calls {
 		if call.ID == "" || call.Function.Name == "" {
 			return nil, newProviderError("tool_call_invalid", true, ErrInvalidResponse)
@@ -145,6 +161,9 @@ func chatResponse(content string, calls []chatToolCall, usage chatUsage) (*ports
 	}
 	result.Usage.InputTokens = usage.PromptTokens
 	result.Usage.OutputTokens = usage.CompletionTokens
+	if usage.CompletionTokensDetails != nil {
+		result.Usage.ReasoningTokens = usage.CompletionTokensDetails.ReasoningTokens
+	}
 	return result, nil
 }
 
@@ -168,7 +187,7 @@ func (c *Client) requestPayload(req ports.ChatRequest, stream bool) ([]byte, err
 	}
 	body := chatCompletionsRequest{
 		Model:     c.config.Model,
-		Messages:  buildMessages(req.Messages),
+		Messages:  buildMessages(req.Messages, c.config.SendReasoning),
 		Tools:     buildTools(req.Tools),
 		MaxTokens: maxTokens,
 	}
@@ -231,10 +250,11 @@ type streamOptions struct {
 }
 
 type chatMessage struct {
-	Role       string         `json:"role"`
-	Content    string         `json:"content,omitempty"`
-	ToolCallID string         `json:"tool_call_id,omitempty"`
-	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
+	Role             string         `json:"role"`
+	Content          string         `json:"content,omitempty"`
+	ReasoningContent string         `json:"reasoning_content,omitempty"`
+	ToolCallID       string         `json:"tool_call_id,omitempty"`
+	ToolCalls        []chatToolCall `json:"tool_calls,omitempty"`
 }
 
 // MarshalJSON always sends content, even empty, except on an assistant
@@ -242,11 +262,12 @@ type chatMessage struct {
 // message without content, such as a tool result with an empty ForLLM.
 func (m chatMessage) MarshalJSON() ([]byte, error) {
 	wire := struct {
-		Role       string         `json:"role"`
-		Content    *string        `json:"content,omitempty"`
-		ToolCallID string         `json:"tool_call_id,omitempty"`
-		ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
-	}{Role: m.Role, ToolCallID: m.ToolCallID, ToolCalls: m.ToolCalls}
+		Role             string         `json:"role"`
+		Content          *string        `json:"content,omitempty"`
+		ReasoningContent string         `json:"reasoning_content,omitempty"`
+		ToolCallID       string         `json:"tool_call_id,omitempty"`
+		ToolCalls        []chatToolCall `json:"tool_calls,omitempty"`
+	}{Role: m.Role, ReasoningContent: m.ReasoningContent, ToolCallID: m.ToolCallID, ToolCalls: m.ToolCalls}
 	if m.Content != "" || len(m.ToolCalls) == 0 {
 		wire.Content = &m.Content
 	}
@@ -285,24 +306,42 @@ type chatChoice struct {
 }
 
 type chatResponseMessage struct {
-	Content   string         `json:"content"`
-	ToolCalls []chatToolCall `json:"tool_calls"`
+	Content string `json:"content"`
+	// DeepSeek and vLLM's reasoning parsers use reasoning_content; some
+	// OpenAI-compatible gateways use reasoning.
+	ReasoningContent string         `json:"reasoning_content"`
+	Reasoning        string         `json:"reasoning"`
+	ToolCalls        []chatToolCall `json:"tool_calls"`
+}
+
+func (m chatResponseMessage) reasoning() string {
+	if m.ReasoningContent != "" {
+		return m.ReasoningContent
+	}
+	return m.Reasoning
 }
 
 type chatUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
+	PromptTokens            int `json:"prompt_tokens"`
+	CompletionTokens        int `json:"completion_tokens"`
+	CompletionTokensDetails *struct {
+		ReasoningTokens int `json:"reasoning_tokens"`
+	} `json:"completion_tokens_details,omitempty"`
 }
 
-func buildMessages(messages []ports.ChatMessage) []chatMessage {
+func buildMessages(messages []ports.ChatMessage, sendReasoning bool) []chatMessage {
 	converted := make([]chatMessage, 0, len(messages))
 	for _, message := range messages {
-		converted = append(converted, chatMessage{
+		wire := chatMessage{
 			Role:       message.Role,
 			Content:    message.Content,
 			ToolCallID: message.ToolCallID,
 			ToolCalls:  buildMessageToolCalls(message.ToolCalls),
-		})
+		}
+		if sendReasoning && message.Role == "assistant" {
+			wire.ReasoningContent = message.Reasoning
+		}
+		converted = append(converted, wire)
 	}
 	return converted
 }

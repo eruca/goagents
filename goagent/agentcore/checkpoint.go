@@ -182,6 +182,7 @@ func cloneMessages(messages []Message) []Message {
 		copied := Message{
 			Role:       message.Role,
 			Content:    message.Content,
+			Reasoning:  message.Reasoning,
 			ToolCallID: message.ToolCallID,
 			ToolCalls:  make([]ports.ToolCall, 0, len(message.ToolCalls)),
 		}

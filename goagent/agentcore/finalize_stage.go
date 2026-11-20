@@ -40,6 +40,7 @@ func (s FinalizeStage) Run(ctx context.Context, state *RunState) (StageResult, e
 	state.Final = &RunResult{
 		RunID:            state.RunID,
 		Content:          state.LastResponse.Content,
+		Reasoning:        state.LastResponse.Reasoning,
 		StructuredOutput: structured,
 		OutputMetadata:   metadata,
 		Usage:            state.Usage,
@@ -77,6 +78,8 @@ type ReActConfig struct {
 	MaxIterations        int
 	// MaxOutputTokens caps generated tokens per model call; zero leaves it to the provider.
 	MaxOutputTokens int
+	// ReasoningReplay decides which reasoning goes back to the model.
+	ReasoningReplay ReasoningReplay
 }
 
 type ReActRunner struct {
@@ -107,8 +110,8 @@ func NewReActRunner(config ReActConfig) *ReActRunner {
 			ToolProviderStage{Provider: config.ToolProvider, Registry: registry},
 			OutputFormatStage{Format: config.OutputFormat},
 			PromptStage{Compiler: config.PromptCompiler, Blocks: config.PromptBlocks},
-			ContextProjectionStage{Projector: config.ContextProjector, Budget: budget},
-			ThinkStage{LLM: config.LLM, ToolRegistry: registry, MaxOutputTokens: config.MaxOutputTokens},
+			ContextProjectionStage{Projector: config.ContextProjector, Budget: budget, ReasoningReplay: config.ReasoningReplay},
+			ThinkStage{LLM: config.LLM, ToolRegistry: registry, MaxOutputTokens: config.MaxOutputTokens, ReasoningReplay: config.ReasoningReplay},
 			BudgetStage{Guard: config.BudgetGuard},
 			PolicyStage{Engine: config.PolicyEngine, ToolRegistry: registry},
 			ApprovalStage{Approver: config.ToolApprover},

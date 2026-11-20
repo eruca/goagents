@@ -205,6 +205,7 @@ func prefixHashes(budget contextkit.Budget, systemPrompt string, messages []cont
 		h.Write(hashes[index][:])
 		writeString(h, string(msg.Role))
 		writeString(h, msg.Content)
+		writeString(h, msg.Reasoning)
 		writeString(h, msg.ToolCallID)
 		writeInt(h, len(msg.ToolCalls))
 		for _, call := range msg.ToolCalls {
@@ -247,6 +248,7 @@ func ToContextKit(messages []agentcore.Message) []contextkit.Message {
 			Role:       contextkit.Role(msg.Role),
 			Content:    msg.Content,
 			ToolCallID: msg.ToolCallID,
+			Reasoning:  msg.Reasoning,
 		}
 		if converted.Role == contextkit.RoleTool {
 			converted.ToolName = toolNames[msg.ToolCallID]
@@ -269,6 +271,7 @@ func FromContextKit(messages []contextkit.Message) []agentcore.Message {
 			Role:       string(msg.Role),
 			Content:    msg.Content,
 			ToolCallID: msg.ToolCallID,
+			Reasoning:  msg.Reasoning,
 		}
 		for _, call := range msg.ToolCalls {
 			var input json.RawMessage

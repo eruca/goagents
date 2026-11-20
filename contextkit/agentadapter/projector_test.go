@@ -360,3 +360,31 @@ type projectorFunc func(context.Context, agentcore.ContextProjectionRequest) (*a
 func (f projectorFunc) Project(ctx context.Context, req agentcore.ContextProjectionRequest) (*agentcore.ContextProjectionResult, error) {
 	return f(ctx, req)
 }
+
+func TestReplayedReasoningSurvivesCompressionAndCounts(t *testing.T) {
+	llm := &scriptedLLM{responses: []*ports.ChatResponse{
+		{Reasoning: strings.Repeat("r", 100), ToolCalls: []ports.ToolCall{{ID: "c1", Name: "ocr", Input: json.RawMessage(`{}`)}}},
+		{Content: "done"},
+	}}
+	registry := tools.NewRegistry()
+	registry.Register(bigTool{name: "ocr"})
+	var results []*contextkit.Result
+	projector, _ := NewProjector(Config{
+		Compressor: window.New(window.Config{Budget: contextkit.Budget{MaxChars: 100000}, MaxToolChars: 50}),
+		OnCompress: func(_ context.Context, result *contextkit.Result) { results = append(results, result) },
+	})
+	agent, err := agentcore.NewAgent(agentcore.WithLLM(llm), agentcore.WithToolRegistry(registry),
+		agentcore.WithContextProjector(projector), agentcore.WithReasoningReplay(agentcore.ReasoningReplayCurrentTurn))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.Run(context.Background(), agentcore.RunRequest{Input: "go"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := llm.requests[1].Messages[1].Reasoning; got != strings.Repeat("r", 100) {
+		t.Fatalf("replayed reasoning after compression = %q", got)
+	}
+	if ToContextKit([]agentcore.Message{{Role: "assistant", Reasoning: "abc"}})[0].CharLen() != 3 {
+		t.Fatal("reasoning not counted")
+	}
+}

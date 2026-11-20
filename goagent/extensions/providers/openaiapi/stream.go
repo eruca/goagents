@@ -37,7 +37,7 @@ func (c *Client) ChatStream(ctx context.Context, req ports.ChatRequest, onDelta 
 		if err != nil {
 			return nil, err
 		}
-		result, err := parseChatResponse(data)
+		result, err := c.parseChatResponse(data)
 		if err != nil {
 			return nil, err
 		}
@@ -53,7 +53,7 @@ func (c *Client) ChatStream(ctx context.Context, req ports.ChatRequest, onDelta 
 	if c.limits.MaxResponseBytes > 0 {
 		body = &boundedReader{reader: resp.Body, remaining: c.limits.MaxResponseBytes}
 	}
-	assembler := streamAssembler{}
+	assembler := streamAssembler{splitTags: !c.config.KeepThinkTags, client: c}
 	if err := readServerSentEvents(body, func(data []byte) error {
 		return assembler.add(data, onDelta)
 	}); err != nil {
@@ -152,8 +152,10 @@ func streamEnd(err error) error {
 type streamChunk struct {
 	Choices []struct {
 		Delta struct {
-			Content   string `json:"content"`
-			ToolCalls []struct {
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
+			Reasoning        string `json:"reasoning"`
+			ToolCalls        []struct {
 				Index    int    `json:"index"`
 				ID       string `json:"id"`
 				Function struct {
@@ -170,9 +172,18 @@ type streamChunk struct {
 // is concatenated and tool calls are merged by index, since a call's ID and
 // name arrive once and its arguments arrive in pieces.
 type streamAssembler struct {
+	client    *Client
 	content   strings.Builder
+	reasoning strings.Builder
 	toolCalls []chatToolCall
 	usage     *chatUsage
+	// splitTags routes a leading <think> block of the content to the
+	// reasoning as it streams; see thinkSplitter.
+	splitTags bool
+	think     thinkSplitter
+	// fieldReasoning records that the server sent reasoning in a dedicated
+	// field, so the content is not searched for tags.
+	fieldReasoning bool
 }
 
 func (a *streamAssembler) add(data []byte, onDelta func(ports.ChatDelta) error) error {
@@ -211,16 +222,123 @@ func (a *streamAssembler) add(data []byte, onDelta func(ports.ChatDelta) error) 
 			return err
 		}
 	}
+	if reasoning := delta.ReasoningContent + delta.Reasoning; reasoning != "" {
+		a.fieldReasoning = true
+		if err := a.emit(onDelta, "", reasoning); err != nil {
+			return err
+		}
+	}
 	if delta.Content == "" {
 		return nil
 	}
-	a.content.WriteString(delta.Content)
-	return onDelta(ports.ChatDelta{Content: delta.Content})
+	if !a.splitTags || a.fieldReasoning {
+		return a.emit(onDelta, delta.Content, "")
+	}
+	content, reasoning := a.think.add(delta.Content)
+	return a.emit(onDelta, content, reasoning)
+}
+
+func (a *streamAssembler) emit(onDelta func(ports.ChatDelta) error, content, reasoning string) error {
+	a.reasoning.WriteString(reasoning)
+	a.content.WriteString(content)
+	if reasoning != "" {
+		if err := onDelta(ports.ChatDelta{Reasoning: reasoning}); err != nil {
+			return err
+		}
+	}
+	if content != "" {
+		return onDelta(ports.ChatDelta{Content: content})
+	}
+	return nil
 }
 
 func (a *streamAssembler) response() (*ports.ChatResponse, error) {
 	if a.usage == nil {
 		return nil, newProviderError("usage_missing", true, ErrUsageMissing)
 	}
-	return chatResponse(a.content.String(), a.toolCalls, *a.usage)
+	content, reasoning := a.think.flush()
+	a.content.WriteString(content)
+	a.reasoning.WriteString(reasoning)
+	// A block the template opened in the prompt has only a closing tag,
+	// which shows only at the end; it was streamed as content.
+	return a.client.chatResponse(a.content.String(), a.reasoning.String(), a.toolCalls, *a.usage)
+}
+
+// thinkSplitter separates a leading <think>...</think> block from streamed
+// content, holding back only what could still be part of a tag.
+type thinkSplitter struct {
+	state   int // 0 deciding, 1 inside the block, 2 answer
+	pending string
+	// answerStarted records that answer text was emitted, so only the
+	// whitespace right after the closing tag is dropped.
+	answerStarted bool
+}
+
+func (s *thinkSplitter) add(text string) (content, reasoning string) {
+	s.pending += text
+	for {
+		switch s.state {
+		case 0:
+			trimmed := strings.TrimLeft(s.pending, " \t\r\n")
+			if strings.HasPrefix(trimmed, "<think>") {
+				s.state, s.pending = 1, trimmed[len("<think>"):]
+				continue
+			}
+			if strings.HasPrefix("<think>", trimmed) {
+				return "", "" // could still become the tag
+			}
+			s.state = 2
+			s.answerStarted = true
+			content, s.pending = s.pending, ""
+			return content, ""
+		case 1:
+			if end := strings.Index(s.pending, "</think>"); end >= 0 {
+				reasoning = s.pending[:end]
+				s.state, s.pending = 2, s.pending[end+len("</think>"):]
+				more, _ := s.add("")
+				return more, reasoning
+			}
+			hold := partialSuffix(s.pending, "</think>")
+			reasoning, s.pending = s.pending[:len(s.pending)-hold], s.pending[len(s.pending)-hold:]
+			return "", reasoning
+		default:
+			if !s.answerStarted {
+				s.pending = strings.TrimLeft(s.pending, " \t\r\n")
+				if s.pending == "" {
+					return "", ""
+				}
+				s.answerStarted = true
+			}
+			content, s.pending = s.pending, ""
+			return content, ""
+		}
+	}
+}
+
+// flush returns what is held back when the stream ends.
+func (s *thinkSplitter) flush() (content, reasoning string) {
+	pending := s.pending
+	s.pending = ""
+	switch s.state {
+	case 1:
+		return "", pending
+	case 2:
+		if !s.answerStarted {
+			pending = strings.TrimLeft(pending, " \t\r\n")
+		}
+		return pending, ""
+	default:
+		return pending, ""
+	}
+}
+
+// partialSuffix is the length of the longest suffix of text that is a proper
+// prefix of tag.
+func partialSuffix(text, tag string) int {
+	for n := min(len(tag)-1, len(text)); n > 0; n-- {
+		if strings.HasSuffix(text, tag[:n]) {
+			return n
+		}
+	}
+	return 0
 }

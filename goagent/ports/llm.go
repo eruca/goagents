@@ -27,11 +27,13 @@ type StreamingLLMClient interface {
 	ChatStream(ctx context.Context, req ChatRequest, onDelta func(ChatDelta) error) (*ChatResponse, error)
 }
 
-// ChatDelta is an increment of model output: generated text, a piece of a
-// tool call, or both.
+// ChatDelta is an increment of model output: generated text, a piece of the
+// model's reasoning, a piece of a tool call, or a combination. Reasoning
+// deltas concatenate to the response's Reasoning, never to its Content.
 type ChatDelta struct {
-	Content  string
-	ToolCall *ToolCallDelta
+	Content   string
+	Reasoning string
+	ToolCall  *ToolCallDelta
 }
 
 // ToolCallDelta is a piece of the tool call at Index, its position in the
@@ -52,6 +54,9 @@ func ResponseDeltas(resp *ChatResponse) []ChatDelta {
 		return nil
 	}
 	var deltas []ChatDelta
+	if resp.Reasoning != "" {
+		deltas = append(deltas, ChatDelta{Reasoning: resp.Reasoning})
+	}
 	if resp.Content != "" {
 		deltas = append(deltas, ChatDelta{Content: resp.Content})
 	}
@@ -73,10 +78,19 @@ type ChatMessage struct {
 	Content    string
 	ToolCallID string
 	ToolCalls  []ToolCall
+	// Reasoning is reasoning the model produced for this assistant message,
+	// sent back only when the agent replays reasoning. A provider sends it
+	// only if its API accepts reasoning in requests; otherwise it drops it.
+	Reasoning string
 }
 
 type ChatResponse struct {
-	Content   string
+	// Content is the answer, without the model's reasoning.
+	Content string
+	// Reasoning is the model's thinking for this response, which providers
+	// return in a separate field or inside <think> tags. It is kept apart
+	// from Content so it never reaches final output or stored history.
+	Reasoning string
 	ToolCalls []ToolCall
 	Usage     Usage
 }
@@ -188,4 +202,7 @@ func validateJSONSchema(source json.RawMessage, input json.RawMessage) error {
 type Usage struct {
 	InputTokens  int
 	OutputTokens int
+	// ReasoningTokens is the part of OutputTokens spent on reasoning, when
+	// the provider reports it.
+	ReasoningTokens int
 }
