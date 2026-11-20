@@ -13,6 +13,7 @@ import (
 	"github.com/eruca/goagents/goagent/agentcore"
 	"github.com/eruca/goagents/goagent/policy"
 	"github.com/eruca/goagents/goagent/ports"
+	"github.com/eruca/goagents/goagent/prompt"
 	"github.com/eruca/goagents/goagent/tools"
 )
 
@@ -296,4 +297,66 @@ func TestReusesTheLongestRememberedPrefix(t *testing.T) {
 	if again.Metadata["contextkit.reused_messages"] != 0 {
 		t.Fatalf("reused across budgets: %v", again.Metadata["contextkit.reused_messages"])
 	}
+}
+
+func TestSystemPromptCountsAgainstTheBudgetButIsNotProjected(t *testing.T) {
+	messages := []agentcore.Message{
+		{Role: "user", Content: strings.Repeat("old ", 50)},
+		{Role: "assistant", Content: "ok"},
+		{Role: "user", Content: "now"},
+	}
+	projector, _ := NewProjector(Config{Compressor: window.New(window.Config{Budget: contextkit.Budget{MaxChars: 260}})})
+	without, err := projector.Project(context.Background(), agentcore.ContextProjectionRequest{Messages: messages})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if without.Metadata["contextkit.dropped"] != 0 {
+		t.Fatalf("without a prompt everything fits: %+v", without.Metadata)
+	}
+	// A 200-character prompt leaves too little room for the old turn.
+	next := &recordingNext{}
+	withPrompt, _ := NewProjector(Config{Compressor: window.New(window.Config{Budget: contextkit.Budget{MaxChars: 260}}), Next: next})
+	got, err := withPrompt.Project(context.Background(), agentcore.ContextProjectionRequest{Messages: messages, SystemPrompt: strings.Repeat("p", 200)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["contextkit.dropped"] != 2 {
+		t.Fatalf("with a prompt: %+v", got.Metadata)
+	}
+	for _, msg := range next.got.Messages {
+		if strings.Contains(msg.Content, "ppp") {
+			t.Fatalf("system prompt leaked into the projection: %+v", next.got.Messages)
+		}
+	}
+	if next.got.SystemPrompt != strings.Repeat("p", 200) {
+		t.Fatal("Next did not receive the system prompt")
+	}
+}
+
+func TestAgentPassesCompiledPromptToTheProjector(t *testing.T) {
+	var seen string
+	projector := projectorFunc(func(_ context.Context, req agentcore.ContextProjectionRequest) (*agentcore.ContextProjectionResult, error) {
+		seen = req.SystemPrompt
+		return &agentcore.ContextProjectionResult{Messages: req.Messages}, nil
+	})
+	agent, err := agentcore.NewAgent(
+		agentcore.WithLLM(&scriptedLLM{responses: []*ports.ChatResponse{{Content: "done"}}}),
+		agentcore.WithContextProjector(projector),
+		agentcore.WithPromptBlocks([]prompt.Block{{Name: "system", Mode: prompt.ModeCacheable, Content: "You are careful."}}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.Run(context.Background(), agentcore.RunRequest{Input: "hi"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(seen, "You are careful.") {
+		t.Fatalf("projector saw system prompt %q", seen)
+	}
+}
+
+type projectorFunc func(context.Context, agentcore.ContextProjectionRequest) (*agentcore.ContextProjectionResult, error)
+
+func (f projectorFunc) Project(ctx context.Context, req agentcore.ContextProjectionRequest) (*agentcore.ContextProjectionResult, error) {
+	return f(ctx, req)
 }
