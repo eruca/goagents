@@ -224,9 +224,11 @@ type routingAgentRunner struct {
 	skillCatalog     *skillkit.Catalog
 	skillGateContext skillkit.GateContext
 	memory           *memoryRuntime
-	// contextProjector, when set, replaces the memory projector: it
-	// compresses the messages and hands them on to it.
+	// contextProjector and contextTools, when set, replace the memory
+	// projector and tool provider: they compress the messages and add the
+	// context read-back tools, then hand on to memory's.
 	contextProjector agentcore.ContextProjector
+	contextTools     agentcore.ToolProvider
 }
 
 func (r routingAgentRunner) RunDetailed(ctx context.Context, req agentcore.RunRequest) (*agentcore.RunResult, error) {
@@ -335,7 +337,10 @@ func (r routingAgentRunner) newAgent(workflowID, agentRunID string, completedLLM
 		)
 	}
 	if r.contextProjector != nil {
-		options = append(options, agentcore.WithContextProjector(r.contextProjector))
+		options = append(options,
+			agentcore.WithContextProjector(r.contextProjector),
+			agentcore.WithToolProvider(r.contextTools),
+		)
 	}
 	return agentcore.NewAgent(options...)
 }

@@ -37,6 +37,9 @@
     （默认保留最近 3 个），仍放不下才丢弃旧步骤；deep 模式调用 Summarizer
     时窗口压到一半，减少反复摘要；最新一步单独超预算时截断其中最长的工具
     结果和思考。同样的预算下会保留更多消息，`Result.Dropped` 变少。
+  - 占位摘要不再列 "latest ids"，改为被丢弃步骤的目录（用户消息开头、
+    工具名与参数、结果大小、ref），最多占预算的 1/10；清除工具结果一旦
+    开始，会清到预算的 70%（`ClearTarget`）。
   - Summarizer 失败不再让 `Compress` 返回错误，而是降级为占位摘要
     （`Result.SummaryFallback`），连续失败 3 次暂停 5 分钟；context 取消
     仍返回错误。
@@ -53,6 +56,11 @@
   编译好的系统提示，供投影器计入预算；memorykit 投影器把它转给 `Next`。
 - host-api：`HOST_API_CONTEXT_MAX_CHARS`、`HOST_API_CONTEXT_MAX_TOOL_CHARS`
   开启上下文压缩（默认关闭）。
+- `contextkit`：`Archive`、`ArchiveHit`、`WithArchiveScope`、
+  `ErrArchiveNotFound`；`contextkit/archive.Memory`；`window.Config` 的
+  `CatalogEntries`、`ClearTarget`，`window.ReadBackKey`；
+  `agentadapter.Config.Scope`、`agentadapter.ContextTools`（`context_read`、
+  `context_search`）。host-api 开启上下文压缩时一并提供这两个工具。
 - `contextkit`：`Step` 与 `Result.Applied`、`Result.Cleared`、
   `Result.SummaryFallback`；`OffloadStore`；`window.Config` 的
   `KeepRecentReasoning`、`KeepRecentToolResults`、`Offload`、`CompactTarget`、

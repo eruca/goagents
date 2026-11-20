@@ -41,7 +41,7 @@ took.
 |---|---|---|
 | `tool_budget` | Projects each tool message (`tool=… status=… ref=… result=…`) and truncates a result over `MaxToolChars`, after handing its full content to `Offload` when one is set | always |
 | `clear_reasoning` | Clears the reasoning of all but the newest `KeepRecentReasoning` (default 1) assistant messages | over budget |
-| `clear_tool_results` | Clears tool results oldest first, keeping the newest `KeepRecentToolResults` (default 3), until it fits. A cleared result keeps its tool call ID and reference: `result=[older result cleared: N chars; read ref … to see it again]` | still over |
+| `clear_tool_results` | Clears tool results oldest first, keeping the newest `KeepRecentToolResults` (default 3). Once it has to start, it clears down to `ClearTarget` (default 70%) of the budget, so the following calls keep the same cleared prefix, which keeps provider prompt caches valid. A cleared result keeps its tool call ID and reference: `result=[older result cleared: N chars; read ref … to see it again]` | still over |
 | `window` | Drops older steps behind one summary message (see Window Compressor) | still over |
 | `summarize` | In deep mode, the `Summarizer` writes that summary. The window is then cut to `CompactTarget` (default half) of its space, so the following calls fit without summarizing again | deep, still over |
 | `truncate` | When the newest step alone does not fit, halves its longest tool results and reasoning until it does. User messages and assistant answers are never cut | last resort |
@@ -59,7 +59,50 @@ used and `Result.SummaryFallback` is set. After `SummarizerFailureLimit`
 (default 3) consecutive failures it is paused for `SummarizerCooldown`
 (default 5 minutes). A canceled context still fails the compression.
 
-An `OffloadStore` keeps full tool results out of the context:
+## Summary Catalog And Archive
+
+The summary of dropped steps carries a catalog of them, newest last, so the
+model knows what happened and where to find it:
+
+```text
+compressed earlier context: 14 messages omitted
+earlier steps (newest last; read a ref to see it again):
+- (3 earlier entries not listed)
+- user: "total the invoices"
+- ocr {"page": 4} → 2380 chars ref=ctx:9f2c1a7e5b3d0c44
+- assistant: "Pages 1-4 read; totals so far 1000 yuan" ref=ctx:51e0…
+```
+
+The catalog keeps the newest `CatalogEntries` (default 12) entries across
+compressions and takes at most a tenth of the budget, so a small budget keeps
+conversation instead of a list of what it dropped.
+
+An `Archive` (`contextkit.Archive`: `Offload`, `Read`, `Search`) set as
+`Offload` keeps everything compression removes: truncated and cleared tool
+results, cleared reasoning, and dropped steps. `contextkit/archive.Memory` is
+a process-local implementation with bounded scopes and a lexical, IDF-weighted
+search over words and Chinese/Japanese bigrams. Archives are scoped by
+`contextkit.WithArchiveScope`, so one conversation never reads another's
+content.
+
+With goagent, give the projector a `Scope` (for example the session or
+workflow ID from run metadata) and add `agentadapter.ContextTools`, which
+offers the model `context_read` (read back by ref) and `context_search`
+(find archived content). The model pulls what it needs instead of the host
+pushing guesses into the context; results are marked as untrusted data, and
+content read back is not truncated or archived again.
+
+```go
+store := archive.New(archive.Config{})
+projector, _ := agentadapter.NewProjector(agentadapter.Config{
+	Compressor: window.New(window.Config{Budget: budget, MaxToolChars: 2000, Offload: store}),
+	Scope:      sessionID,
+})
+tools, _ := agentadapter.NewContextTools(agentadapter.ContextToolsConfig{Archive: store, Scope: sessionID})
+agent, _ := agentcore.NewAgent(agentcore.WithContextProjector(projector), agentcore.WithToolProvider(tools), ...)
+```
+
+An `OffloadStore` alone keeps full tool results out of the context:
 
 ```go
 type OffloadStore interface {

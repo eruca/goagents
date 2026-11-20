@@ -580,10 +580,16 @@ in the model's view. Both default to 0 (off). With memory enabled, the
 compressed messages then go to the memory projector, so recalled memory is
 inserted after compression and bounded by the memory recall policy.
 
+What compression removes is kept in a process-local archive per workflow,
+and the agent gets `context_read` and `context_search` to read it back by the
+references the summary's catalog and cleared tool results show. The archive
+is lost on restart and is not shared between replicas: a reference it no
+longer holds reads as not found.
+
 The host's agent runs are short today (one request and at most one
 `record_review` call), so compression mostly bounds oversized tool results;
 it starts dropping and summarizing older steps once runs take several tool
-steps. Compression is standard: dropped steps become a placeholder, not a
+steps. Compression is standard: dropped steps become a catalog, not a
 model-written summary.
 
 ## Run the long-lived service

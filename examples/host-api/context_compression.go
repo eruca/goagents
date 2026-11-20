@@ -7,6 +7,7 @@ import (
 
 	"github.com/eruca/goagents/contextkit"
 	contextagentadapter "github.com/eruca/goagents/contextkit/agentadapter"
+	"github.com/eruca/goagents/contextkit/archive"
 	"github.com/eruca/goagents/contextkit/window"
 	"github.com/eruca/goagents/goagent/agentcore"
 )
@@ -29,21 +30,42 @@ func parseContextLimit(getenv func(string) string, name string) (int, error) {
 	return limit, nil
 }
 
-// newContextProjector compresses each agent model request to
-// config.ContextMaxChars with contextkit, counting the compiled system
-// prompt, and then hands the compressed messages to next (the memory
-// projector, when memory is enabled). It returns next unchanged when
-// compression is off.
-func newContextProjector(config Config, next agentcore.ContextProjector) (agentcore.ContextProjector, error) {
+// contextScope keeps each workflow's archived context apart.
+func contextScope(metadata map[string]any) string {
+	id, _ := metadata["workflow_id"].(string)
+	return id
+}
+
+// newContextCompression returns the projector that compresses each agent
+// model request to config.ContextMaxChars, the compiled system prompt
+// included, before handing the messages to nextProjector (the memory
+// projector, when memory is enabled), and the tool provider that lets the
+// model read back what compression removed, followed by nextTools. Removed
+// content is kept in a process-local archive per workflow. It returns the
+// next projector and tools unchanged when compression is off.
+func newContextCompression(config Config, nextProjector agentcore.ContextProjector, nextTools agentcore.ToolProvider) (agentcore.ContextProjector, agentcore.ToolProvider, error) {
 	if config.ContextMaxChars <= 0 {
-		return next, nil
+		return nextProjector, nextTools, nil
 	}
-	return contextagentadapter.NewProjector(contextagentadapter.Config{
+	store := archive.New(archive.Config{})
+	projector, err := contextagentadapter.NewProjector(contextagentadapter.Config{
 		Compressor: window.New(window.Config{
 			Budget:       contextkit.Budget{MaxChars: config.ContextMaxChars},
 			Profile:      contextkit.ProfileStandard,
 			MaxToolChars: config.ContextMaxToolChars,
+			Offload:      store,
 		}),
-		Next: next,
+		Next:  nextProjector,
+		Scope: contextScope,
 	})
+	if err != nil {
+		return nil, nil, err
+	}
+	tools, err := contextagentadapter.NewContextTools(contextagentadapter.ContextToolsConfig{
+		Archive: store, Scope: contextScope, Next: nextTools,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return projector, tools, nil
 }
