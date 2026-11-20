@@ -44,8 +44,19 @@
     （`Result.SummaryFallback`），连续失败 3 次暂停 5 分钟；context 取消
     仍返回错误。
 
+- **host-api 的记忆提取改为读整个 run 的摘录。** 以前提取任务读最终回答
+  （`artifact:<run>:agent-output`），现在读新写入的
+  `artifact:<run>:memory-source`：用户请求、各工具调用及其结果开头、最终回答，
+  总长不超过 `Limits.MaxContentRunes`。工具查到的事实因此也会成为候选记忆。
+  `JSONCandidateExtractor` 的提示词改为写明输出格式、四种 kind 和取舍标准，
+  默认 `MaxOutputTokens` 4096；同样的来源可能提出与以前不同的候选。
+
 ### 新增，可选
 
+- `goagent`：`agentcore.RunResult.Messages`，本次 run 新增的消息（不含从
+  memory provider 载入的历史）。`memorykit/agentadapter`：`RunSource`；
+  `JSONCandidateExtractor.MaxOutputTokens`；提取器接受包住整个回复的一个
+  markdown 代码块。
 - **共享的上下文存档。** 新包 `contextkit/pgarchive`：PostgreSQL 版
   `contextkit.Archive`，引用和检索排名与 `archive.Memory` 一致；
   `contextkit/archive` 导出 `Ref`、`Terms`、`SearchText`、`TermWeight`、

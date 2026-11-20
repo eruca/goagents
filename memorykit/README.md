@@ -148,6 +148,16 @@ Artifact bodies are not valid log/event/error fields.
   `ExtractionMaxRetryDelay` (default 5m), so a short provider outage does not
   use up every attempt.
   Deterministic job/candidate identities make retries idempotent.
+- `agentadapter.JSONCandidateExtractor` tells the model the output format, the
+  four kinds, the key and content limits, and what is worth keeping (durable
+  facts, decisions, constraints, lessons; an empty list is fine). It caps
+  output at `MaxOutputTokens` (default 4096, thinking included) and accepts
+  one markdown code fence around the JSON; anything else is still rejected.
+- `agentadapter.RunSource(result.Messages, limits.MaxContentRunes)` turns a
+  finished goagent run into extraction source text: the request, each tool
+  call with the start of its result, and the final answer, within the limit.
+  Facts the run found through tools then reach extraction, not only the
+  answer. Reasoning and interim assistant text are left out.
 
 Explicit write failure is truthful: the tool returns `项目记忆未保存`, marks the
 result as an error, and sets a request-scoped content-free failure flag. Hosts

@@ -131,7 +131,7 @@ func (s *Server) persistResumedAgentResult(ctx context.Context, run workflowkit.
 		scope, scopeErr := resolveTrustedMemoryScope(run.Metadata)
 		enqueueErr := scopeErr
 		if enqueueErr == nil {
-			enqueueErr = s.memory.EnqueueExtraction(ctx, scope, outputRef, result.RunID.String())
+			enqueueErr = s.memory.EnqueueExtraction(ctx, scope, outputRef, result.RunID.String(), result.Messages)
 		}
 		if enqueueErr != nil {
 			s.memory.observer.RecordMemoryEvent(withMemoryObserverRunID(ctx, result.RunID.String()), "memory.degraded", map[string]any{

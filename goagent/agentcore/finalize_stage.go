@@ -45,6 +45,7 @@ func (s FinalizeStage) Run(ctx context.Context, state *RunState) (StageResult, e
 		OutputMetadata:   metadata,
 		Usage:            state.Usage,
 		ExecutionSummary: state.executionSummary(""),
+		Messages:         cloneRunMessages(state.Messages[min(state.memoryMessages, len(state.Messages)):]),
 	}
 	if len(structured) > 0 || len(metadata) > 0 {
 		eventMetadata := map[string]any{}
@@ -160,4 +161,15 @@ func (r *ReActRunner) saveMemory(ctx context.Context, state *RunState) error {
 		},
 	})
 	return nil
+}
+
+// cloneRunMessages copies messages so a result does not share tool calls
+// with the run state.
+func cloneRunMessages(messages []Message) []Message {
+	cloned := make([]Message, len(messages))
+	for i, msg := range messages {
+		msg.ToolCalls = append([]ports.ToolCall(nil), msg.ToolCalls...)
+		cloned[i] = msg
+	}
+	return cloned
 }

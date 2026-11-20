@@ -270,7 +270,7 @@ func TestAgentMemoryCheckpointPreservesTrustedScopeForResume(t *testing.T) {
 		t.Fatalf("resumed output ref=%q, want run-immutable %q", resumed.OutputRef, wantOutputRef)
 	}
 	queue := config.ExtractionJobs.(*memoryExtractionJobStoreStub)
-	if len(queue.enqueued) != 1 || queue.enqueued[0].SourceAgentID != resumed.AgentRunID || queue.enqueued[0].Source.Ref != wantOutputRef {
+	if len(queue.enqueued) != 1 || queue.enqueued[0].SourceAgentID != resumed.AgentRunID || queue.enqueued[0].Source.Ref != "artifact:"+resumed.AgentRunID+":memory-source" {
 		t.Fatalf("resumed extraction jobs=%#v, want source bound to completed Agent run", queue.enqueued)
 	}
 	if len(provider.requests) != 2 {
@@ -515,7 +515,7 @@ func TestAgentMemoryRequeueKeepsExtractionSourcesRunImmutable(t *testing.T) {
 		if err != nil || string(artifact.Content) != llm.contents[index] {
 			t.Fatalf("result %d artifact=%#v err=%v", index, artifact, err)
 		}
-		if len(queue.enqueued) <= index || queue.enqueued[index].SourceAgentID != result.AgentRunID || queue.enqueued[index].Source.Ref != wantRef {
+		if len(queue.enqueued) <= index || queue.enqueued[index].SourceAgentID != result.AgentRunID || queue.enqueued[index].Source.Ref != "artifact:"+result.AgentRunID+":memory-source" {
 			t.Fatalf("result %d extraction jobs=%#v", index, queue.enqueued)
 		}
 	}
@@ -585,7 +585,7 @@ func TestHostMemoryEndToEnd(t *testing.T) {
 	if err := runs.Complete(t.Context(), sourceRunID, runkit.TerminalSummary{Status: runkit.StatusSucceeded, ContentRef: outputRef}); err != nil {
 		t.Fatal(err)
 	}
-	if err := runtime.EnqueueExtraction(t.Context(), projectA, outputRef, sourceRunID); err != nil {
+	if err := runtime.EnqueueExtraction(t.Context(), projectA, outputRef, sourceRunID, nil); err != nil {
 		t.Fatal(err)
 	}
 	if worked, err := extractionWorker.RunOnce(t.Context()); err != nil || !worked {
