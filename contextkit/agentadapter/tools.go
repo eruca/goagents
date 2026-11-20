@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/eruca/goagents/contextkit"
 	"github.com/eruca/goagents/goagent/agentcore"
@@ -17,6 +19,7 @@ import (
 const (
 	ContextReadTool   = "context_read"
 	ContextSearchTool = "context_search"
+	ContextNoteTool   = "context_note"
 )
 
 // ContextToolsConfig configures ContextTools.
@@ -33,6 +36,9 @@ type ContextToolsConfig struct {
 	MaxReadChars int
 	// MaxResults bounds context_search hits; zero means 5.
 	MaxResults int
+	// Notes, when set, adds context_note, which pins a note to the
+	// conversation's context. Give the projector the same store.
+	Notes *Notes
 }
 
 // ContextTools is an agentcore.ToolProvider that gives the model
@@ -70,6 +76,23 @@ func (p *ContextTools) Tools(ctx context.Context, req agentcore.RunRequest) ([]t
 	scope := p.cfg.Scope(req.Metadata)
 	if scope == "" {
 		return out, nil
+	}
+	if p.cfg.Notes != nil {
+		out = append([]tools.Tool{contextTool{spec: tools.Spec{
+			Name:        ContextNoteTool,
+			Description: "Write down a fact, finding, or decision you will need later. Your context may be compressed and older tool results removed, but your notes stay in your context for the rest of this conversation. Keep each note short and exact, for example \"INV-102: Beiming Paper, 5900 yuan\".",
+			Permission:  policy.PermissionRead,
+			Schema:      tools.Schema{JSONSchema: json.RawMessage(`{"type":"object","properties":{"note":{"type":"string","minLength":1,"maxLength":500}},"required":["note"],"additionalProperties":false}`)},
+		}, run: func(_ context.Context, input json.RawMessage) (string, error) {
+			var args struct {
+				Note string `json:"note"`
+			}
+			if err := json.Unmarshal(input, &args); err != nil {
+				return "", err
+			}
+			p.cfg.Notes.Add(scope, args.Note)
+			return "Noted. Your notes are shown at the top of your context.", nil
+		}}}, out...)
 	}
 	return append([]tools.Tool{
 		contextTool{spec: tools.Spec{
@@ -111,6 +134,9 @@ func (p *ContextTools) Tools(ctx context.Context, req agentcore.RunRequest) ([]t
 			}
 			records := make([]archivedRecord, 0, len(hits))
 			for _, hit := range hits {
+				// Show where the query matches, not the start of a long
+				// message: the fact searched for may be anywhere in it.
+				hit.Message.Content = matchSnippets(hit.Message.Content, args.Query, p.cfg.MaxReadChars/max(len(hits), 1))
 				records = append(records, record(hit.Ref, hit.Message, p.cfg.MaxReadChars/max(len(hits), 1)))
 			}
 			note := ""
@@ -171,4 +197,96 @@ func renderRecords(records []archivedRecord, note string) string {
 		text += "\n" + note
 	}
 	return text
+}
+
+const snippetRadius = 200
+
+// matchSnippets returns the parts of text around the query's terms, at most
+// three windows merged where they overlap, or the start of text when no
+// term matches. Text that fits limit is returned whole.
+func matchSnippets(text, query string, limit int) string {
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	lower := []rune(strings.ToLower(text))
+	type span struct{ start, end int }
+	var spans []span
+	for _, term := range queryTerms(query) {
+		termRunes := []rune(term)
+		for start := 0; start+len(termRunes) <= len(lower) && len(spans) < 3; start++ {
+			if string(lower[start:start+len(termRunes)]) != term {
+				continue
+			}
+			spans = append(spans, span{max(start-snippetRadius, 0), min(start+len(termRunes)+snippetRadius, len(runes))})
+			start += snippetRadius
+		}
+	}
+	if len(spans) == 0 {
+		return string(runes[:limit])
+	}
+	sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })
+	merged := []span{spans[0]}
+	for _, s := range spans[1:] {
+		last := &merged[len(merged)-1]
+		if s.start <= last.end {
+			last.end = max(last.end, s.end)
+			continue
+		}
+		merged = append(merged, s)
+	}
+	var parts []string
+	used := 0
+	for _, s := range merged {
+		if used >= limit {
+			break
+		}
+		end := min(s.end, s.start+limit-used)
+		parts = append(parts, string(runes[s.start:end]))
+		used += end - s.start
+	}
+	return "…" + strings.Join(parts, " … ") + "…"
+}
+
+// queryTerms are the query's lowercase words of two or more letters, and its
+// Chinese and Japanese two-character grams, longest first.
+func queryTerms(query string) []string {
+	seen := map[string]bool{}
+	var terms []string
+	var word, cjk []rune
+	add := func(term string) {
+		if !seen[term] {
+			seen[term] = true
+			terms = append(terms, term)
+		}
+	}
+	flush := func() {
+		if len(word) > 1 {
+			add(strings.ToLower(string(word)))
+		}
+		word = word[:0]
+		for i := 0; i+1 < len(cjk); i++ {
+			add(string(cjk[i : i+2]))
+		}
+		cjk = cjk[:0]
+	}
+	for _, r := range query {
+		switch {
+		case unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana):
+			if len(word) > 0 {
+				flush()
+			}
+			cjk = append(cjk, r)
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			if len(cjk) > 0 {
+				flush()
+			}
+			word = append(word, r)
+		default:
+			flush()
+		}
+	}
+	flush()
+	sort.SliceStable(terms, func(i, j int) bool { return len(terms[i]) > len(terms[j]) })
+	return terms
 }
