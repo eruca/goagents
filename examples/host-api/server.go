@@ -54,6 +54,11 @@ type Config struct {
 	// compression and is bounded by the memory recall policy instead.
 	ContextMaxChars     int
 	ContextMaxToolChars int
+	// ContextArchivePostgresDSN keeps what context compression removes in
+	// PostgreSQL instead of process memory, so any replica can read it back
+	// with context_read and context_search. It has no effect while
+	// ContextMaxChars is zero.
+	ContextArchivePostgresDSN string
 	// AgentApprovalKeyring is a static keyring ("id:base64,..." of 32-byte
 	// keys) used instead of Keychain. AgentApprovalKeyID names its active key.
 	AgentApprovalKeyring string
@@ -270,7 +275,7 @@ func NewServer(config Config) (*Server, error) {
 		if memoryConfig != nil {
 			nextProjector, nextTools = memoryConfig.Projector(), memoryConfig.ToolProvider()
 		}
-		if runner.contextProjector, runner.contextTools, err = newContextCompression(config, nextProjector, nextTools); err != nil {
+		if runner.contextProjector, runner.contextTools, err = newContextCompression(config, pools, nextProjector, nextTools); err != nil {
 			closeStores()
 			return nil, err
 		}
