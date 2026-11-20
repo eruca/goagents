@@ -1,0 +1,137 @@
+{
+  "model": "qwen3.8-27b",
+  "pages": 12,
+  "page_chars": 90000,
+  "budget_chars": 100000000,
+  "tasks": 3,
+  "trials": 1,
+  "strategies": [
+    {
+      "name": "none",
+      "runs": 3,
+      "correct": 0,
+      "correct_by_kind": {},
+      "failed_runs": 3,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "model_calls": 0,
+      "tool_calls": 0,
+      "context_tool_calls": 0,
+      "summarizer_calls": 0,
+      "summarizer_tokens": 0,
+      "context_overflows": 0,
+      "overflow_failures": 3,
+      "seconds": 268.023331375,
+      "answers": [
+        {
+          "task": "INV-1-lookup",
+          "want": "3050",
+          "got": "",
+          "correct": false,
+          "error": "openai-compatible request failed: status 400"
+        },
+        {
+          "task": "INV-1-sum",
+          "want": "57940",
+          "got": "",
+          "correct": false,
+          "error": "openai-compatible request failed: status 400"
+        },
+        {
+          "task": "INV-1-max",
+          "want": "Mingyue Printing",
+          "got": "",
+          "correct": false,
+          "error": "openai-compatible request failed: status 400"
+        }
+      ]
+    },
+    {
+      "name": "pull",
+      "runs": 3,
+      "correct": 3,
+      "correct_by_kind": {
+        "lookup": 1,
+        "max": 1,
+        "sum": 1
+      },
+      "failed_runs": 0,
+      "input_tokens": 2407571,
+      "output_tokens": 7246,
+      "model_calls": 36,
+      "tool_calls": 41,
+      "context_tool_calls": 5,
+      "summarizer_calls": 0,
+      "summarizer_tokens": 0,
+      "context_overflows": 3,
+      "overflow_failures": 0,
+      "seconds": 514.191231625,
+      "answers": [
+        {
+          "task": "INV-1-lookup",
+          "want": "3050",
+          "got": "3050",
+          "correct": true
+        },
+        {
+          "task": "INV-1-sum",
+          "want": "57940",
+          "got": "57940",
+          "correct": true
+        },
+        {
+          "task": "INV-1-max",
+          "want": "Mingyue Printing",
+          "got": "Mingyue Printing",
+          "correct": true
+        }
+      ]
+    },
+    {
+      "name": "summary",
+      "runs": 3,
+      "correct": 2,
+      "correct_by_kind": {
+        "lookup": 1,
+        "sum": 1
+      },
+      "failed_runs": 0,
+      "input_tokens": 4431520,
+      "output_tokens": 13690,
+      "model_calls": 63,
+      "tool_calls": 75,
+      "context_tool_calls": 0,
+      "summarizer_calls": 0,
+      "summarizer_tokens": 0,
+      "context_overflows": 3,
+      "overflow_failures": 0,
+      "seconds": 1068.946371583,
+      "answers": [
+        {
+          "task": "INV-1-lookup",
+          "want": "3050",
+          "got": "3050",
+          "correct": true
+        },
+        {
+          "task": "INV-1-sum",
+          "want": "57940",
+          "got": "57940",
+          "correct": true
+        },
+        {
+          "task": "INV-1-max",
+          "want": "Mingyue Printing",
+          "got": "Ruifeng Chemicals",
+          "correct": false
+        }
+      ]
+    }
+  ],
+  "generated_at": "2026-11-20T14:18:54.221961Z",
+  "task_kinds": {
+    "lookup": "the amount of one early page's invoice",
+    "max": "the vendor with the largest invoice",
+    "sum": "the sum of every invoice"
+  }
+}
