@@ -2,22 +2,26 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	contextagentadapter "github.com/eruca/goagents/contextkit/agentadapter"
 	"github.com/eruca/goagents/goagent/agentcore"
+	"github.com/eruca/goagents/goagent/tools"
 	"github.com/eruca/goagents/workflowkit"
 )
 
 func TestContextCompressionSettings(t *testing.T) {
-	env := map[string]string{contextMaxCharsEnv: "48000", contextMaxToolCharsEnv: "2000"}
+	env := map[string]string{contextMaxCharsEnv: "48000", contextMaxToolCharsEnv: "2000", contextArchivePostgresDSNEnv: "postgres://archive"}
 	settings, err := loadHostSettings(func(key string) string { return env[key] })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if settings.contextMaxChars != 48000 || settings.contextMaxToolChars != 2000 {
+	if settings.contextMaxChars != 48000 || settings.contextMaxToolChars != 2000 || settings.contextArchivePostgresDSN != "postgres://archive" {
 		t.Fatalf("settings = %+v", settings)
 	}
 	for _, bad := range []string{"-1", "lots", "1.5"} {
@@ -39,11 +43,11 @@ func (n *recordingContextNext) Project(_ context.Context, req agentcore.ContextP
 
 func TestContextProjectorCompressesBeforeTheMemoryProjector(t *testing.T) {
 	next := &recordingContextNext{}
-	off, offTools, err := newContextCompression(Config{}, next, nil)
+	off, offTools, err := newContextCompression(Config{}, &pgPools{}, next, nil)
 	if err != nil || off != next || offTools != nil {
 		t.Fatalf("compression off should return the next projector unchanged: %v", err)
 	}
-	projector, tools, err := newContextCompression(Config{ContextMaxChars: 300, ContextMaxToolChars: 50}, next, nil)
+	projector, tools, err := newContextCompression(Config{ContextMaxChars: 300, ContextMaxToolChars: 50}, &pgPools{}, next, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,4 +116,52 @@ func TestHostRunsWorkflowsWithContextCompression(t *testing.T) {
 	if !offered[contextagentadapter.ContextReadTool] || !offered[contextagentadapter.ContextSearchTool] {
 		t.Fatalf("tools provided = %v", offered)
 	}
+}
+
+// TestHostContextArchivePostgres compresses on one replica and reads the
+// removed content back through the context tools of another.
+func TestHostContextArchivePostgres(t *testing.T) {
+	dsn := hostPostgresDSN(t)
+	config := Config{ContextMaxChars: 300, ContextArchivePostgresDSN: dsn}
+	replica := func() (agentcore.ContextProjector, agentcore.ToolProvider) {
+		pools := &pgPools{}
+		t.Cleanup(func() { _ = pools.Close() })
+		projector, tools, err := newContextCompression(config, pools, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return projector, tools
+	}
+	projectorA, _ := replica()
+	_, toolsB := replica()
+	workflow := map[string]any{"workflow_id": fmt.Sprintf("wf-archive-%d", time.Now().UnixNano())}
+	_, err := projectorA.Project(context.Background(), agentcore.ContextProjectionRequest{
+		Messages: []agentcore.Message{
+			{Role: "user", Content: "The deployment key is ZEBRA-4417. " + strings.Repeat("filler ", 60)},
+			{Role: "assistant", Content: "noted"},
+			{Role: "user", Content: "what was the key?"},
+		},
+		Metadata: workflow,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provided, err := toolsB.Tools(context.Background(), agentcore.RunRequest{Metadata: workflow})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range provided {
+		if tool.Spec().Name != contextagentadapter.ContextSearchTool {
+			continue
+		}
+		result, err := tool.Execute(context.Background(), json.RawMessage(`{"query":"deployment key"}`), tools.Env{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(result.ForLLM, "ZEBRA-4417") {
+			t.Fatalf("search on the other replica = %s", result.ForLLM)
+		}
+		return
+	}
+	t.Fatal("context_search not provided")
 }

@@ -85,6 +85,17 @@ search over words and Chinese/Japanese bigrams. Archives are scoped by
 `contextkit.WithArchiveScope`, so one conversation never reads another's
 content.
 
+`contextkit/pgarchive` keeps the archive in PostgreSQL, so several processes
+share it. It stores the same references (`archive.Ref`) and ranks search
+results exactly like `archive.Memory`; `archive/archivetest` is the
+conformance suite both pass. It keeps at most `MaxMessagesPerScope` (500)
+messages per scope but does not limit scopes: call `DeleteScope` when a
+conversation ends or `DeleteBefore` for retention.
+
+```go
+store, err := pgarchive.Open(ctx, dsn, pgarchive.Config{}) // or OpenDB on a shared pool
+```
+
 With goagent, give the projector a `Scope` (for example the session or
 workflow ID from run metadata) and add `agentadapter.ContextTools`, which
 offers the model `context_read` (read back by ref) and `context_search`

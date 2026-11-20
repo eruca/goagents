@@ -46,6 +46,13 @@
 
 ### 新增，可选
 
+- **共享的上下文存档。** 新包 `contextkit/pgarchive`：PostgreSQL 版
+  `contextkit.Archive`，引用和检索排名与 `archive.Memory` 一致；
+  `contextkit/archive` 导出 `Ref`、`Terms`、`SearchText`、`TermWeight`、
+  `TieBreak`，新增一致性测试 `archive/archivetest`。host-api 新开关
+  `HOST_API_CONTEXT_ARCHIVE_POSTGRES_DSN`（开启上下文压缩时生效），多副本
+  共享被压缩掉的内容。新表 `contextkit_archive_messages` 由 `Open` 自动创建；
+  host 不清理旧数据，需要时定期调用 `DeleteBefore`。
 - **被动压缩。** `goagent`：`ports.ErrContextTooLong`；`openaiapi.ResponseError`
   新增 `ContextTooLong` 字段和 `Unwrap`，错误正文说明上下文超出窗口时匹配
   `ErrContextTooLong`（只读取正文用于分类，不进入错误信息）；

@@ -19,6 +19,7 @@ var allowedDeps = map[string][]string{
 	"artifactkit":             nil,
 	"contextkit":              nil,
 	"contextkit/agentadapter": {"contextkit", "goagent"},
+	"contextkit/pgarchive":    {"contextkit"},
 	"evalkit":                 nil,
 	"evalkit/runtrace":        {"evalkit", "goagent", "llmkit", "runkit", "workflowkit"},
 	"goagent":                 nil,

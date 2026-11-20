@@ -1,4 +1,5 @@
-// Package archive provides an in-memory contextkit.Archive.
+// Package archive provides an in-memory contextkit.Archive and the
+// references and search ranking every archive in this repository shares.
 package archive
 
 import (
@@ -68,12 +69,12 @@ func (m *Memory) Offload(ctx context.Context, msg contextkit.Message) (string, e
 	if name == "" {
 		return "", errNoScope
 	}
-	ref := reference(name, msg)
+	ref := Ref(name, msg)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	s := m.scope(name, true)
 	if _, exists := s.messages[ref]; !exists {
-		s.messages[ref] = &entry{message: clone(msg), terms: termSet(msg.ToolName + " " + msg.Content + " " + msg.Reasoning)}
+		s.messages[ref] = &entry{message: clone(msg), terms: termSet(SearchText(msg))}
 		s.order = append(s.order, ref)
 		for len(s.order) > m.cfg.MaxMessagesPerScope {
 			delete(s.messages, s.order[0])
@@ -119,20 +120,19 @@ func (m *Memory) Search(ctx context.Context, query string, limit int) ([]context
 			}
 		}
 	}
-	n := float64(len(s.messages))
+	n := len(s.messages)
 	var hits []contextkit.ArchiveHit
 	for position, ref := range s.order {
 		stored := s.messages[ref]
 		score := 0.0
 		for term := range terms {
 			if stored.terms[term] {
-				df := float64(documents[term])
-				score += math.Log(1 + (n-df+0.5)/(df+0.5))
+				score += TermWeight(n, documents[term])
 			}
 		}
 		if score > 0 {
 			// Newer messages win ties.
-			hits = append(hits, contextkit.ArchiveHit{Ref: ref, Message: clone(stored.message), Score: score + float64(position)*1e-9})
+			hits = append(hits, contextkit.ArchiveHit{Ref: ref, Message: clone(stored.message), Score: TieBreak(score, position)})
 		}
 	}
 	sort.SliceStable(hits, func(i, j int) bool { return hits[i].Score > hits[j].Score })
@@ -174,7 +174,10 @@ func (m *Memory) scope(name string, create bool) *scope {
 	return s
 }
 
-func reference(scope string, msg contextkit.Message) string {
+// Ref is the reference an archive stores msg under in scope. It depends only
+// on the scope and the message, so storing the same message again returns the
+// same reference, in any archive implementation.
+func Ref(scope string, msg contextkit.Message) string {
 	h := sha256.New()
 	for _, part := range []string{scope, string(msg.Role), msg.ToolCallID, msg.Content, msg.Reasoning} {
 		h.Write([]byte(part))
@@ -184,6 +187,38 @@ func reference(scope string, msg contextkit.Message) string {
 		h.Write([]byte(call.ID + "\x00" + call.Name + "\x00" + call.Arguments + "\x00"))
 	}
 	return "ctx:" + hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// SearchText is the text of msg that search matches: its tool name, content
+// and reasoning.
+func SearchText(msg contextkit.Message) string {
+	return msg.ToolName + " " + msg.Content + " " + msg.Reasoning
+}
+
+// Terms returns the sorted search terms of text: lowercase words and, for
+// Chinese and Japanese, two-character grams.
+func Terms(text string) []string {
+	set := termSet(text)
+	terms := make([]string, 0, len(set))
+	for term := range set {
+		terms = append(terms, term)
+	}
+	sort.Strings(terms)
+	return terms
+}
+
+// TermWeight is the weight of a query term found in documents of the n
+// messages in a scope: rarer terms weigh more. A message scores the sum of
+// the weights of the query terms it contains.
+func TermWeight(n, documents int) float64 {
+	df := float64(documents)
+	return math.Log(1 + (float64(n)-df+0.5)/(df+0.5))
+}
+
+// TieBreak adds a tiny amount for a message's position in insertion order, so
+// newer messages win ties.
+func TieBreak(score float64, position int) float64 {
+	return score + float64(position)*1e-9
 }
 
 // termSet splits text into lowercase words and, for Chinese and Japanese,

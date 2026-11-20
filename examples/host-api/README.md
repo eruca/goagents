@@ -492,8 +492,10 @@ pool.
 | `HOST_API_LLMKIT_AUDIT_POSTGRES_DSN` | LLM route and outcome audit and model statistics (`llmkit/pgaudit`) instead of JSONL files under `LLMKIT_HOME` |
 | `HOST_API_LLMKIT_HEALTH_POSTGRES_DSN` | provider health and concurrency slots (`llmkit/pghealth`) instead of process memory |
 | `HOST_API_AGENT_APPROVAL_KEYRING` | static approval keyring instead of Keychain (see above) |
+| `HOST_API_CONTEXT_ARCHIVE_POSTGRES_DSN` | context removed by compression (`contextkit/pgarchive`) instead of process memory; only used with `HOST_API_CONTEXT_MAX_CHARS` |
 
-With **all six** set, several Host processes, each with its own runtime home,
+With **the first six** set (and the context archive too when context
+compression is on), several Host processes, each with its own runtime home,
 can run behind one load balancer as one deployment:
 
 - a queued workflow runs on exactly one process, whichever claims it, and every
@@ -580,11 +582,16 @@ in the model's view. Both default to 0 (off). With memory enabled, the
 compressed messages then go to the memory projector, so recalled memory is
 inserted after compression and bounded by the memory recall policy.
 
-What compression removes is kept in a process-local archive per workflow,
-and the agent gets `context_read` and `context_search` to read it back by the
-references the summary's catalog and cleared tool results show. The archive
-is lost on restart and is not shared between replicas: a reference it no
-longer holds reads as not found.
+What compression removes is kept in an archive per workflow, and the agent
+gets `context_read` and `context_search` to read it back by the references
+the summary's catalog and cleared tool results show. By default the archive
+is process-local: it is lost on restart and not shared between replicas, and
+a reference it no longer holds reads as not found. Set
+`HOST_API_CONTEXT_ARCHIVE_POSTGRES_DSN` to keep it in PostgreSQL
+(`contextkit/pgarchive`), so any replica reads back what another archived.
+The host does not delete archived context; schedule
+`pgarchive.Store.DeleteBefore` (or delete old rows of
+`contextkit_archive_messages`) for retention.
 
 The host's agent runs are short today (one request and at most one
 `record_review` call), so compression mostly bounds oversized tool results;

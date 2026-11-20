@@ -57,6 +57,8 @@ jobs:
       WORKFLOWKIT_POSTGRES_TEST_DSN: postgres://postgres:postgres@localhost:5432/memorykit_test?sslmode=disable
       ARTIFACTKIT_REQUIRE_POSTGRES: "1"
       ARTIFACTKIT_POSTGRES_TEST_DSN: postgres://postgres:postgres@localhost:5432/memorykit_test?sslmode=disable
+      CONTEXTKIT_REQUIRE_POSTGRES: "1"
+      CONTEXTKIT_POSTGRES_TEST_DSN: postgres://postgres:postgres@localhost:5432/memorykit_test?sslmode=disable
       HOST_API_REQUIRE_POSTGRES: "1"
       HOST_API_POSTGRES_TEST_DSN: postgres://postgres:postgres@localhost:5432/memorykit_test?sslmode=disable
     steps:
@@ -65,5 +67,5 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
-      - run: go test -race -p 1 ./memorykit/... ./runkit/... ./workflowkit/... ./llmkit/... ./artifactkit/... ./examples/memory-embedding-eval/...
-      - run: go test -race -run '^(TestHostMemoryPostgresBlackBox|TestHostAPISharedBackendsAcrossProcesses|TestHostAPIMultiReplicaProcesses)$' ./examples/host-api
+      - run: go test -race -p 1 ./memorykit/... ./runkit/... ./workflowkit/... ./llmkit/... ./artifactkit/... ./contextkit/pgarchive/... ./examples/memory-embedding-eval/...
+      - run: go test -race -run '^(TestHostMemoryPostgresBlackBox|TestHostAPISharedBackendsAcrossProcesses|TestHostAPIMultiReplicaProcesses|TestHostContextArchivePostgres)$' ./examples/host-api

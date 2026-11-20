@@ -39,6 +39,7 @@ type hostSettings struct {
 	llmkitAuditPostgresDSN       string
 	contextMaxChars              int
 	contextMaxToolChars          int
+	contextArchivePostgresDSN    string
 }
 
 func loadHostSettings(getenv func(string) string) (hostSettings, error) {
@@ -55,6 +56,7 @@ func loadHostSettings(getenv func(string) string) (hostSettings, error) {
 		artifactPostgresDSN:          getenv(artifactPostgresDSNEnv),
 		agentRunPostgresDSN:          getenv(agentRunPostgresDSNEnv),
 		llmkitAuditPostgresDSN:       getenv(llmkitAuditPostgresDSNEnv),
+		contextArchivePostgresDSN:    getenv(contextArchivePostgresDSNEnv),
 	}
 	if settings.addr == "" {
 		settings.addr = defaultHostAddr
@@ -121,6 +123,7 @@ func initializeHostConfig(
 		LLMKitAuditPostgresDSN:       settings.llmkitAuditPostgresDSN,
 		ContextMaxChars:              settings.contextMaxChars,
 		ContextMaxToolChars:          settings.contextMaxToolChars,
+		ContextArchivePostgresDSN:    settings.contextArchivePostgresDSN,
 		SkillCatalog:                 catalog,
 		SkillGateContext:             skillGate,
 	}, nil
