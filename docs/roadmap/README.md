@@ -54,7 +54,7 @@ ADR-0001 是在分 kit 发版、旧 CJK 检索方案下写的，已经不适用�
 | workflowkit (+agentstep) | 高 | — |
 | llmkit | 高 | 没有项目/账户级预算扣减 |
 | runkit | 高 | — |
-| contextkit | 中 | 已通过 `contextkit/agentadapter` 接入 goagent（预算含系统提示），host-api 可用开关启用；还没有用真实 LLM 摘要器验证过摘要质量，预算不含工具 schema |
+| contextkit | 中 | 递进式压缩（清思考 → 清旧工具结果 → 窗口摘要 → 截断），已接入 goagent 并可在 host-api 启用；缺 provider 报"上下文过长"时的被动压缩，还没有用真实 LLM 摘要器验证摘要质量，预算不含工具 schema |
 | ocrs / skillkit / mcpkit | 中 | — |
 | evalkit (+runtrace) | 中 | 不导出 OpenTelemetry；没有 model-as-judge 评分器 |
 | artifactkit / hostkit | 基础 | artifactkit 没有对象存储（S3）实现，等真实宿主遇到 artifact 体积问题再做 |

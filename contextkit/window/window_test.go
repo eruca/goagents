@@ -521,7 +521,7 @@ func TestSummaryCountsAgainstTheBudget(t *testing.T) {
 	if total := charsOf(got.Messages); total > 1500 || got.OverBudget {
 		t.Fatalf("projection = %d chars (over budget %v), want within 1500", total, got.OverBudget)
 	}
-	if summary := got.Messages[0]; summary.CharLen() != 300 || !strings.HasPrefix(summary.Content, "summary of earlier context (8 messages omitted):\n") {
+	if summary := got.Messages[0]; summary.CharLen() != 300 || !strings.HasPrefix(summary.Content, "summary of earlier context (10 messages omitted):\n") {
 		t.Fatalf("summary = %d chars %q", summary.CharLen(), summary.Content[:60])
 	}
 	if got.AutoCompact == nil || strings.Contains(got.AutoCompact.Summary, "summary of earlier") || len(got.AutoCompact.Summary) >= 5000 {

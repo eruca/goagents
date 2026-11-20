@@ -83,9 +83,18 @@ func (t bigTool) Execute(context.Context, json.RawMessage, tools.Env) (*tools.Re
 	return &tools.Result{ForLLM: strings.Repeat(t.name+" output ", 400)}, nil
 }
 
-// TestRealRunStaysInBudgetAndSummarizesEachMessageOnce runs a goagent agent
-// whose tools return large outputs through many iterations.
-func TestRealRunStaysInBudgetAndSummarizesEachMessageOnce(t *testing.T) {
+type toolHeavyRun struct {
+	llm        *scriptedLLM
+	plain      *scriptedLLM
+	summarizer *countingSummarizer
+	results    []*contextkit.Result
+}
+
+// runToolHeavy runs a goagent agent whose tools return large outputs through
+// eight steps, with the projector compressing to budget, and the same run
+// without it for comparison.
+func runToolHeavy(t *testing.T, budget int) *toolHeavyRun {
+	t.Helper()
 	const iterations = 8
 	var responses []*ports.ChatResponse
 	for i := 0; i < iterations; i++ {
@@ -97,68 +106,108 @@ func TestRealRunStaysInBudgetAndSummarizesEachMessageOnce(t *testing.T) {
 		}})
 	}
 	responses = append(responses, &ports.ChatResponse{Content: "final"})
-	llm := &scriptedLLM{responses: responses}
 	registry := tools.NewRegistry()
 	registry.Register(bigTool{name: "ocr"})
 	registry.Register(bigTool{name: "search"})
 
-	summarizer := &countingSummarizer{}
-	const budget = 3000
-	var results []*contextkit.Result
+	run := &toolHeavyRun{
+		llm:        &scriptedLLM{responses: append([]*ports.ChatResponse(nil), responses...)},
+		plain:      &scriptedLLM{responses: append([]*ports.ChatResponse(nil), responses...)},
+		summarizer: &countingSummarizer{},
+	}
 	projector, err := NewProjector(Config{
 		Compressor: window.New(window.Config{
 			Budget: contextkit.Budget{MaxChars: budget}, Profile: contextkit.ProfileDeep,
-			MaxToolChars: 500, Summarizer: summarizer,
+			MaxToolChars: 500, Summarizer: run.summarizer,
 		}),
-		OnCompress: func(_ context.Context, result *contextkit.Result) { results = append(results, result) },
+		OnCompress: func(_ context.Context, result *contextkit.Result) { run.results = append(run.results, result) },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := agentcore.NewAgent(
-		agentcore.WithLLM(llm), agentcore.WithToolRegistry(registry),
-		agentcore.WithContextProjector(projector), agentcore.WithMaxIterations(iterations+2),
-	)
-	if err != nil {
-		t.Fatal(err)
+	for _, setup := range []struct {
+		llm     *scriptedLLM
+		options []agentcore.Option
+	}{
+		{run.llm, []agentcore.Option{agentcore.WithContextProjector(projector)}},
+		{run.plain, nil},
+	} {
+		agent, err := agentcore.NewAgent(append(setup.options,
+			agentcore.WithLLM(setup.llm), agentcore.WithToolRegistry(registry), agentcore.WithMaxIterations(iterations+2))...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := agent.Run(context.Background(), agentcore.RunRequest{Input: "read every document"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Content != "final" || len(setup.llm.requests) != iterations+1 {
+			t.Fatalf("content %q after %d model calls", result.Content, len(setup.llm.requests))
+		}
 	}
-	result, err := agent.Run(context.Background(), agentcore.RunRequest{Input: "read every document"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Content != "final" || len(llm.requests) != iterations+1 {
-		t.Fatalf("content %q after %d model calls", result.Content, len(llm.requests))
-	}
-
-	for index, request := range llm.requests {
-		chars := 0
+	for index, request := range run.llm.requests {
 		calls := map[string]bool{}
 		for _, msg := range request.Messages {
-			chars += len([]rune(msg.Content))
 			for _, call := range msg.ToolCalls {
 				calls[call.ID] = true
-				chars += len([]rune(call.Name)) + len(call.Input)
 			}
 			if msg.Role == "tool" && !calls[msg.ToolCallID] {
 				t.Fatalf("request %d: tool reply %s without its call", index, msg.ToolCallID)
 			}
 		}
-		if chars > budget {
+		if chars := requestChars(request); chars > budget {
 			t.Fatalf("request %d: %d chars, budget %d", index, chars, budget)
 		}
 	}
-	// Without the cache every model call would summarize the run's whole
-	// dropped history again; with it each message is summarized once.
+	return run
+}
+
+func requestChars(request ports.ChatRequest) int {
+	chars := 0
+	for _, msg := range request.Messages {
+		chars += len([]rune(msg.Content))
+		for _, call := range msg.ToolCalls {
+			chars += len([]rune(call.Name)) + len(call.Input)
+		}
+	}
+	return chars
+}
+
+func (r *toolHeavyRun) applied() map[contextkit.Step]int {
+	counts := map[contextkit.Step]int{}
+	for _, result := range r.results {
+		for _, step := range result.Applied {
+			counts[step]++
+		}
+	}
+	return counts
+}
+
+// TestClearingToolResultsAvoidsSummarizing: with room for the run once older
+// tool results are cleared, nothing is dropped or summarized.
+func TestClearingToolResultsAvoidsSummarizing(t *testing.T) {
+	run := runToolHeavy(t, 3000)
+	applied := run.applied()
+	if applied[contextkit.StepClearToolResults] == 0 || applied[contextkit.StepWindow] != 0 || len(run.summarizer.collapsed) != 0 {
+		t.Fatalf("steps = %v, summarizer calls %d", applied, len(run.summarizer.collapsed))
+	}
+	t.Logf("last model request: %d chars uncompressed, %d compressed (budget 3000); steps %v",
+		requestChars(run.plain.requests[len(run.plain.requests)-1]), requestChars(run.llm.requests[len(run.llm.requests)-1]), applied)
+}
+
+// TestTightBudgetSummarizesEachMessageOnce: when clearing is not enough, the
+// projector summarizes, and the cache keeps every message from being
+// summarized more than once.
+func TestTightBudgetSummarizesEachMessageOnce(t *testing.T) {
+	run := runToolHeavy(t, 1800)
 	seen := map[string]int{}
-	total := 0
-	for _, batch := range summarizer.collapsed {
+	for _, batch := range run.summarizer.collapsed {
 		for _, msg := range batch {
-			key := msg.ToolCallID + "|" + string(msg.Role) + "|" + msg.Content[:min(40, len(msg.Content))]
+			key := msg.ToolCallID + "|" + string(msg.Role)
 			for _, call := range msg.ToolCalls {
 				key += call.ID
 			}
 			seen[key]++
-			total++
 		}
 	}
 	for key, count := range seen {
@@ -166,32 +215,25 @@ func TestRealRunStaysInBudgetAndSummarizesEachMessageOnce(t *testing.T) {
 			t.Fatalf("message %q summarized %d times", key, count)
 		}
 	}
-	if len(summarizer.collapsed) == 0 || total == 0 {
+	if len(seen) == 0 {
 		t.Fatal("nothing was summarized")
 	}
-	// The same run without the projector, for comparison.
-	plainLLM := &scriptedLLM{responses: append([]*ports.ChatResponse(nil), responses...)}
-	plain, err := agentcore.NewAgent(agentcore.WithLLM(plainLLM), agentcore.WithToolRegistry(registry), agentcore.WithMaxIterations(iterations+2))
-	if err != nil {
-		t.Fatal(err)
+	applied := run.applied()
+	if applied[contextkit.StepClearToolResults] == 0 || applied[contextkit.StepSummarize] == 0 {
+		t.Fatalf("steps = %v", applied)
 	}
-	if _, err := plain.Run(context.Background(), agentcore.RunRequest{Input: "read every document"}); err != nil {
-		t.Fatal(err)
+	// Compacting below the budget leaves room: the model calls outnumber the
+	// summaries.
+	if len(run.summarizer.collapsed) >= len(run.llm.requests)-1 {
+		t.Fatalf("%d summaries for %d model calls", len(run.summarizer.collapsed), len(run.llm.requests))
 	}
-	requestChars := func(request ports.ChatRequest) int {
-		chars := 0
-		for _, msg := range request.Messages {
-			chars += len([]rune(msg.Content))
-		}
-		return chars
+	last := run.results[len(run.results)-1]
+	if last.OverBudget {
+		t.Fatalf("last result over budget")
 	}
-	t.Logf("last model request: %d chars uncompressed, %d chars compressed (budget %d); %d summarizer calls",
-		requestChars(plainLLM.requests[len(plainLLM.requests)-1]), requestChars(llm.requests[len(llm.requests)-1]), budget, len(summarizer.collapsed))
-
-	last := results[len(results)-1]
-	if last.OverBudget || len(last.Collapses) == 0 {
-		t.Fatalf("last result over budget %v, collapses %d", last.OverBudget, len(last.Collapses))
-	}
+	t.Logf("last model request: %d chars uncompressed, %d compressed (budget 1800); %d summarizer calls for %d model calls; steps %v",
+		requestChars(run.plain.requests[len(run.plain.requests)-1]), requestChars(run.llm.requests[len(run.llm.requests)-1]),
+		len(run.summarizer.collapsed), len(run.llm.requests), applied)
 }
 
 type recordingNext struct {

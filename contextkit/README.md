@@ -30,27 +30,47 @@ The compressor does not read it on its own: pass
 `Profile: contextkit.ProfileFromEnv()` to `window.Config` to follow it. An
 empty `Profile` means `ProfileStandard`.
 
-## Five Levels
+## Compression Steps
 
-`standard` profile:
+`window.Compressor` fits a conversation into its budget in steps, cheapest
+first, and stops as soon as the projection fits, in the spirit of Claude
+Code's context management. `Result.Applied` lists the steps a compression
+took.
 
-1. Tool observation projection: tool messages become structured observations
-   containing tool name, status, result reference, and bounded result preview.
-2. Message window pruning: system messages and the newest whole turns that fit
-   the budget are retained; everything older becomes one system summary message.
-3. Projection: the returned message slice is a model-facing view, not a mutation
-   of the caller's original session.
+| Step | What it does | When |
+|---|---|---|
+| `tool_budget` | Projects each tool message (`tool=… status=… ref=… result=…`) and truncates a result over `MaxToolChars`, after handing its full content to `Offload` when one is set | always |
+| `clear_reasoning` | Clears the reasoning of all but the newest `KeepRecentReasoning` (default 1) assistant messages | over budget |
+| `clear_tool_results` | Clears tool results oldest first, keeping the newest `KeepRecentToolResults` (default 3), until it fits. A cleared result keeps its tool call ID and reference: `result=[older result cleared: N chars; read ref … to see it again]` | still over |
+| `window` | Drops older steps behind one summary message (see Window Compressor) | still over |
+| `summarize` | In deep mode, the `Summarizer` writes that summary. The window is then cut to `CompactTarget` (default half) of its space, so the following calls fit without summarizing again | deep, still over |
+| `truncate` | When the newest step alone does not fit, halves its longest tool results and reasoning until it does. User messages and assistant answers are never cut | last resort |
 
-`deep` profile adds:
+`Result.Cleared` holds the originals of everything cleared or truncated, and
+deep-mode `Collapses` hold dropped messages, so nothing is lost to the host.
 
-4. Reversible collapse: collapsed messages are recorded with a stable collapse
-   ID, original IDs, original messages, and summary placeholder.
-5. Auto compact: when a `Summarizer` is configured, deep mode uses it to build a
-   stronger compact summary and places that summary in the model projection.
+The `standard` profile stops at the placeholder summary; `deep` adds
+reversible collapses and the `Summarizer`. No LLM dependency is required:
+without a summarizer, deep mode still records the collapse with the
+placeholder summary.
 
-No LLM dependency is required. Hosts can provide a deterministic summarizer, an
-LLM summarizer, or no summarizer. Without a summarizer, deep mode still records
-the collapse with a deterministic placeholder summary.
+A Summarizer that fails does not fail the compression: the placeholder is
+used and `Result.SummaryFallback` is set. After `SummarizerFailureLimit`
+(default 3) consecutive failures it is paused for `SummarizerCooldown`
+(default 5 minutes). A canceled context still fails the compression.
+
+An `OffloadStore` keeps full tool results out of the context:
+
+```go
+type OffloadStore interface {
+	Offload(ctx context.Context, msg contextkit.Message) (ref string, err error)
+}
+```
+
+The host stores the content, for example as an artifact, and gives the model
+a tool to read a reference back. A failing store falls back to truncation.
+Offload should be idempotent, since an uncached compression offloads a result
+again.
 
 ## Window Compressor
 

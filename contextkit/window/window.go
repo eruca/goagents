@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/eruca/goagents/contextkit"
 	"github.com/eruca/goagents/contextkit/toolprojection"
@@ -59,18 +61,57 @@ type Config struct {
 	// reserved. Without a Summarizer and no reserve, the window leaves room
 	// for the placeholder summary it will write.
 	SummaryReserve contextkit.Budget
+
+	// KeepRecentReasoning is how many of the newest assistant messages keep
+	// their reasoning when older reasoning is cleared: zero means 1, and a
+	// negative value never clears reasoning.
+	KeepRecentReasoning int
+	// KeepRecentToolResults is how many of the newest tool results keep
+	// their content when older ones are cleared: zero means 3, and a
+	// negative value never clears tool results.
+	KeepRecentToolResults int
+	// Offload, when set, keeps the full content of each tool result that is
+	// truncated to MaxToolChars or cleared, and the projection names its
+	// reference.
+	Offload contextkit.OffloadStore
+	// CompactTarget is the share of the window's space the kept steps may
+	// fill when a Summarizer writes the summary, so the following calls fit
+	// without summarizing again; zero means 0.5, and 1 fills it.
+	CompactTarget float64
+	// SummarizerFailureLimit consecutive Summarizer failures pause it for
+	// SummarizerCooldown; zero means 3 and 5 minutes. A failed or paused
+	// Summarizer falls back to the placeholder summary.
+	SummarizerFailureLimit int
+	SummarizerCooldown     time.Duration
+	// Now is the clock for the cooldown; nil means time.Now.
+	Now func() time.Time
 }
 
-// Compressor keeps the newest whole turns that fit the budget and replaces
-// everything older with one summary message. The budget covers system
-// messages, the summary, and the kept conversation, in characters, tokens, or
-// both.
+// Compressor fits a conversation into a budget in steps, cheapest first, and
+// stops as soon as it fits (see contextkit.Step):
+//
+//  1. tool results over MaxToolChars are truncated, always;
+//  2. older reasoning is cleared, keeping KeepRecentReasoning;
+//  3. older tool results are cleared, oldest first, keeping
+//     KeepRecentToolResults, the tool call, and its reference;
+//  4. older steps are dropped behind one summary message, written by the
+//     Summarizer in deep mode;
+//  5. when the newest step alone is too large, its longest tool results and
+//     reasoning are truncated.
+//
+// The budget covers system messages, the summary, and the kept conversation,
+// in characters, tokens, or both.
 //
 // Compress is incremental: feed it its previous output plus the new messages
 // and only the newly dropped messages are summarized, together with the
-// previous summary, instead of the whole history again.
+// previous summary, instead of the whole history again. A Compressor is safe
+// for concurrent use.
 type Compressor struct {
 	cfg Config
+
+	mu          sync.Mutex
+	failures    int
+	pausedUntil time.Time
 }
 
 func New(cfg Config) *Compressor {
@@ -79,6 +120,24 @@ func New(cfg Config) *Compressor {
 	}
 	if cfg.MinRecent <= 0 {
 		cfg.MinRecent = 1
+	}
+	if cfg.KeepRecentReasoning == 0 {
+		cfg.KeepRecentReasoning = 1
+	}
+	if cfg.KeepRecentToolResults == 0 {
+		cfg.KeepRecentToolResults = 3
+	}
+	if cfg.CompactTarget <= 0 || cfg.CompactTarget > 1 {
+		cfg.CompactTarget = 0.5
+	}
+	if cfg.SummarizerFailureLimit <= 0 {
+		cfg.SummarizerFailureLimit = 3
+	}
+	if cfg.SummarizerCooldown <= 0 {
+		cfg.SummarizerCooldown = 5 * time.Minute
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
 	}
 	return &Compressor{cfg: cfg}
 }
@@ -97,40 +156,71 @@ func (c *Compressor) Compress(ctx context.Context, req contextkit.Request) (*con
 		return nil, ErrTokenCounterRequired
 	}
 
-	messages := budgetToolMessages(req.Messages, c.cfg.MaxToolChars)
+	result := &contextkit.Result{Profile: profile, Levels: contextkit.LevelsForProfile(profile)}
+	messages, truncated := c.budgetToolMessages(ctx, req.Messages)
+	if truncated {
+		result.Applied = append(result.Applied, contextkit.StepToolBudget)
+	}
 	system, previous, conversation := split(messages)
 	costOf := c.coster(budget)
 	base := costOf(system)
+	fitsWhole := func(conversation []contextkit.Message) bool {
+		return !budget.Bounded() || budget.fits(base.add(costOf(previous)).add(costOf(conversation)))
+	}
+
+	// The cheap steps keep every message and its place in the conversation.
+	if !fitsWhole(conversation) && c.cfg.KeepRecentReasoning > 0 {
+		var cleared []contextkit.Message
+		conversation, cleared = clearReasoning(conversation, c.cfg.KeepRecentReasoning)
+		if len(cleared) > 0 {
+			result.Applied = append(result.Applied, contextkit.StepClearReasoning)
+			result.Cleared = append(result.Cleared, cleared...)
+		}
+	}
+	if !fitsWhole(conversation) && c.cfg.KeepRecentToolResults > 0 {
+		var cleared []contextkit.Message
+		conversation, cleared = c.clearToolResults(ctx, conversation, fitsWhole)
+		if len(cleared) > 0 {
+			result.Applied = append(result.Applied, contextkit.StepClearToolResults)
+			result.Cleared = append(result.Cleared, cleared...)
+		}
+	}
+
 	reserve := c.summaryReserve(budget)
+	summarizing := c.summarizerReady(profile)
+	windowBudget := budget
+	if reserve.Bounded() {
+		windowBudget = budget.minus(reserve)
+	}
+	if summarizing {
+		// Summarizing is the costly step: leave room so the next calls fit
+		// without it.
+		windowBudget = windowBudget.scale(c.cfg.CompactTarget)
+	}
 	// The window leaves room for the summary: a Summarizer's reserve, or the
 	// placeholder the dropped messages would get.
 	fits := func(dropped []contextkit.Message, kept cost) bool {
 		withSummary := base.add(kept)
 		if reserve.Bounded() {
-			return budget.minus(reserve).fits(withSummary)
+			return windowBudget.fits(withSummary)
 		}
 		if len(dropped) > 0 || len(previous) > 0 {
 			withSummary = withSummary.add(costOf([]contextkit.Message{c.placeholder(previous, dropped)}))
 		}
-		return budget.fits(withSummary)
+		return windowBudget.fits(withSummary)
 	}
-	// Keeping the whole conversation needs no new summary, so it can fit
-	// where a shorter window plus a summary does not.
-	dropped, recent, kept := []contextkit.Message(nil), conversation, costOf(conversation)
-	if budget.Bounded() && !budget.fits(base.add(costOf(previous)).add(kept)) {
-		dropped, recent, kept = windowStart(conversation, c.cfg.MinRecent, costOf, fits)
+	dropped, recent := []contextkit.Message(nil), conversation
+	if !fitsWhole(conversation) {
+		dropped, recent, _ = windowStart(conversation, c.cfg.MinRecent, costOf, fits)
 	}
+	result.Dropped = len(dropped)
 
-	result := &contextkit.Result{
-		Profile: profile,
-		Levels:  contextkit.LevelsForProfile(profile),
-		Dropped: len(dropped),
-	}
 	out := append([]contextkit.Message(nil), system...)
 	var summaries []contextkit.Message
 	switch {
 	case len(dropped) > 0:
-		summary, err := c.summarize(ctx, profile, previous, dropped, recent, budget, reserve, req.Metadata, result)
+		result.Applied = append(result.Applied, contextkit.StepWindow)
+		summary, err := c.summarize(ctx, profile, summarizing, previous, dropped, recent, budget, reserve, req.Metadata, result)
 		if err != nil {
 			return nil, err
 		}
@@ -140,11 +230,20 @@ func (c *Compressor) Compress(ctx context.Context, req contextkit.Request) (*con
 		summaries = previous
 		result.Summary = previous[len(previous)-1].Content
 	}
+	fixed := base.add(costOf(summaries))
+	if budget.Bounded() && !budget.fits(fixed.add(costOf(recent))) {
+		var cleared []contextkit.Message
+		recent, cleared = truncateToFit(recent, func(kept []contextkit.Message) bool { return budget.fits(fixed.add(costOf(kept))) })
+		if len(cleared) > 0 {
+			result.Applied = append(result.Applied, contextkit.StepTruncate)
+			result.Cleared = append(result.Cleared, cleared...)
+		}
+	}
 	out = append(out, summaries...)
 	out = append(out, recent...)
 
 	result.Messages = out
-	result.OverBudget = budget.Bounded() && !budget.fits(base.add(costOf(summaries)).add(kept))
+	result.OverBudget = budget.Bounded() && !budget.fits(fixed.add(costOf(recent)))
 	return result, nil
 }
 
@@ -185,8 +284,8 @@ func (c *Compressor) placeholder(previous, dropped []contextkit.Message) context
 	return summary
 }
 
-// truncateToFit shortens a summary's content until it fits the reserve.
-func (c *Compressor) truncateToFit(msg contextkit.Message, reserve limits, costOf func([]contextkit.Message) cost) contextkit.Message {
+// fitSummary shortens a summary's content until it fits the reserve.
+func (c *Compressor) fitSummary(msg contextkit.Message, reserve limits, costOf func([]contextkit.Message) cost) contextkit.Message {
 	if !reserve.Bounded() || reserve.fits(costOf([]contextkit.Message{msg})) {
 		return msg
 	}
@@ -212,13 +311,16 @@ func (c *Compressor) truncateToFit(msg contextkit.Message, reserve limits, costO
 
 // summarize builds the summary message that replaces the previous summary and
 // the newly dropped messages. Deep mode also records a reversible collapse.
-func (c *Compressor) summarize(ctx context.Context, profile contextkit.Profile, previous, dropped, recent []contextkit.Message, budget, reserve limits, metadata map[string]any, result *contextkit.Result) (contextkit.Message, error) {
+func (c *Compressor) summarize(ctx context.Context, profile contextkit.Profile, summarizing bool, previous, dropped, recent []contextkit.Message, budget, reserve limits, metadata map[string]any, result *contextkit.Result) (contextkit.Message, error) {
 	summary := c.placeholder(previous, dropped)
 	if profile != contextkit.ProfileDeep {
-		return c.truncateToFit(summary, reserve, c.coster(budget)), nil
+		return c.fitSummary(summary, reserve, c.coster(budget)), nil
+	}
+	if c.cfg.Summarizer != nil && !summarizing {
+		result.SummaryFallback = true
 	}
 
-	if c.cfg.Summarizer != nil {
+	if summarizing {
 		compacted, err := c.cfg.Summarizer.Summarize(ctx, contextkit.SummarizeRequest{
 			Previous:      joinContents(previous),
 			Collapsed:     cloneMessages(dropped),
@@ -227,10 +329,16 @@ func (c *Compressor) summarize(ctx context.Context, profile contextkit.Profile, 
 			SummaryBudget: reserve.Budget,
 			Metadata:      cloneMetadata(metadata),
 		})
-		if err != nil {
-			return contextkit.Message{}, err
+		if contextErr := dependencyContextError(ctx, err); contextErr != nil {
+			return contextkit.Message{}, contextErr
 		}
-		if compacted != nil && compacted.Summary != "" {
+		c.recordSummarizer(err == nil)
+		if err != nil {
+			// A failed summary must not fail the model call: fall back to
+			// the placeholder.
+			result.SummaryFallback = true
+		} else if compacted != nil && compacted.Summary != "" {
+			result.Applied = append(result.Applied, contextkit.StepSummarize)
 			total := summary.Metadata[droppedTotalKey].(int)
 			header := fmt.Sprintf("%s%d messages omitted", deepSummaryPrefix, total)
 			if images, _ := summary.Metadata[droppedImagesKey].(int); images > 0 {
@@ -238,7 +346,7 @@ func (c *Compressor) summarize(ctx context.Context, profile contextkit.Profile, 
 			}
 			header += "):\n"
 			summary.Content = header + compacted.Summary
-			summary = c.truncateToFit(summary, reserve, c.coster(budget))
+			summary = c.fitSummary(summary, reserve, c.coster(budget))
 			result.AutoCompact = &contextkit.Compact{
 				Summary:  strings.TrimPrefix(summary.Content, header),
 				Metadata: cloneMetadata(compacted.Metadata),
@@ -373,16 +481,42 @@ func stepBoundaries(messages []contextkit.Message) ([]int, int) {
 	return boundaries, lastUser
 }
 
-func budgetToolMessages(messages []contextkit.Message, maxToolChars int) []contextkit.Message {
+// budgetToolMessages projects tool messages and truncates results over
+// MaxToolChars, offloading their full content first when an OffloadStore is
+// set. It reports whether it truncated any.
+func (c *Compressor) budgetToolMessages(ctx context.Context, messages []contextkit.Message) ([]contextkit.Message, bool) {
 	out := make([]contextkit.Message, 0, len(messages))
+	truncated := false
 	for _, msg := range messages {
 		copied := cloneMessage(msg)
-		if copied.Role == contextkit.RoleTool {
-			copied = toolprojection.Project(copied, toolprojection.Config{MaxResultChars: maxToolChars})
+		if copied.Role == contextkit.RoleTool && !isProjected(copied) {
+			if c.cfg.MaxToolChars > 0 && len([]rune(copied.Content)) > c.cfg.MaxToolChars {
+				copied.Ref = c.offload(ctx, copied)
+			}
+			copied = toolprojection.Project(copied, toolprojection.Config{MaxResultChars: c.cfg.MaxToolChars})
+			truncated = truncated || copied.Metadata["contextkit.tool_truncated"] == true
 		}
 		out = append(out, copied)
 	}
-	return out
+	return out, truncated
+}
+
+func isProjected(msg contextkit.Message) bool {
+	projected, _ := msg.Metadata["contextkit.tool_projected"].(bool)
+	return projected
+}
+
+// offload stores a tool result's content and returns its reference: the one
+// it already has, a new one, or none when no store is set or it fails.
+func (c *Compressor) offload(ctx context.Context, msg contextkit.Message) string {
+	if msg.Ref != "" || c.cfg.Offload == nil {
+		return msg.Ref
+	}
+	ref, err := c.cfg.Offload.Offload(ctx, cloneMessage(msg))
+	if err != nil {
+		return ""
+	}
+	return ref
 }
 
 // split separates real system messages and summaries left by an earlier

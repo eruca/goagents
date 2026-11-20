@@ -20,6 +20,46 @@ type Result struct {
 	Collapses   []Collapse     `json:"collapses,omitempty"`
 	AutoCompact *Compact       `json:"auto_compact,omitempty"`
 	Metadata    map[string]any `json:"metadata,omitempty"`
+	// Applied lists the steps this compression took, cheapest first: see
+	// the Step constants.
+	Applied []Step `json:"applied,omitempty"`
+	// Cleared holds, as they were before, the messages whose tool result or
+	// reasoning this compression cleared, so a host can keep them.
+	Cleared []Message `json:"cleared,omitempty"`
+	// SummaryFallback reports that the Summarizer failed or was paused and
+	// the placeholder summary was used instead.
+	SummaryFallback bool `json:"summary_fallback,omitempty"`
+}
+
+// Step is one stage of compression, applied only while the projection does
+// not fit, in this order.
+type Step string
+
+const (
+	// StepToolBudget truncates a tool result over the per-result limit,
+	// offloading its full content when an OffloadStore is set. It applies
+	// whether or not the projection fits.
+	StepToolBudget Step = "tool_budget"
+	// StepClearReasoning clears the reasoning of older assistant messages.
+	StepClearReasoning Step = "clear_reasoning"
+	// StepClearToolResults clears older tool results, oldest first,
+	// keeping the tool call and its reference.
+	StepClearToolResults Step = "clear_tool_results"
+	// StepWindow drops older steps behind a placeholder summary.
+	StepWindow Step = "window"
+	// StepSummarize has the Summarizer write that summary.
+	StepSummarize Step = "summarize"
+	// StepTruncate shortens the longest tool results and reasoning of the
+	// kept messages when the newest step alone does not fit.
+	StepTruncate Step = "truncate"
+)
+
+// OffloadStore keeps the full content of a tool result that compression
+// truncates or clears, and returns a reference the model can use to read it
+// again through a host tool. Offload should be idempotent for the same
+// message: an uncached compression offloads it again.
+type OffloadStore interface {
+	Offload(ctx context.Context, msg Message) (ref string, err error)
 }
 
 type Collapse struct {
