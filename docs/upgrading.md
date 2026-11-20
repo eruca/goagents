@@ -33,6 +33,13 @@
     `summary of earlier context (N messages omitted):`；占位摘要最多列出
     5 个被丢弃的消息 ID。
   - `Message.CharLen` 计入工具调用的名字和参数。
+  - 超预算时按代价从低到高逐级处理：先清除旧思考，再从最旧开始清除工具结果
+    （默认保留最近 3 个），仍放不下才丢弃旧步骤；deep 模式调用 Summarizer
+    时窗口压到一半，减少反复摘要；最新一步单独超预算时截断其中最长的工具
+    结果和思考。同样的预算下会保留更多消息，`Result.Dropped` 变少。
+  - Summarizer 失败不再让 `Compress` 返回错误，而是降级为占位摘要
+    （`Result.SummaryFallback`），连续失败 3 次暂停 5 分钟；context 取消
+    仍返回错误。
 
 ### 新增，可选
 
@@ -46,6 +53,10 @@
   编译好的系统提示，供投影器计入预算；memorykit 投影器把它转给 `Next`。
 - host-api：`HOST_API_CONTEXT_MAX_CHARS`、`HOST_API_CONTEXT_MAX_TOOL_CHARS`
   开启上下文压缩（默认关闭）。
+- `contextkit`：`Step` 与 `Result.Applied`、`Result.Cleared`、
+  `Result.SummaryFallback`；`OffloadStore`；`window.Config` 的
+  `KeepRecentReasoning`、`KeepRecentToolResults`、`Offload`、`CompactTarget`、
+  `SummarizerFailureLimit`、`SummarizerCooldown`、`Now`。
 - `contextkit`：`Message.ToolCalls`、`ToolCall`、`SummarizeRequest.SummaryBudget`、
   `window.Config.SummaryReserve`；新包 `contextkit/agentadapter`，把压缩器
   接入 goagent 的 `ContextProjector`。
