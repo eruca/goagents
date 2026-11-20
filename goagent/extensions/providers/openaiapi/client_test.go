@@ -600,7 +600,7 @@ func chatRequestWithSerializedSize(t *testing.T, target int) ports.ChatRequest {
 	for {
 		payload, err := json.Marshal(chatCompletionsRequest{
 			Model:    "test-model",
-			Messages: buildMessages(req.Messages),
+			Messages: buildMessages(req.Messages, false),
 			Tools:    buildTools(req.Tools),
 		})
 		if err != nil {

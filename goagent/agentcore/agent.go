@@ -31,6 +31,7 @@ type Agent struct {
 	outputValidator      OutputValidator
 	budgetGuard          BudgetGuard
 	maxOutputTokens      int
+	reasoningReplay      ReasoningReplay
 	maxIterations        int
 }
 
@@ -303,6 +304,7 @@ func (a *Agent) newReActRunner(runRegistry MutableToolRegistry) *ReActRunner {
 		BudgetGuard:          a.budgetGuard,
 		MaxIterations:        a.maxIterations,
 		MaxOutputTokens:      a.maxOutputTokens,
+		ReasoningReplay:      a.reasoningReplay,
 	})
 }
 

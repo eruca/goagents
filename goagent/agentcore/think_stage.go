@@ -16,6 +16,7 @@ type ThinkStage struct {
 	LLM             ports.LLMClient
 	ToolRegistry    ports.ToolRegistry
 	MaxOutputTokens int
+	ReasoningReplay ReasoningReplay
 }
 
 func (s ThinkStage) Name() string {
@@ -24,7 +25,7 @@ func (s ThinkStage) Name() string {
 
 func (s ThinkStage) Run(ctx context.Context, state *RunState) (StageResult, error) {
 	req := ports.ChatRequest{
-		Messages:        chatMessages(state),
+		Messages:        chatMessages(state, s.ReasoningReplay),
 		Tools:           chatToolSpecs(s.ToolRegistry),
 		MaxOutputTokens: s.MaxOutputTokens,
 	}
@@ -33,8 +34,8 @@ func (s ThinkStage) Run(ctx context.Context, state *RunState) (StageResult, erro
 	if streaming, ok := s.LLM.(ports.StreamingLLMClient); ok && state.onDelta != nil {
 		iteration := state.Iteration
 		resp, err = streaming.ChatStream(ctx, req, func(delta ports.ChatDelta) error {
-			if delta.Content != "" || delta.ToolCall != nil {
-				state.onDelta(ModelDelta{Iteration: iteration, Content: delta.Content, ToolCall: delta.ToolCall})
+			if delta.Content != "" || delta.Reasoning != "" || delta.ToolCall != nil {
+				state.onDelta(ModelDelta{Iteration: iteration, Content: delta.Content, Reasoning: delta.Reasoning, ToolCall: delta.ToolCall})
 			}
 			return nil
 		})
@@ -48,6 +49,7 @@ func (s ThinkStage) Run(ctx context.Context, state *RunState) (StageResult, erro
 	state.LastResponse = resp
 	state.Usage.InputTokens += resp.Usage.InputTokens
 	state.Usage.OutputTokens += resp.Usage.OutputTokens
+	state.Usage.ReasoningTokens += resp.Usage.ReasoningTokens
 	state.PendingCalls = state.PendingCalls[:0]
 	var rejected []Message
 	calls, invalidJSON := normalizeToolCallInputs(resp.ToolCalls)
@@ -69,12 +71,13 @@ func (s ThinkStage) Run(ctx context.Context, state *RunState) (StageResult, erro
 			Role:      "assistant",
 			Content:   resp.Content,
 			ToolCalls: append([]ports.ToolCall(nil), resp.ToolCalls...),
+			Reasoning: resp.Reasoning,
 		})
 		// Rejected calls never reach policy, approval, or execution; they are
 		// answered now so the model can correct them on its next turn.
 		state.Messages = append(state.Messages, rejected...)
 	} else if resp.Content != "" {
-		state.Messages = append(state.Messages, Message{Role: "assistant", Content: resp.Content})
+		state.Messages = append(state.Messages, Message{Role: "assistant", Content: resp.Content, Reasoning: resp.Reasoning})
 	}
 	return StageContinue, nil
 }
@@ -122,11 +125,12 @@ func (s ThinkStage) rejectToolCall(call ports.ToolCall) string {
 	return ""
 }
 
-func chatMessages(state *RunState) []ports.ChatMessage {
+func chatMessages(state *RunState, replay ReasoningReplay) []ports.ChatMessage {
 	source := state.Messages
 	if state.ContextProjection != nil {
 		source = state.ContextProjection.Messages
 	}
+	source = replayView(source, replay)
 	messages := make([]ports.ChatMessage, 0, len(source)+1)
 	if state.CompiledPrompt != nil && state.CompiledPrompt.Content != "" {
 		messages = append(messages, ports.ChatMessage{Role: "system", Content: state.CompiledPrompt.Content})
@@ -137,6 +141,7 @@ func chatMessages(state *RunState) []ports.ChatMessage {
 			Content:    msg.Content,
 			ToolCallID: msg.ToolCallID,
 			ToolCalls:  append([]ports.ToolCall(nil), msg.ToolCalls...),
+			Reasoning:  msg.Reasoning,
 		})
 	}
 	return messages

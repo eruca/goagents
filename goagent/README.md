@@ -111,6 +111,32 @@ sets the per-call generation limit; `agentcore.WithMaxOutputTokens` fills it for
 every model call of an agent. Zero values disable a bound; the library does not
 hard-code application-specific budgets.
 
+### Reasoning
+
+Reasoning models return their thinking apart from the answer:
+`ports.ChatResponse.Reasoning` holds it and `Content` holds only the answer.
+`openaiapi` reads `reasoning_content` (DeepSeek, vLLM) or `reasoning`, and
+moves a leading `<think>...</think>` block, or reasoning ended by a lone
+`</think>` because the chat template opened the block, out of the content, as
+Qwen3 and DeepSeek-R1 write it when served without a reasoning parser
+(`Config.KeepThinkTags` turns that off). Streaming delivers reasoning in
+`ChatDelta.Reasoning`, never in `Content`, even when a tag is split across
+chunks. `Usage.ReasoningTokens` reports reasoning tokens when the server does.
+
+In a run, reasoning is kept on the assistant message (`Message.Reasoning`)
+and on the result (`RunResult.Reasoning`), and is never part of
+`RunResult.Content` or session memory. `WithReasoningReplay` decides what is
+sent back to the model:
+
+- `ReasoningReplayNone` (default): nothing. A finished step's reasoning only
+  costs context, and some providers reject it in requests.
+- `ReasoningReplayCurrentTurn`: the reasoning of the assistant messages after
+  the last user message, for providers that want it within a tool-call loop.
+  `openaiapi` sends it as `reasoning_content` only with `Config.SendReasoning`.
+
+A context projector sees the messages as they will be sent, so reasoning that
+is not replayed does not count against its budget.
+
 See `examples/openai-compatible` for a real-provider example. The example requires `OPENAI_COMPAT_BASE_URL` and `OPENAI_COMPAT_MODEL`; `OPENAI_COMPAT_API_KEY` is optional. Without the required values it prints a skip message and exits successfully.
 
 ## Observable Runs

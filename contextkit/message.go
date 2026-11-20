@@ -20,7 +20,10 @@ type Message struct {
 	ToolCallID string  `json:"tool_call_id,omitempty"`
 	// ToolCalls are the tool calls an assistant message makes. A tool
 	// message answers one of them through ToolCallID.
-	ToolCalls []ToolCall     `json:"tool_calls,omitempty"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	// Reasoning is the model's thinking behind an assistant message, when
+	// it is sent back to the model.
+	Reasoning string         `json:"reasoning,omitempty"`
 	Status    string         `json:"status,omitempty"`
 	Ref       string         `json:"ref,omitempty"`
 	Metadata  map[string]any `json:"metadata,omitempty"`
@@ -41,9 +44,9 @@ type ToolCall struct {
 }
 
 // CharLen counts the runes of Content and of each tool call's name and
-// arguments; images add nothing.
+// arguments, and of Reasoning; images add nothing.
 func (m Message) CharLen() int {
-	total := utf8.RuneCountInString(m.Content)
+	total := utf8.RuneCountInString(m.Content) + utf8.RuneCountInString(m.Reasoning)
 	for _, call := range m.ToolCalls {
 		total += utf8.RuneCountInString(call.Name) + utf8.RuneCountInString(call.Arguments)
 	}

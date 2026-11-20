@@ -14,6 +14,12 @@
   数据库 schema 不变，不需要迁移。依赖具体全文召回结果的宿主测试可能需要
   更新预期。
 
+- **goagent 把模型的思考与回答分开。** openaiapi 默认把正文开头的
+  `<think>...</think>`（以及模板已打开、只有 `</think>` 的形式）移到
+  `ChatResponse.Reasoning`，`Content` 只剩回答；`reasoning_content` /
+  `reasoning` 字段同样进 `Reasoning`。`RunResult.Content` 和会话记忆因此不再
+  含思考。需要旧行为时设 `openaiapi.Config.KeepThinkTags`。思考默认不回传给
+  模型（`WithReasoningReplay`）。
 - **contextkit 的窗口与预算语义变化。**
   - `window.New` 不再读取 `CONTEXT_DEEP_COMPRESSION`；空 `Profile` 即
     standard。要沿用旧行为，传 `Profile: contextkit.ProfileFromEnv()`。
@@ -30,6 +36,12 @@
 
 ### 新增，可选
 
+- `goagent`：`ChatResponse.Reasoning`、`ChatMessage.Reasoning`、
+  `ChatDelta.Reasoning`、`Usage.ReasoningTokens`、`ports.SplitThinkTags`；
+  `agentcore.Message.Reasoning`、`RunResult.Reasoning`、`ModelDelta.Reasoning`、
+  `Usage.ReasoningTokens`、`WithReasoningReplay`；`openaiapi.Config` 的
+  `KeepThinkTags`、`SendReasoning`。`contextkit.Message.Reasoning`（计入
+  `CharLen`），`contextkit/agentadapter` 映射它。
 - `goagent`：`agentcore.ContextProjectionRequest.SystemPrompt`，投影阶段填入
   编译好的系统提示，供投影器计入预算；memorykit 投影器把它转给 `Next`。
 - host-api：`HOST_API_CONTEXT_MAX_CHARS`、`HOST_API_CONTEXT_MAX_TOOL_CHARS`

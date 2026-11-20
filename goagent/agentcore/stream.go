@@ -35,6 +35,9 @@ type RunStreamEvent struct {
 type ModelDelta struct {
 	Iteration int
 	Content   string
+	// Reasoning is a piece of the model's thinking, streamed apart from
+	// Content.
+	Reasoning string
 	ToolCall  *ports.ToolCallDelta
 }
 

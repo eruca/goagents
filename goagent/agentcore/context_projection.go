@@ -22,8 +22,9 @@ type ContextProjectionResult struct {
 }
 
 type ContextProjectionStage struct {
-	Projector ContextProjector
-	Budget    Budget
+	Projector       ContextProjector
+	Budget          Budget
+	ReasoningReplay ReasoningReplay
 }
 
 func (s ContextProjectionStage) Name() string {
@@ -36,7 +37,9 @@ func (s ContextProjectionStage) Run(ctx context.Context, state *RunState) (Stage
 		return StageContinue, nil
 	}
 	request := ContextProjectionRequest{
-		Messages: append([]Message(nil), state.Messages...),
+		// The projector sees the messages as ThinkStage will send them, so
+		// reasoning that is not replayed does not count against a budget.
+		Messages: replayView(state.Messages, s.ReasoningReplay),
 		Budget:   s.Budget,
 		Metadata: cloneMetadata(state.Metadata),
 	}

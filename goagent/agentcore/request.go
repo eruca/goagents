@@ -19,8 +19,11 @@ type RunRequest struct {
 }
 
 type RunResult struct {
-	RunID            RunID
-	Content          string
+	RunID   RunID
+	Content string
+	// Reasoning is the model's thinking behind the final answer, kept apart
+	// from Content. Hosts decide whether to show or store it.
+	Reasoning        string
 	StructuredOutput json.RawMessage
 	OutputMetadata   map[string]any
 	Usage            Usage
@@ -31,6 +34,9 @@ type RunResult struct {
 type Usage struct {
 	InputTokens  int
 	OutputTokens int
+	// ReasoningTokens is the part of OutputTokens spent on reasoning, when
+	// the provider reports it.
+	ReasoningTokens int
 }
 
 type ExecutionSummary struct {
@@ -46,4 +52,8 @@ type Message struct {
 	Content    string
 	ToolCallID string
 	ToolCalls  []ports.ToolCall
+	// Reasoning is the model's thinking behind an assistant message. It is
+	// sent back to the model only as WithReasoningReplay allows, and never
+	// stored in session memory.
+	Reasoning string `json:",omitempty"`
 }
