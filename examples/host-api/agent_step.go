@@ -107,7 +107,7 @@ func (s hostAgentStep) Run(ctx context.Context, run workflowkit.WorkflowRun) (wo
 	}); err != nil {
 		return failedAgentStepResult(result, err), err
 	}
-	s.enqueueAgentExtraction(ctx, run, outputRef, result.RunID.String())
+	s.enqueueAgentExtraction(ctx, run, outputRef, result.RunID.String(), result.Messages)
 
 	return workflowkit.StepResult{
 		Status:        workflowkit.StatusWaitingApproval,
@@ -162,13 +162,13 @@ func buildAgentRequestForWorkflow(run workflowkit.WorkflowRun, memoryEnabled boo
 	return request, nil
 }
 
-func (s hostAgentStep) enqueueAgentExtraction(ctx context.Context, run workflowkit.WorkflowRun, outputRef, agentRunID string) {
+func (s hostAgentStep) enqueueAgentExtraction(ctx context.Context, run workflowkit.WorkflowRun, outputRef, agentRunID string, messages []agentcore.Message) {
 	if s.runner.memory == nil {
 		return
 	}
 	scope, err := resolveTrustedMemoryScope(run.Metadata)
 	if err == nil {
-		err = s.runner.memory.EnqueueExtraction(ctx, scope, outputRef, agentRunID)
+		err = s.runner.memory.EnqueueExtraction(ctx, scope, outputRef, agentRunID, messages)
 	}
 	if err != nil {
 		s.runner.memory.observer.RecordMemoryEvent(withMemoryObserverRunID(ctx, agentRunID), "memory.degraded", map[string]any{

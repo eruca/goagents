@@ -2,15 +2,18 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/eruca/goagents/artifactkit"
 	"github.com/eruca/goagents/goagent/agentcore"
+	"github.com/eruca/goagents/goagent/ports"
 	"github.com/eruca/goagents/memorykit"
 	"github.com/eruca/goagents/memorykit/memorystore"
 	"github.com/eruca/goagents/runkit"
@@ -329,7 +332,7 @@ func TestMemoryRuntimeEnqueueUsesStableTrustedJobIdentity(t *testing.T) {
 	}
 	scope := memorykit.Scope{TenantID: "tenant-a", SubjectType: memorykit.SubjectProject, SubjectID: "project-a"}
 	for range 2 {
-		if err := runtime.EnqueueExtraction(t.Context(), scope, outputRef, runID); err != nil {
+		if err := runtime.EnqueueExtraction(t.Context(), scope, outputRef, runID, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -364,7 +367,7 @@ func TestMemoryRuntimeEnqueueRejectsSourceNotBoundToAgentRun(t *testing.T) {
 	}
 	scope := memorykit.Scope{TenantID: "tenant-a", SubjectType: memorykit.SubjectProject, SubjectID: "project-a"}
 
-	if err := runtime.EnqueueExtraction(t.Context(), scope, legacyRef, runID); err == nil {
+	if err := runtime.EnqueueExtraction(t.Context(), scope, legacyRef, runID, nil); err == nil {
 		t.Fatal("EnqueueExtraction accepted source ref not bound to Agent run ID")
 	}
 	if queue := config.ExtractionJobs.(*memoryExtractionJobStoreStub); len(queue.enqueued) != 0 {
@@ -643,5 +646,50 @@ func TestMemoryRuntimeTrustedMetadataHelperDoesNotAlias(t *testing.T) {
 	}
 	if !reflect.DeepEqual(values, want) {
 		t.Fatalf("metadata = %#v, want %#v", values, want)
+	}
+}
+
+func TestMemoryRuntimeExtractsFromTheRunDigest(t *testing.T) {
+	config := validCompleteMemoryRuntimeConfig(t)
+	queue := config.ExtractionJobs.(*memoryExtractionJobStoreStub)
+	runID := "00000000-0000-4000-8000-000000000890"
+	outputRef := "artifact:" + runID + ":agent-output"
+	runs := runkit.NewMemoryStore()
+	if err := runs.Create(t.Context(), runkit.RunRecord{RunID: runID, WorkflowID: "workflow-a", Status: runkit.StatusRunning}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runs.Complete(t.Context(), runID, runkit.TerminalSummary{Status: runkit.StatusSucceeded, ContentRef: outputRef}); err != nil {
+		t.Fatal(err)
+	}
+	artifacts := artifactkit.NewMemoryStore()
+	runtime, err := newMemoryRuntime(config, runs, artifacts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := []agentcore.Message{
+		{Role: "user", Content: "Review input artifact artifact:wf:input:1"},
+		{Role: "assistant", ToolCalls: []ports.ToolCall{{ID: "c1", Name: "read_artifact", Input: json.RawMessage(`{}`)}}},
+		{Role: "tool", ToolCallID: "c1", Content: "The release branch is frozen until Friday."},
+		{Role: "assistant", Content: "Approve with the freeze noted."},
+	}
+	scope := memorykit.Scope{TenantID: "tenant-a", SubjectType: memorykit.SubjectProject, SubjectID: "project-a"}
+	if err := runtime.EnqueueExtraction(t.Context(), scope, outputRef, runID, messages); err != nil {
+		t.Fatal(err)
+	}
+	sourceRef := "artifact:" + runID + ":memory-source"
+	if len(queue.enqueued) != 1 || queue.enqueued[0].Source != (memorykit.Source{Kind: "artifact", Ref: sourceRef}) {
+		t.Fatalf("enqueued = %#v", queue.enqueued)
+	}
+	source, err := artifacts.Get(t.Context(), sourceRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := string(source.Content); !strings.Contains(text, "frozen until Friday") || !strings.Contains(text, "Approve with the freeze noted.") ||
+		utf8.RuneCountInString(text) > config.Limits.MaxContentRunes {
+		t.Fatalf("source = %q", text)
+	}
+	reader, _ := newHostArtifactSourceReader(artifacts, config.Limits)
+	if _, err := reader.ReadSource(t.Context(), queue.enqueued[0].Source); err != nil {
+		t.Fatalf("worker cannot read the source: %v", err)
 	}
 }

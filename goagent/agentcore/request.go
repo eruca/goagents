@@ -29,6 +29,11 @@ type RunResult struct {
 	Usage            Usage
 	ExecutionSummary ExecutionSummary
 	Interruption     *ToolApprovalInterruption
+	// Messages are the messages this run added, in order: the input, each
+	// assistant turn with its tool calls, each tool reply, and the final
+	// answer. History loaded from the memory provider is not included. Set
+	// on a finished run only. Assistant messages keep their Reasoning.
+	Messages []Message
 }
 
 type Usage struct {

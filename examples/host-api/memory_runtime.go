@@ -39,6 +39,7 @@ type memoryRuntime struct {
 	toolProvider *memoryagentadapter.ToolProvider
 	observer     *hostMemoryObserver
 	runs         runkit.Store
+	artifacts    artifactkit.Store
 
 	workerStart sync.Once
 	workerMu    sync.Mutex
@@ -84,7 +85,7 @@ func newMemoryRuntime(config *memoryRuntimeConfig, runs runkit.Store, artifacts 
 	if err != nil {
 		return nil, fmt.Errorf("build memory tool provider: %w", err)
 	}
-	runtime := &memoryRuntime{memoryRuntimeConfig: copy, projector: projector, toolProvider: provider, observer: observer, runs: runs}
+	runtime := &memoryRuntime{memoryRuntimeConfig: copy, projector: projector, toolProvider: provider, observer: observer, runs: runs, artifacts: artifacts}
 	return runtime, nil
 }
 
@@ -264,7 +265,12 @@ func (s *Server) WaitMemoryWorkers(ctx context.Context) error {
 	return s.memory.WaitMemoryWorkers(ctx)
 }
 
-func (r *memoryRuntime) EnqueueExtraction(ctx context.Context, scope memorykit.Scope, outputRef, sourceAgentID string) error {
+// EnqueueExtraction queues memory extraction for a completed agent run.
+// With the run's messages, the source is a digest of the run
+// (memoryagentadapter.RunSource) written to "artifact:<run>:memory-source",
+// so facts the run found through tools are extracted too; without them it is
+// the run's output.
+func (r *memoryRuntime) EnqueueExtraction(ctx context.Context, scope memorykit.Scope, outputRef, sourceAgentID string, messages []agentcore.Message) error {
 	if r == nil || strings.TrimSpace(outputRef) == "" || !strings.HasPrefix(outputRef, "artifact:") ||
 		memorykit.ValidateMemoryID(sourceAgentID) != nil || outputRef != "artifact:"+sourceAgentID+":agent-output" {
 		return fmt.Errorf("%w: invalid Host extraction source", memorykit.ErrInvalidMemory)
@@ -280,11 +286,19 @@ func (r *memoryRuntime) EnqueueExtraction(ctx context.Context, scope memorykit.S
 		completed.Summary.Status != runkit.StatusSucceeded || completed.Summary.ContentRef != outputRef || completed.UpdatedAt.IsZero() {
 		return fmt.Errorf("%w: extraction source is not a matching completed Agent run", memorykit.ErrInvalidMemory)
 	}
+	sourceRef := outputRef
+	if len(messages) > 0 {
+		sourceRef = "artifact:" + sourceAgentID + ":memory-source"
+		source := memoryagentadapter.RunSource(messages, r.Limits.MaxContentRunes)
+		if err := putTextArtifact(ctx, r.artifacts, sourceRef, source); err != nil {
+			return err
+		}
+	}
 	now := completed.UpdatedAt.UTC()
-	identity := strings.Join([]string{"goagents.host.memory-extraction.v1", scope.TenantID, string(scope.SubjectType), scope.SubjectID, sourceAgentID, outputRef}, "\x00")
+	identity := strings.Join([]string{"goagents.host.memory-extraction.v1", scope.TenantID, string(scope.SubjectType), scope.SubjectID, sourceAgentID, sourceRef}, "\x00")
 	job := memorykit.ExtractionJob{
 		ID: uuid.NewSHA1(uuid.NameSpaceURL, []byte(identity)).String(), Scope: scope,
-		Source:        memorykit.Source{Kind: "artifact", Ref: outputRef},
+		Source:        memorykit.Source{Kind: "artifact", Ref: sourceRef},
 		SourceAgentID: sourceAgentID, ExtractorID: r.ExtractorID,
 		Status: memorykit.ExtractionPending, CreatedAt: now, UpdatedAt: now,
 	}

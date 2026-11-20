@@ -45,7 +45,10 @@ Blank, NUL-containing, malformed, or over-policy query bodies fail closed and
 are never truncated. The always-available `search_memory` and `read_memory`
 tools provide on-demand recall; `remember_project_memory` appears only for
 authorized explicit write intent. Model-derived extraction writes candidates,
-never active memory. Recoverable vector failure keeps exact/full-text recall,
+never active memory. A completed agent run is extracted from
+`artifact:<run>:memory-source`, a digest of the run (request, tool calls with
+the start of their results, answer) within the memory content limit, so facts
+found through tools are proposed too. Recoverable vector failure keeps exact/full-text recall,
 while invalid Scope or integrity fails closed.
 
 When memory is enabled, these governed routes are registered:
