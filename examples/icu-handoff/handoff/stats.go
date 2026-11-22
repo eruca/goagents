@@ -26,8 +26,11 @@ type Stats struct {
 	Check        CheckStats `json:"check"`
 	// Errors counts patients by error code (fixed codes such as
 	// "output_invalid", "timeout", "tool_not_found").
-	Errors    map[string]int `json:"errors"`
-	Durations DurationStats  `json:"durations"`
+	Errors map[string]int `json:"errors"`
+	// AttemptErrors counts every failed attempt (retries and rewrites
+	// included) by the same codes.
+	AttemptErrors map[string]int `json:"attempt_errors"`
+	Durations     DurationStats  `json:"durations"`
 }
 
 // StatsConfig echoes the knobs that shape speed and cost.
@@ -38,6 +41,9 @@ type StatsConfig struct {
 	MaxToolCalls        int `json:"max_tool_calls"`
 	MaxOutputTokens     int `json:"max_output_tokens"`
 	ChangesHours        int `json:"changes_hours"`
+	// ReasoningEffort is the reasoning_effort sent to the model ("" = not sent).
+	ReasoningEffort string `json:"reasoning_effort"`
+	ToolSpec        string `json:"tool_spec"`
 }
 
 // InputStats sizes what the model reads, in characters.
@@ -82,6 +88,26 @@ type LLMStats struct {
 	OutputTokens    int   `json:"output_tokens"`
 	ReasoningTokens int   `json:"reasoning_tokens"`
 	TotalMS         int64 `json:"total_ms"`
+	// ToolsWithheld counts calls sent without tools because the attempt had
+	// used its tool calls.
+	ToolsWithheld int `json:"tools_withheld"`
+	// Truncated counts calls whose output reached max_output_tokens.
+	Truncated int `json:"truncated"`
+	// Rounds totals calls by their position within an attempt (round 1 is
+	// the first model call of a run).
+	Rounds []RoundStats `json:"rounds"`
+}
+
+// RoundStats totals the model calls made at one position within attempts.
+type RoundStats struct {
+	Round           int   `json:"round"`
+	Calls           int   `json:"calls"`
+	WithoutTools    int   `json:"without_tools"`
+	InputTokens     int   `json:"input_tokens"`
+	MeanInputTokens int   `json:"mean_input_tokens"`
+	OutputTokens    int   `json:"output_tokens"`
+	ReasoningTokens int   `json:"reasoning_tokens"`
+	TotalMS         int64 `json:"total_ms"`
 }
 
 // ToolStats counts the model's gocms tool calls.
@@ -90,6 +116,12 @@ type ToolStats struct {
 	ByTool    map[string]int `json:"by_tool"`
 	LimitHits int            `json:"limit_hits"`
 	Errors    int            `json:"errors"`
+	// Duplicates are repeated calls (same tool, same arguments) answered
+	// from the host's cache; they count against the limit but are not in
+	// Calls.
+	Duplicates int `json:"duplicates"`
+	// ErrorCodes counts failed calls by "<tool>:<gocms error code>".
+	ErrorCodes map[string]int `json:"error_codes"`
 }
 
 // CheckStats summarises verification over all points.
@@ -132,8 +164,11 @@ func newStats(cfg Config) *Stats {
 			MaxToolCalls:        cfg.MaxToolCalls,
 			MaxOutputTokens:     cfg.MaxOutputTokens,
 			ChangesHours:        cfg.ChangesHours,
+			ReasoningEffort:     cfg.ReasoningEffort,
+			ToolSpec:            cfg.ToolSpec,
 		},
-		Errors: map[string]int{},
+		Errors:        map[string]int{},
+		AttemptErrors: map[string]int{},
 	}
 }
 
@@ -152,6 +187,11 @@ func (s *Stats) collect(r *Result, counters *toolCounters, systemChars, specChar
 	}
 	s.Tools.LimitHits = counters.limitHits
 	s.Tools.Errors = counters.errors
+	s.Tools.Duplicates = counters.duplicates
+	s.Tools.ErrorCodes = map[string]int{}
+	for code, n := range counters.errorCodes {
+		s.Tools.ErrorCodes[code] = n
+	}
 	counters.mu.Unlock()
 
 	s.Check.ByIssue = map[string]int{}
@@ -170,6 +210,9 @@ func (s *Stats) collect(r *Result, counters *toolCounters, systemChars, specChar
 		}
 		if p.ErrorCode != "" {
 			s.Errors[p.ErrorCode]++
+		}
+		for _, code := range p.attemptErrors {
+			s.AttemptErrors[code]++
 		}
 		s.Runs.SchemaRetries += p.SchemaRetries
 		if p.Rewritten {

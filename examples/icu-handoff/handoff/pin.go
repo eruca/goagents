@@ -38,6 +38,62 @@ type attempt struct {
 	evidence *Evidence
 	calls    atomic.Int32
 	counters *toolCounters
+	// cache answers a repeated call (same tool, same arguments) without
+	// asking gocms again; it is shared by a patient's attempts.
+	cache *toolCache
+	// compact selects the short tool descriptions (see compact.go).
+	compact bool
+
+	// Model calls of this attempt, for per-round statistics.
+	rounds atomic.Int32
+	// truncated is set when a model call used its whole output budget.
+	truncated atomic.Bool
+}
+
+// toolsLeft reports whether the attempt may still call a tool.
+func (a *attempt) toolsLeft() bool { return a.calls.Load() < a.maxCalls }
+
+type attemptCtxKey struct{}
+
+func withAttempt(ctx context.Context, a *attempt) context.Context {
+	return context.WithValue(ctx, attemptCtxKey{}, a)
+}
+
+func attemptFrom(ctx context.Context) *attempt {
+	a, _ := ctx.Value(attemptCtxKey{}).(*attempt)
+	return a
+}
+
+// toolCache holds one patient's tool results by tool name and arguments.
+type toolCache struct {
+	mu      sync.Mutex
+	results map[string]*ports.ToolResult
+}
+
+func newToolCache() *toolCache { return &toolCache{results: map[string]*ports.ToolResult{}} }
+
+func (c *toolCache) get(key string) (*ports.ToolResult, bool) {
+	if c == nil {
+		return nil, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	r, ok := c.results[key]
+	if !ok {
+		return nil, false
+	}
+	clone := *r
+	return &clone, true
+}
+
+func (c *toolCache) put(key string, r *ports.ToolResult) {
+	if c == nil || r == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	clone := *r
+	c.results[key] = &clone
 }
 
 // toolCounters aggregates tool use over the whole handoff for stats.json.
@@ -46,11 +102,24 @@ type toolCounters struct {
 	byTool    map[string]int
 	limitHits int
 	errors    int
+	// duplicates are repeated calls answered from the cache.
+	duplicates int
+	// errorCodes counts failed calls by gocms error code.
+	errorCodes map[string]int
 }
 
-func newToolCounters() *toolCounters { return &toolCounters{byTool: map[string]int{}} }
+func newToolCounters() *toolCounters {
+	return &toolCounters{byTool: map[string]int{}, errorCodes: map[string]int{}}
+}
 
-func (c *toolCounters) add(name string, limited, failed bool) {
+func (c *toolCounters) duplicate() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.duplicates++
+}
+
+// add counts one call; errCode is "" for a successful call.
+func (c *toolCounters) add(name string, limited bool, errCode string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if limited {
@@ -58,8 +127,9 @@ func (c *toolCounters) add(name string, limited, failed bool) {
 		return
 	}
 	c.byTool[name]++
-	if failed {
+	if errCode != "" {
 		c.errors++
+		c.errorCodes[name+":"+errCode]++
 	}
 }
 
@@ -78,6 +148,11 @@ func newPinnedTool(inner ports.Tool, a *attempt) (*pinnedTool, error) {
 		return nil, fmt.Errorf("tool %s: %w", spec.Name, err)
 	}
 	spec.Schema = ports.ToolSchema{JSONSchema: schema}
+	if a.compact {
+		if spec, err = compactSpec(spec); err != nil {
+			return nil, err
+		}
+	}
 	return &pinnedTool{inner: inner, spec: spec, attempt: a}, nil
 }
 
@@ -86,24 +161,37 @@ func (t *pinnedTool) Spec() ports.ToolSpec { return t.spec }
 func (t *pinnedTool) Execute(ctx context.Context, input json.RawMessage, env ports.ToolEnv) (*ports.ToolResult, error) {
 	a := t.attempt
 	if a.calls.Add(1) > a.maxCalls {
-		a.counters.add(t.spec.Name, true, false)
+		a.counters.add(t.spec.Name, true, "")
 		return &ports.ToolResult{ForLLM: ToolLimitMessage}, nil
 	}
 	args, err := pinArgs(input, a.stay, a.asOf)
 	if err != nil {
-		a.counters.add(t.spec.Name, false, true)
+		a.counters.add(t.spec.Name, false, "invalid_argument")
 		return &ports.ToolResult{ForLLM: "错误[invalid_argument]：参数必须是 JSON 对象。", IsError: true}, nil
+	}
+	// pinArgs marshals a map, so keys are sorted and equal arguments give
+	// equal keys. A repeat still counts against the limit.
+	key := t.spec.Name + " " + string(args)
+	if cached, ok := a.cache.get(key); ok {
+		a.counters.duplicate()
+		return cached, nil
 	}
 	result, err := t.inner.Execute(WithRunID(ctx, a.runID), args, env)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		a.counters.add(t.spec.Name, false, true)
+		// Transport failures are not cached: a later call may succeed.
+		a.counters.add(t.spec.Name, false, "unavailable")
 		return &ports.ToolResult{ForLLM: toolUnavailableMessage, IsError: true}, nil
 	}
-	a.counters.add(t.spec.Name, false, result.IsError)
+	errCode := ""
+	if result.IsError {
+		errCode = toolErrorCode(result.ForLLM)
+	}
+	a.counters.add(t.spec.Name, false, errCode)
 	a.evidence.Add(result.ForLLM)
+	a.cache.put(key, result)
 	return result, nil
 }
 

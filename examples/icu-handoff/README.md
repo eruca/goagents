@@ -34,10 +34,19 @@ printed. `--dry-run` needs only `GOCMS_AGENT_TOKEN`.
      per run through `agentcore.WithToolProvider`. Each wraps the
      `mcpkit.Tool` so that `patient`, `as_of` and `with_data` are removed from
      the schema the model sees and **the host sets `patient`** on every call,
-     whatever the model sent;
-   - at most `--max-tool-calls` (3) tool calls; a further call returns
-     `工具调用次数已用完，请根据已有信息作答。` as its result, and the run has one
-     iteration left to answer (`WithMaxIterations(max-tool-calls + 2)`);
+     whatever the model sent. With `--tool-spec compact` (default) each tool
+     is described in one sentence and keeps only its key parameters, without
+     their descriptions (see [`handoff/compact.go`](handoff/compact.go));
+     `full` sends gocms' own descriptions;
+   - at most `--max-tool-calls` (3) tool calls. A repeated call (same tool,
+     same arguments) is answered from the host's cache without asking gocms
+     again, and still counts. Once the calls are used, the next model request
+     carries **no tools** and ends with `工具调用次数已用完……请直接输出最终的
+     JSON 对象。`, so the model has to answer; a call that still slips through
+     returns `工具调用次数已用完，请根据已有信息作答。`
+     (`WithMaxIterations(max-tool-calls + 2)`);
+   - `--reasoning-effort` (default `none`) is sent as `reasoning_effort`;
+     `--max-output-tokens` (4096) bounds reasoning plus answer per call;
    - structured output validated against the schema in
      [`handoff/output.go`](handoff/output.go) (a Markdown fence around the JSON
      is tolerated). An invalid answer is retried once with the error appended
@@ -86,7 +95,12 @@ token is also a token of the tool returns:
   (issues, missing numbers, failing references), retries and rewrites, and the
   overview when there is no usable answer. Patient content; mode 0600.
 - `stats.json`: counts, durations, model and tool usage, verification rates by
-  issue code, and error codes. **It never contains patient text, beds or
+  issue code, error codes (`output_invalid`, `output_truncated` when a call
+  used its whole output budget, `empty_response`, `max_iterations`,
+  `timeout`, `llm_http_<status>`, `llm_<provider class>`, `network`,
+  `tool_<gocms code>`, `error_<Go type>`), per-attempt error codes, and model
+  usage per round of a run. Failed patients are also logged on stderr by
+  position and code. **It never contains patient text, beds or
   references**, so it is the file to read when running against real data.
 
 `check` writes `checklist.md` and `checklist.csv` (one row per overview fact:
@@ -102,7 +116,8 @@ go test -race ./examples/icu-handoff/...
 
 The tests start a fake gocms on `httptest` (the official MCP SDK server plus
 the HTTP expand and overview endpoints) and a scripted model that calls tools
-with another patient's reference, exceeds the tool limit, fails the schema
+with another patient's reference, repeats a call, uses up its tool calls
+(the next request must carry no tools), fails the schema
 once, invents a number and a reference, and fails twice for one patient. They
 assert the pinned patient and run ids at the server, the tool limit, the retry
 and rewrite, the "未核实" marks, the layout, and that `stats.json` holds no

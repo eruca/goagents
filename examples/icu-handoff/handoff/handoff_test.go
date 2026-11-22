@@ -151,7 +151,7 @@ func (e *echoTool) Execute(_ context.Context, input json.RawMessage, _ ports.Too
 
 func TestPinnedTool(t *testing.T) {
 	inner := &echoTool{}
-	a := &attempt{key: "k", stay: "S1ab", asOf: "2026-11-22 08:00", runID: "h-01", maxCalls: 2, evidence: NewEvidence(), counters: newToolCounters()}
+	a := &attempt{key: "k", stay: "S1ab", asOf: "2026-11-22 08:00", runID: "h-01", maxCalls: 2, evidence: NewEvidence(), counters: newToolCounters(), cache: newToolCache()}
 	tool, err := newPinnedTool(inner, a)
 	if err != nil {
 		t.Fatal(err)
@@ -181,12 +181,16 @@ func TestPinnedTool(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if i == 1 && res.ForLLM != "血钾 3.2↓ mmol/L[L202bb]" {
+			t.Fatalf("repeated call = %q, want the cached result", res.ForLLM)
+		}
 		if i == 2 && res.ForLLM != ToolLimitMessage {
 			t.Fatalf("third call = %q, want the limit message", res.ForLLM)
 		}
 	}
-	if len(inner.got) != 2 {
-		t.Fatalf("inner calls = %d, want 2", len(inner.got))
+	// The repeat was answered from the cache but still counted.
+	if len(inner.got) != 1 || a.counters.duplicates != 1 {
+		t.Fatalf("inner calls = %d, duplicates = %d; want 1, 1", len(inner.got), a.counters.duplicates)
 	}
 	var args map[string]any
 	_ = json.Unmarshal(inner.got[0], &args)
@@ -197,7 +201,7 @@ func TestPinnedTool(t *testing.T) {
 	if !a.evidence.HasRef("L202bb") {
 		t.Fatal("tool result not recorded as evidence")
 	}
-	if a.counters.limitHits != 1 || a.counters.byTool["labs"] != 2 {
+	if a.counters.limitHits != 1 || a.counters.byTool["labs"] != 1 {
 		t.Fatalf("counters = %+v", a.counters)
 	}
 }

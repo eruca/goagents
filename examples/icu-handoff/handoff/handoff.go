@@ -11,6 +11,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -19,9 +21,11 @@ import (
 	"time"
 
 	"github.com/eruca/goagents/goagent/agentcore"
+	"github.com/eruca/goagents/goagent/extensions/providers/openaiapi"
 	"github.com/eruca/goagents/goagent/policy"
 	"github.com/eruca/goagents/goagent/ports"
 	"github.com/eruca/goagents/goagent/prompt"
+	"github.com/eruca/goagents/goagent/tools"
 	"github.com/eruca/goagents/mcpkit"
 )
 
@@ -53,10 +57,26 @@ type Config struct {
 	PatientTimeout      time.Duration
 	Limit               int // only the first N patients by bed; 0 = all
 
+	// ReasoningEffort is the model's reasoning_effort, echoed in stats; the
+	// caller configures LLM with it.
+	ReasoningEffort string
+	// ToolSpec is ToolSpecCompact (default) or ToolSpecFull.
+	ToolSpec string
+
 	// HandoffID prefixes X-Agent-Run-Id ("<HandoffID>-<bed>").
 	HandoffID string
 	// DryRun prefetches only and reports what would be sent to the model.
 	DryRun bool
+
+	// Logf, when set, receives progress and failure lines. They carry only
+	// patient positions and error codes, never patient content.
+	Logf func(format string, args ...any)
+}
+
+func (c *Config) logf(format string, args ...any) {
+	if c.Logf != nil {
+		c.Logf(format, args...)
+	}
 }
 
 func (c *Config) defaults() {
@@ -83,6 +103,9 @@ func (c *Config) defaults() {
 	}
 	if c.PatientTimeout <= 0 {
 		c.PatientTimeout = 5 * time.Minute
+	}
+	if c.ToolSpec == "" {
+		c.ToolSpec = ToolSpecCompact
 	}
 	if c.HandoffID == "" {
 		c.HandoffID = "handoff-" + time.Now().Format("20060102T150405")
@@ -159,10 +182,15 @@ type PatientResult struct {
 
 	overview   string
 	evidence   *Evidence
+	cache      *toolCache
+	index      int // 1-based position in bed order, for log lines
 	runID      string
 	generateMS int64
 	inputChars int
 	llmCalls   int
+	// attemptErrors are the error codes of failed attempts, retries and
+	// rewrites included.
+	attemptErrors []string
 }
 
 // Run performs the handoff.
@@ -195,6 +223,9 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	stats.Durations.PrefetchMS = time.Since(prefetchStart).Milliseconds()
 
 	counters := newToolCounters()
+	if cfg.ToolSpec != ToolSpecCompact && cfg.ToolSpec != ToolSpecFull {
+		return nil, fmt.Errorf("tool spec %q: want %s or %s", cfg.ToolSpec, ToolSpecCompact, ToolSpecFull)
+	}
 	provider := &toolProvider{base: modelTools}
 	specChars := toolSpecChars(provider, cfg)
 	systemChars := runeLen(cfg.Skill) + runeLen(OutputFormat().Instructions)
@@ -235,6 +266,9 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 			}
 			p.inputChars = runeLen(userMessage(cfg, p))
 			g.generate(ctx, p)
+			if p.Status == StatusFailed {
+				cfg.logf("patient %d/%d: failed %s (attempts: %s)", p.index, len(result.Patients), p.ErrorCode, strings.Join(p.attemptErrors, ","))
+			}
 		})
 		stats.LLM = llm.snapshot()
 	}
@@ -312,8 +346,10 @@ func listPatients(ctx context.Context, cfg Config) (*Result, error) {
 	if cfg.Limit > 0 && len(result.Patients) > cfg.Limit {
 		result.Patients = result.Patients[:cfg.Limit]
 	}
-	for _, p := range result.Patients {
+	for i, p := range result.Patients {
 		p.runID = runIDFor(cfg.HandoffID, p)
+		p.index = i + 1
+		p.cache = newToolCache()
 	}
 	return result, nil
 }
@@ -475,7 +511,7 @@ func (g *generator) generate(ctx context.Context, p *PatientResult) {
 
 	input := userMessage(g.cfg, p)
 	summary, err := g.attempt(ctx, p, input)
-	if errors.Is(err, agentcore.ErrOutputInvalid) {
+	if errors.Is(err, agentcore.ErrOutputInvalid) && !isTruncated(err) {
 		p.SchemaRetries++
 		summary, err = g.attempt(ctx, p, input+retryNote(err))
 	}
@@ -511,15 +547,26 @@ func (g *generator) attempt(ctx context.Context, p *PatientResult, input string)
 		maxCalls: int32(g.cfg.MaxToolCalls),
 		evidence: p.evidence,
 		counters: g.counters,
+		cache:    p.cache,
+		compact:  g.cfg.ToolSpec == ToolSpecCompact,
 	}
 	defer g.provider.register(a)()
+	summary, err := g.run(withAttempt(ctx, a), p, a, input)
+	p.llmCalls += int(a.rounds.Load())
+	if err != nil {
+		if a.truncated.Load() {
+			err = &truncatedError{err: err}
+		}
+		p.attemptErrors = append(p.attemptErrors, errorCode(err))
+	}
+	return summary, err
+}
+
+func (g *generator) run(ctx context.Context, p *PatientResult, a *attempt, input string) (*Summary, error) {
 	res, err := g.agent.RunDetailed(ctx, agentcore.RunRequest{
 		Input:    input,
 		Metadata: map[string]any{attemptKey: a.key},
 	})
-	if res != nil {
-		p.llmCalls += res.ExecutionSummary.LLMCalls
-	}
 	if err != nil {
 		return nil, err
 	}
@@ -576,28 +623,78 @@ func rewriteNote(s Summary, checks []PointCheck) string {
 	return b.String()
 }
 
-// Error codes in stats.json.
+// truncatedError marks a failed attempt in which a model call used its whole
+// output budget (usually on reasoning), leaving an empty or cut-off answer.
+type truncatedError struct{ err error }
+
+func (e *truncatedError) Error() string { return "model output truncated: " + e.err.Error() }
+func (e *truncatedError) Unwrap() error { return e.err }
+
+func isTruncated(err error) bool {
+	var t *truncatedError
+	return errors.As(err, &t)
+}
+
+// errorCode classifies an error for stats.json and log lines. Codes are fixed
+// English words, status numbers or Go type names; never error text, which
+// may quote patient data.
 func errorCode(err error) string {
 	var toolErr *ToolError
 	var httpErr *HTTPError
+	var respErr *openaiapi.ResponseError
+	var classed interface{ ProviderErrorClass() string }
+	var urlErr *url.Error
 	switch {
 	case err == nil:
 		return ""
-	case errors.Is(err, agentcore.ErrOutputInvalid):
-		return "output_invalid"
-	case errors.Is(err, agentcore.ErrMaxIterations):
-		return "max_iterations"
+	case isTruncated(err):
+		return "output_truncated"
 	case errors.Is(err, context.DeadlineExceeded):
 		return "timeout"
 	case errors.Is(err, context.Canceled):
 		return "canceled"
+	case errors.Is(err, agentcore.ErrEmptyResponse):
+		return "empty_response"
+	case errors.Is(err, agentcore.ErrOutputInvalid):
+		return "output_invalid"
+	case errors.Is(err, agentcore.ErrMaxIterations):
+		return "max_iterations"
+	case errors.Is(err, agentcore.ErrBudgetExceeded):
+		return "budget_exceeded"
+	case errors.Is(err, agentcore.ErrPolicyDenied):
+		return "policy_denied"
+	case errors.Is(err, tools.ErrToolNotFound):
+		return "tool_not_found"
+	case errors.Is(err, ports.ErrContextTooLong):
+		return "llm_context_too_long"
+	case errors.As(err, &respErr):
+		return fmt.Sprintf("llm_http_%d", respErr.StatusCode)
+	case errors.As(err, &classed):
+		return "llm_" + sanitizeID(classed.ProviderErrorClass())
 	case errors.As(err, &toolErr):
 		return "tool_" + toolErr.Code
 	case errors.As(err, &httpErr):
 		return fmt.Sprintf("http_%d", httpErr.Status)
+	case errors.As(err, &urlErr):
+		if urlErr.Timeout() {
+			return "network_timeout"
+		}
+		return "network"
 	default:
-		return "error"
+		return "error_" + sanitizeID(innermostType(err))
 	}
+}
+
+// innermostType names the Go type of the deepest wrapped error.
+func innermostType(err error) string {
+	for {
+		next := errors.Unwrap(err)
+		if next == nil {
+			break
+		}
+		err = next
+	}
+	return strings.TrimPrefix(reflect.TypeOf(err).String(), "*")
 }
 
 func runIDFor(handoffID string, p *PatientResult) string {
@@ -678,7 +775,8 @@ func leadingNumber(s string) (int, string) {
 func runeLen(s string) int { return len([]rune(s)) }
 
 func toolSpecChars(p *toolProvider, cfg Config) int {
-	a := &attempt{key: "spec", maxCalls: int32(cfg.MaxToolCalls), evidence: NewEvidence(), counters: newToolCounters()}
+	a := &attempt{key: "spec", maxCalls: int32(cfg.MaxToolCalls), evidence: NewEvidence(), counters: newToolCounters(),
+		compact: cfg.ToolSpec == ToolSpecCompact}
 	n := 0
 	for _, inner := range p.base {
 		pinned, err := newPinnedTool(inner, a)
@@ -691,7 +789,13 @@ func toolSpecChars(p *toolProvider, cfg Config) int {
 	return n
 }
 
-// countingLLM counts model calls and tokens across the handoff.
+// FinalAnswerNote is added to the model's request once its tool calls are
+// used up; the request then carries no tools, so the model must answer.
+const FinalAnswerNote = "工具调用次数已用完，不能再调用工具。请根据已有信息直接输出最终的 JSON 对象。"
+
+// countingLLM counts model calls and tokens across the handoff. Within an
+// attempt (found in the context) it also numbers the rounds, withholds the
+// tools once the attempt has used its calls, and notes truncated output.
 type countingLLM struct {
 	inner     ports.LLMClient
 	calls     atomic.Int64
@@ -700,12 +804,29 @@ type countingLLM struct {
 	output    atomic.Int64
 	reasoning atomic.Int64
 	nanos     atomic.Int64
+	withheld  atomic.Int64
+	truncated atomic.Int64
+
+	mu     sync.Mutex
+	rounds map[int]*RoundStats
 }
 
 func (c *countingLLM) Chat(ctx context.Context, req ports.ChatRequest) (*ports.ChatResponse, error) {
+	a := attemptFrom(ctx)
+	round := 0
+	if a != nil {
+		round = int(a.rounds.Add(1))
+		if len(req.Tools) > 0 && !a.toolsLeft() {
+			req.Tools = nil
+			req.Messages = append(append([]ports.ChatMessage(nil), req.Messages...),
+				ports.ChatMessage{Role: "user", Content: FinalAnswerNote})
+			c.withheld.Add(1)
+		}
+	}
 	start := time.Now()
 	resp, err := c.inner.Chat(ctx, req)
-	c.nanos.Add(int64(time.Since(start)))
+	elapsed := time.Since(start)
+	c.nanos.Add(int64(elapsed))
 	c.calls.Add(1)
 	if err != nil {
 		c.failures.Add(1)
@@ -715,17 +836,60 @@ func (c *countingLLM) Chat(ctx context.Context, req ports.ChatRequest) (*ports.C
 		c.input.Add(int64(resp.Usage.InputTokens))
 		c.output.Add(int64(resp.Usage.OutputTokens))
 		c.reasoning.Add(int64(resp.Usage.ReasoningTokens))
+		if req.MaxOutputTokens > 0 && resp.Usage.OutputTokens >= req.MaxOutputTokens {
+			c.truncated.Add(1)
+			if a != nil {
+				a.truncated.Store(true)
+			}
+		}
+		if round > 0 {
+			c.addRound(round, resp.Usage, len(req.Tools) > 0, elapsed)
+		}
 	}
 	return resp, nil
 }
 
+func (c *countingLLM) addRound(round int, u ports.Usage, tools bool, elapsed time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.rounds == nil {
+		c.rounds = map[int]*RoundStats{}
+	}
+	r := c.rounds[round]
+	if r == nil {
+		r = &RoundStats{Round: round}
+		c.rounds[round] = r
+	}
+	r.Calls++
+	if !tools {
+		r.WithoutTools++
+	}
+	r.InputTokens += u.InputTokens
+	r.OutputTokens += u.OutputTokens
+	r.ReasoningTokens += u.ReasoningTokens
+	r.TotalMS += elapsed.Milliseconds()
+}
+
 func (c *countingLLM) snapshot() LLMStats {
-	return LLMStats{
+	s := LLMStats{
 		Calls:           int(c.calls.Load()),
 		Failures:        int(c.failures.Load()),
 		InputTokens:     int(c.input.Load()),
 		OutputTokens:    int(c.output.Load()),
 		ReasoningTokens: int(c.reasoning.Load()),
 		TotalMS:         time.Duration(c.nanos.Load()).Milliseconds(),
+		ToolsWithheld:   int(c.withheld.Load()),
+		Truncated:       int(c.truncated.Load()),
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, r := range c.rounds {
+		row := *r
+		if row.Calls > 0 {
+			row.MeanInputTokens = row.InputTokens / row.Calls
+		}
+		s.Rounds = append(s.Rounds, row)
+	}
+	sort.Slice(s.Rounds, func(i, j int) bool { return s.Rounds[i].Round < s.Rounds[j].Round })
+	return s
 }

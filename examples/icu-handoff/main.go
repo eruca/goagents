@@ -1,6 +1,6 @@
 // Command icu-handoff writes an ICU shift handoff from a gocms server.
 //
-//	icu-handoff run   --gocms URL --ward W --out DIR [--since prev_shift] [--concurrency 2] [--as-of T] [--dry-run]
+//	icu-handoff run   --gocms URL --ward W --out DIR [--since prev_shift] [--concurrency 2] [--reasoning-effort none] [--as-of T] [--dry-run]
 //	icu-handoff check --gocms URL --patients S1ab,S2cd --out DIR [--as-of T]
 //
 // run lists the ward's patients and prefetches their overviews over MCP, then
@@ -23,6 +23,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"time"
 
@@ -43,12 +44,14 @@ func main() {
 // env is the process environment; tests replace it.
 var env = os.Getenv
 
-// newLLM builds the model client; tests replace it.
-var newLLM = func() (ports.LLMClient, error) {
+// newLLM builds the model client; tests replace it. reasoningEffort is sent
+// as reasoning_effort unless empty.
+var newLLM = func(reasoningEffort string) (ports.LLMClient, error) {
 	cfg := openaiapi.Config{
-		BaseURL: env("OPENAI_COMPAT_BASE_URL"),
-		APIKey:  env("OPENAI_COMPAT_API_KEY"),
-		Model:   env("OPENAI_COMPAT_MODEL"),
+		BaseURL:         env("OPENAI_COMPAT_BASE_URL"),
+		APIKey:          env("OPENAI_COMPAT_API_KEY"),
+		Model:           env("OPENAI_COMPAT_MODEL"),
+		ReasoningEffort: reasoningEffort,
 	}
 	if cfg.BaseURL == "" || cfg.Model == "" {
 		return nil, errors.New("OPENAI_COMPAT_BASE_URL and OPENAI_COMPAT_MODEL are required (or use --dry-run)")
@@ -114,6 +117,8 @@ func runHandoff(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	maxOutputTokens := flags.Int("max-output-tokens", 4096, "model output token limit per call, reasoning included")
 	patientTimeout := flags.Duration("patient-timeout", 5*time.Minute, "time limit per patient")
 	limit := flags.Int("limit", 0, "only the first N patients by bed (0 = all)")
+	reasoningEffort := flags.String("reasoning-effort", "none", `model reasoning_effort: none, minimal, low, medium or high ("" = not sent)`)
+	toolSpec := flags.String("tool-spec", handoff.ToolSpecCompact, "tool descriptions the model sees: compact or full")
 	skillPath := flags.String("skill", "", "SKILL.md to use instead of the embedded one")
 	dryRun := flags.Bool("dry-run", false, "prefetch only; report what would be sent to the model without calling it")
 	if err := flags.Parse(args); err != nil {
@@ -125,6 +130,14 @@ func runHandoff(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	if *gocms == "" || *ward == "" || *out == "" {
 		return usageError{"--gocms, --ward and --out are required"}
 	}
+	switch *reasoningEffort {
+	case "", "none", "minimal", "low", "medium", "high":
+	default:
+		return usageError{fmt.Sprintf("--reasoning-effort %q: want none, minimal, low, medium or high", *reasoningEffort)}
+	}
+	if *toolSpec != handoff.ToolSpecCompact && *toolSpec != handoff.ToolSpecFull {
+		return usageError{fmt.Sprintf("--tool-spec %q: want compact or full", *toolSpec)}
+	}
 	token := env("GOCMS_AGENT_TOKEN")
 	if token == "" {
 		return usageError{"GOCMS_AGENT_TOKEN is required"}
@@ -135,7 +148,7 @@ func runHandoff(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	}
 	var llm ports.LLMClient
 	if !*dryRun {
-		if llm, err = newLLM(); err != nil {
+		if llm, err = newLLM(*reasoningEffort); err != nil {
 			return err
 		}
 	}
@@ -164,8 +177,14 @@ func runHandoff(ctx context.Context, args []string, stdout, stderr io.Writer) er
 		MaxOutputTokens:     *maxOutputTokens,
 		PatientTimeout:      *patientTimeout,
 		Limit:               *limit,
+		ReasoningEffort:     *reasoningEffort,
+		ToolSpec:            *toolSpec,
 		HandoffID:           handoffID,
 		DryRun:              *dryRun,
+		// Log lines carry positions and error codes only.
+		Logf: func(format string, args ...any) {
+			fmt.Fprintf(stderr, "icu-handoff: "+format+"\n", args...)
+		},
 	})
 	if err != nil {
 		return err
@@ -177,6 +196,9 @@ func runHandoff(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	fmt.Fprintf(stdout, "%s: %d patients (ok %d, failed %d, overview failed %d, dry run %d); points %d, unverified %d; %d ms\n",
 		s.Mode, s.Patients, s.Runs.OK, s.Runs.Failed, s.Runs.OverviewFailed, s.Runs.DryRun,
 		s.Check.Points, s.Check.Unverified, s.Durations.TotalMS)
+	if len(s.Errors) > 0 {
+		fmt.Fprintf(stderr, "icu-handoff: errors by code: %s\n", formatCounts(s.Errors))
+	}
 	fmt.Fprintf(stdout, "wrote %s/{%s,%s,%s}\n", strings.TrimRight(*out, "/"), handoff.MarkdownFile, handoff.JSONFile, handoff.StatsFile)
 	return nil
 }
@@ -230,6 +252,20 @@ func runCheck(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		return errors.New("no patient could be fetched")
 	}
 	return nil
+}
+
+// formatCounts renders code counts as "a=1 b=2" in code order.
+func formatCounts(m map[string]int) string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, len(keys))
+	for i, k := range keys {
+		parts[i] = fmt.Sprintf("%s=%d", k, m[k])
+	}
+	return strings.Join(parts, " ")
 }
 
 // loadSkill returns the SKILL.md body without its YAML front matter.

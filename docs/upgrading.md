@@ -80,6 +80,9 @@
   `Usage.ReasoningTokens`、`WithReasoningReplay`；`openaiapi.Config` 的
   `KeepThinkTags`、`SendReasoning`。`contextkit.Message.Reasoning`（计入
   `CharLen`），`contextkit/agentadapter` 映射它。
+- `goagent`：`openaiapi.Config.ReasoningEffort`，非空时请求体带
+  `reasoning_effort`（如 `none`、`minimal`、`low`、`medium`、`high`），控制
+  推理模型思考多少；空时不发送，行为不变。不认识这个字段的服务可能拒绝请求。
 - `goagent`：`agentcore.ContextProjectionRequest.SystemPrompt`，投影阶段填入
   编译好的系统提示，供投影器计入预算；memorykit 投影器把它转给 `Next`。
 - host-api：`HOST_API_CONTEXT_MAX_CHARS`、`HOST_API_CONTEXT_MAX_TOOL_CHARS`
@@ -108,6 +111,10 @@
   宿主钉死、最多 3 次工具调用、结构化输出校验失败重试一次），核对引用（本次
   工具返回里出现过且 `expand` 接受）和数字白名单，写出 `handoff.md`、
   `handoff.json` 和不含患者内容的 `stats.json`；`check` 子命令生成概览核对单。
+  `--reasoning-effort`（默认 `none`）、`--tool-spec compact|full`（默认精简的
+  工具说明）；同一工具同样参数的重复调用由宿主直接返回上次结果；工具次数用完后
+  下一次请求不再带工具，迫使模型作答；失败按错误类别记录（如
+  `output_truncated`、`empty_response`、`llm_http_503`）。
   只是示例，没有新的公共 API。
 
 ## v0.7.x → v0.8.0
