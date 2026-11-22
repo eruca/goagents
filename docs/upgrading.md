@@ -103,6 +103,12 @@
   `RankFullText`、`FullTextLength`、`FullTextTermMatches`，供自定义
   RecallStore 实现相同的排名；`storetest.RunFullTextRankingConformance`。
 - `examples/memory-embedding-eval`：用 Ollama 模型跑真实向量评测。
+- `examples/icu-handoff`：从 gocms 的患者信息工具写 ICU 交班摘要。宿主经 MCP
+  预取病区名单和每位病人的概览，每位病人一次独立运行（工具的 `patient` 参数由
+  宿主钉死、最多 3 次工具调用、结构化输出校验失败重试一次），核对引用（本次
+  工具返回里出现过且 `expand` 接受）和数字白名单，写出 `handoff.md`、
+  `handoff.json` 和不含患者内容的 `stats.json`；`check` 子命令生成概览核对单。
+  只是示例，没有新的公共 API。
 
 ## v0.7.x → v0.8.0
 
