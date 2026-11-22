@@ -89,3 +89,22 @@ func TestCompactSpec(t *testing.T) {
 		}
 	}
 }
+
+func TestTransient(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want bool
+	}{
+		{&openaiapi.ResponseError{StatusCode: 503}, true},
+		{&openaiapi.ResponseError{StatusCode: 429}, true},
+		{&openaiapi.ResponseError{StatusCode: 400}, false},
+		{&openaiapi.ResponseError{StatusCode: 500, ContextTooLong: true}, false},
+		{fmt.Errorf("x: %w", &url.Error{Op: "Post", URL: "u", Err: errors.New("EOF")}), true},
+		{agentcore.ErrOutputInvalid, false},
+		{nil, false},
+	} {
+		if got := transient(tc.err); got != tc.want {
+			t.Errorf("transient(%v) = %v", tc.err, got)
+		}
+	}
+}

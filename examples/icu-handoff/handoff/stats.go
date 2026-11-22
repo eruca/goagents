@@ -15,6 +15,9 @@ type Stats struct {
 	Census    int    `json:"census"`
 	Patients  int    `json:"patients"`
 	SyncStale bool   `json:"sync_stale"`
+	// AlertsPrefetchFailed counts patients whose open alerts could not be
+	// prefetched.
+	AlertsPrefetchFailed int `json:"alerts_prefetch_failed"`
 
 	Config StatsConfig `json:"config"`
 
@@ -69,13 +72,15 @@ type Summary5 struct {
 
 // RunStats counts patient outcomes.
 type RunStats struct {
-	OK              int `json:"ok"`
-	Failed          int `json:"failed"`
-	OverviewFailed  int `json:"overview_failed"`
-	DryRun          int `json:"dry_run"`
-	SchemaRetries   int `json:"schema_retries"`
-	Rewrites        int `json:"rewrites"`
-	PatientMismatch int `json:"patient_mismatch"`
+	OK             int `json:"ok"`
+	Failed         int `json:"failed"`
+	OverviewFailed int `json:"overview_failed"`
+	DryRun         int `json:"dry_run"`
+	SchemaRetries  int `json:"schema_retries"`
+	// TransientRetries are attempts redone after a model transport failure.
+	TransientRetries int `json:"transient_retries"`
+	Rewrites         int `json:"rewrites"`
+	PatientMismatch  int `json:"patient_mismatch"`
 	// LLMCallsPerPatient summarises model calls per generated patient.
 	LLMCallsPerPatient Summary5 `json:"llm_calls_per_patient"`
 }
@@ -93,6 +98,9 @@ type LLMStats struct {
 	ToolsWithheld int `json:"tools_withheld"`
 	// Truncated counts calls whose output reached max_output_tokens.
 	Truncated int `json:"truncated"`
+	// TextToolCalls counts answers, made without tools, that were a tool
+	// call written as text; each is asked again once.
+	TextToolCalls int `json:"text_tool_calls"`
 	// Rounds totals calls by their position within an attempt (round 1 is
 	// the first model call of a run).
 	Rounds []RoundStats `json:"rounds"`
@@ -139,6 +147,10 @@ type CheckStats struct {
 	PatientsWithUnverified int `json:"patients_with_unverified"`
 	Watch                  int `json:"watch"`
 	Uncertain              int `json:"uncertain"`
+	// Notes are watch and uncertain entries; NotesUnverified failed the
+	// number check.
+	NotesUnverified int `json:"notes_unverified"`
+	NotesNumbers    int `json:"notes_numbers"`
 }
 
 // DurationStats are wall-clock milliseconds.
@@ -211,10 +223,14 @@ func (s *Stats) collect(r *Result, counters *toolCounters, systemChars, specChar
 		if p.ErrorCode != "" {
 			s.Errors[p.ErrorCode]++
 		}
+		if p.AlertsError != "" {
+			s.AlertsPrefetchFailed++
+		}
 		for _, code := range p.attemptErrors {
 			s.AttemptErrors[code]++
 		}
 		s.Runs.SchemaRetries += p.SchemaRetries
+		s.Runs.TransientRetries += p.TransientRetries
 		if p.Rewritten {
 			s.Runs.Rewrites++
 		}
@@ -251,10 +267,23 @@ func (s *Stats) collect(r *Result, counters *toolCounters, systemChars, specChar
 			for _, issue := range c.Issues {
 				s.Check.ByIssue[issue]++
 			}
+			for _, flag := range c.Flags {
+				s.Check.ByIssue[flag]++
+			}
 			for _, issue := range c.BadRefs {
 				if code, ok := strings.CutPrefix(issue, IssueRefRejected+":"); ok {
 					s.Check.RefErrors[sanitizeID(code)]++
 				}
+			}
+		}
+		for _, c := range append(append([]PointCheck(nil), p.WatchChecks...), p.UncertainChecks...) {
+			s.Check.NotesNumbers += c.Numbers
+			for _, flag := range c.Flags {
+				s.Check.ByIssue[flag]++
+			}
+			if !c.Verified {
+				s.Check.NotesUnverified++
+				bad++
 			}
 		}
 		if bad > 0 {

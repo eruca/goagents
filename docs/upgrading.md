@@ -114,7 +114,8 @@
   `--reasoning-effort`（默认 `none`）、`--tool-spec compact|full`（默认精简的
   工具说明）；同一工具同样参数的重复调用由宿主直接返回上次结果；工具次数用完后
   下一次请求不再带工具，迫使模型作答；失败按错误类别记录（如
-  `output_truncated`、`empty_response`、`llm_http_503`）。
+  `output_truncated`、`empty_response`、`llm_http_503`）。宿主预取病人的待处理提醒
+  原文，给模型的概览去掉系统状态行；watch、uncertain 里的数字同样核对。
   只是示例，没有新的公共 API。
 
 ## v0.7.x → v0.8.0

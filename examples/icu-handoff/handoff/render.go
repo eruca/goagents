@@ -132,16 +132,24 @@ func writePatient(b *strings.Builder, p *PatientResult) {
 	}
 	if len(s.Watch) > 0 {
 		b.WriteString("\n**下一班要盯**（模型归纳，不是记录里的数据）\n\n")
-		for _, w := range s.Watch {
-			fmt.Fprintf(b, "- %s\n", w)
+		for i, w := range s.Watch {
+			fmt.Fprintf(b, "- %s%s\n", w, noteMark(p.WatchChecks, i))
 		}
 	}
 	if len(s.Uncertain) > 0 {
 		b.WriteString("\n**拿不准的**（工具里没有依据）\n\n")
-		for _, u := range s.Uncertain {
-			fmt.Fprintf(b, "- %s\n", u)
+		for i, u := range s.Uncertain {
+			fmt.Fprintf(b, "- %s%s\n", u, noteMark(p.UncertainChecks, i))
 		}
 	}
+}
+
+// noteMark is the "未核实" mark of note i, if its numbers failed.
+func noteMark(checks []PointCheck, i int) string {
+	if i < len(checks) && !checks[i].Verified {
+		return " 〔未核实：" + describeCheck(checks[i]) + "〕"
+	}
+	return ""
 }
 
 func writeOverview(b *strings.Builder, text string) {

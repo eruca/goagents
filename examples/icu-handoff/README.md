@@ -24,12 +24,18 @@ printed. `--dry-run` needs only `GOCMS_AGENT_TOKEN`.
 1. **The host lists the ward.** It calls `patients(ward, changes_hours,
    with_data)` over MCP for the census, beds, admissions and discharges.
 2. **The host prefetches overviews.** `overview(patient, since, cite=true,
-   budget=1000)` for every patient, four at a time (`--overview-concurrency`).
+   budget=1000)` for every patient, four at a time (`--overview-concurrency`),
+   and with it `alerts(patient, status=open)`: the overview only counts open
+   alerts, so their text is appended to the user message ("待处理提醒原文") and
+   counts as a tool return for verification. A failed alerts prefetch is
+   recorded (`alerts_error`) and the run goes on without it.
 3. **One fresh model run per patient** (`--concurrency`, default 2, bounded
    by the model server's slots), built with `agentcore`:
    - system prompt: [`skills/icu-handoff/SKILL.md`](skills/icu-handoff/SKILL.md)
      (embedded; `--skill` overrides) plus the output format; user message: the
-     patient's overview;
+     patient's overview, without the lines meant for the system (the header's
+     "⚠" warnings such as data freshness, which the handoff header shows, and
+     the "可展开：" tool hint), then the open alerts' text;
    - tools: `labs vitals drugs io scores alerts timeline expand` only, supplied
      per run through `agentcore.WithToolProvider`. Each wraps the
      `mcpkit.Tool` so that `patient`, `as_of` and `with_data` are removed from
@@ -42,7 +48,9 @@ printed. `--dry-run` needs only `GOCMS_AGENT_TOKEN`.
      same arguments) is answered from the host's cache without asking gocms
      again, and still counts. Once the calls are used, the next model request
      carries **no tools** and ends with `工具调用次数已用完……请直接输出最终的
-     JSON 对象。`, so the model has to answer; a call that still slips through
+     JSON 对象。`, so the model has to answer. If it answers with a tool call
+     written as text (`<tool_call>…`, as Qwen does when its history has
+     calls), it is asked once more; a call that still slips through
      returns `工具调用次数已用完，请根据已有信息作答。`
      (`WithMaxIterations(max-tool-calls + 2)`);
    - `--reasoning-effort` (default `none`) is sent as `reasoning_effort`;
@@ -52,6 +60,7 @@ printed. `--dry-run` needs only `GOCMS_AGENT_TOKEN`.
      is tolerated). An invalid answer is retried once with the error appended
      to the user message; a second failure marks the patient "生成失败" and the
      handoff shows the overview instead;
+   - a model transport failure or a 429/5xx answer is retried once;
    - every gocms request carries `X-Agent-Run-Id: <handoff id>-<bed>`.
 4. **The host verifies every point** against what the tools returned for that
    patient in this handoff (the prefetched overview and every tool result the
@@ -61,7 +70,10 @@ printed. `--dry-run` needs only `GOCMS_AGENT_TOKEN`.
      row exists, belongs to the patient);
    - every number in the text must appear verbatim in those returns (see
      below).
-   Failing points are marked "未核实", never removed. If at least half of a
+   Numbers in `watch` and `uncertain` are checked against the same whitelist.
+   A point that reads a direction into a change (加深、变浅、好转、恶化、改善、
+   加重…) is counted as `direction_word` in stats but not failed.
+   Failing points and notes are marked "未核实", never removed. If at least half of a
    patient's points fail, the run is redone once with the failures listed, and
    the rewrite is kept unless it is worse.
 5. **Layout** by bed: ward header (now, shift start, data sync and staleness),

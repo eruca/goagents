@@ -253,3 +253,39 @@ func TestSummarize(t *testing.T) {
 		t.Fatalf("summarize = %+v", s)
 	}
 }
+
+func TestVerifyNotesAndDirectionWords(t *testing.T) {
+	ev := NewEvidence()
+	ev.Add("RASS 2（前一次 -2）[A101aa]；血钾 6.8↑↑ mmol/L")
+	checks := VerifyNotes([]string{"关注 RASS 变化", "复查血钾 6.8", "复查血钾到 4.0", "数据可能不是最新"}, ev)
+	if len(checks) != 4 || !reflect.DeepEqual(checks[3].Flags, []string{FlagMetaWord}) || !checks[0].Verified || !checks[1].Verified || checks[2].Verified {
+		t.Fatalf("checks = %+v", checks)
+	}
+	if !reflect.DeepEqual(checks[2].MissingNumbers, []string{"4.0"}) {
+		t.Fatalf("missing = %v", checks[2].MissingNumbers)
+	}
+	if VerifyNotes(nil, ev) != nil {
+		t.Fatal("no notes, no checks")
+	}
+	points, _ := Verify(context.Background(), Summary{Points: []Point{
+		{Text: "RASS 2（前一次 -2），镇静程度加深。"},
+		{Text: "RASS 2（前一次 -2）。"},
+	}}, "S1ab", ev, nil)
+	if !points[0].Verified || !reflect.DeepEqual(points[0].Flags, []string{FlagDirectionWord}) || len(points[1].Flags) != 0 {
+		t.Fatalf("points = %+v", points)
+	}
+}
+
+func TestModelOverviewDropsSystemLines(t *testing.T) {
+	in := "【ICU1 01床 女 79岁｜S1il】现在 11-22 16:44；统计日 07:00 起；⚠ 数据可能不是最新：无同步记录\n" +
+		"诊断：急性胰腺炎\n待处理：提醒 1 条（血钾 6.8 mmol/L，危急值）\n可展开：vitals drugs io\n"
+	want := "【ICU1 01床 女 79岁｜S1il】现在 11-22 16:44；统计日 07:00 起\n" +
+		"诊断：急性胰腺炎\n待处理：提醒 1 条（血钾 6.8 mmol/L，危急值）\n"
+	if got := modelText(in, false); got != want {
+		t.Fatalf("got %q\nwant %q", got, want)
+	}
+	alerts := "【ICU1 01床｜S1il】现在 11-22 16:59；⚠ 数据可能不是最新：无同步记录\n⚠ 只有部分数据\n提醒 1 条：\n  血钾 6.8 mmol/L，危急值[M1ii]"
+	if got := modelText(alerts, true); got != "提醒 1 条：\n  血钾 6.8 mmol/L，危急值[M1ii]" {
+		t.Fatalf("alerts: got %q", got)
+	}
+}
