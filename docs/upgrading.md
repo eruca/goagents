@@ -106,17 +106,8 @@
   `RankFullText`、`FullTextLength`、`FullTextTermMatches`，供自定义
   RecallStore 实现相同的排名；`storetest.RunFullTextRankingConformance`。
 - `examples/memory-embedding-eval`：用 Ollama 模型跑真实向量评测。
-- `examples/icu-handoff`：从 gocms 的患者信息工具写 ICU 交班摘要。宿主经 MCP
-  预取病区名单和每位病人的概览，每位病人一次独立运行（工具的 `patient` 参数由
-  宿主钉死、最多 3 次工具调用、结构化输出校验失败重试一次），核对引用（本次
-  工具返回里出现过且 `expand` 接受）和数字白名单，写出 `handoff.md`、
-  `handoff.json` 和不含患者内容的 `stats.json`；`check` 子命令生成概览核对单。
-  `--reasoning-effort`（默认 `none`）、`--tool-spec compact|full`（默认精简的
-  工具说明）；同一工具同样参数的重复调用由宿主直接返回上次结果；工具次数用完后
-  下一次请求不再带工具，迫使模型作答；失败按错误类别记录（如
-  `output_truncated`、`empty_response`、`llm_http_503`）。宿主预取病人的待处理提醒
-  原文，给模型的概览去掉系统状态行；watch、uncertain 里的数字同样核对。
-  只是示例，没有新的公共 API。
+- `examples/icu-handoff` 已迁入 gocms（`cmd/assistant`、`internal/handoff`），本仓库不再保留；
+  `openaiapi.Config.ReasoningEffort` 等通用改动保留。
 
 ## v0.7.x → v0.8.0
 
