@@ -3,6 +3,7 @@ package handoff
 import (
 	"context"
 	"sort"
+	"strings"
 )
 
 // Issue codes recorded on a point that failed a check. They are the only
@@ -15,6 +16,69 @@ const (
 	IssueNumberNotInTools = "number_not_in_tools" // a number, date or time not in the tool returns
 )
 
+// Flags are diagnostics counted in stats; they never fail a point or
+// trigger a rewrite.
+const (
+	// FlagDirectionWord: the text reads a direction into a change.
+	FlagDirectionWord = "direction_word"
+	// FlagMetaWord: the text talks about the data system rather than the
+	// patient (sync, freshness, data-quality status).
+	FlagMetaWord = "meta_word"
+)
+
+// metaWords are rough markers of data-system wording, for FlagMetaWord.
+var metaWords = []string{"同步", "不是最新", "设备采集", "未排除", "可展开"}
+
+// textFlags returns the diagnostic flags of text.
+func textFlags(text string) []string {
+	var flags []string
+	if directionWord(text) {
+		flags = append(flags, FlagDirectionWord)
+	}
+	for _, w := range metaWords {
+		if strings.Contains(text, w) {
+			flags = append(flags, FlagMetaWord)
+			break
+		}
+	}
+	return flags
+}
+
+// directionWords are clinical readings of a change that the skill asks the
+// model to leave to people.
+var directionWords = []string{"加深", "变浅", "减浅", "好转", "恶化", "改善", "加重", "减轻", "转差", "缓解"}
+
+// directionWord reports whether text contains a direction word.
+func directionWord(text string) bool {
+	for _, w := range directionWords {
+		if strings.Contains(text, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// VerifyNotes checks the numbers in free-text notes (watch, uncertain)
+// against the evidence; notes carry no references.
+func VerifyNotes(notes []string, ev *Evidence) []PointCheck {
+	if len(notes) == 0 {
+		return nil
+	}
+	checks := make([]PointCheck, len(notes))
+	for i, note := range notes {
+		missing, total := ev.Missing(note)
+		check := PointCheck{Numbers: total, Verified: len(missing) == 0, Flags: textFlags(note)}
+		for _, token := range missing {
+			check.MissingNumbers = append(check.MissingNumbers, token.Value)
+		}
+		if len(missing) > 0 {
+			check.Issues = []string{IssueNumberNotInTools}
+		}
+		checks[i] = check
+	}
+	return checks
+}
+
 // PointCheck is the verdict on one point.
 type PointCheck struct {
 	Verified bool     `json:"verified"`
@@ -23,6 +87,8 @@ type PointCheck struct {
 	MissingNumbers []string `json:"missing_numbers,omitempty"`
 	// BadRefs maps each failing reference to its issue (and gocms' code).
 	BadRefs map[string]string `json:"bad_refs,omitempty"`
+	// Flags are observations that do not fail the point (FlagDirectionWord).
+	Flags []string `json:"flags,omitempty"`
 	// Counts for stats.json.
 	Refs    int `json:"-"`
 	Numbers int `json:"-"`
@@ -117,6 +183,7 @@ func Verify(ctx context.Context, s Summary, stay string, ev *Evidence, expander 
 		}
 		sort.Strings(check.Issues)
 		check.Verified = len(check.Issues) == 0
+		check.Flags = textFlags(p.Text)
 		checks[i] = check
 	}
 	return checks, expandErr

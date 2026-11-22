@@ -31,6 +31,11 @@ type Config struct {
 	// tool-call loop. Leave it off for servers that reject the field, such as
 	// DeepSeek.
 	SendReasoning bool
+	// ReasoningEffort, when set, is sent as reasoning_effort (for example
+	// "none", "minimal", "low", "medium" or "high") to steer how much a
+	// reasoning model thinks. Empty leaves it to the server. Servers that do
+	// not know the field may reject the request.
+	ReasoningEffort string
 }
 
 // Limits bounds provider requests and responses. A zero field disables that bound.
@@ -190,6 +195,8 @@ func (c *Client) requestPayload(req ports.ChatRequest, stream bool) ([]byte, err
 		Messages:  buildMessages(req.Messages, c.config.SendReasoning),
 		Tools:     buildTools(req.Tools),
 		MaxTokens: maxTokens,
+
+		ReasoningEffort: c.config.ReasoningEffort,
 	}
 	if stream {
 		body.Stream = true
@@ -237,12 +244,14 @@ func readResponseBody(resp *http.Response, maxResponseBytes int) ([]byte, error)
 }
 
 type chatCompletionsRequest struct {
-	Model         string         `json:"model"`
-	Messages      []chatMessage  `json:"messages"`
-	Tools         []chatTool     `json:"tools,omitempty"`
-	MaxTokens     int            `json:"max_tokens,omitempty"`
-	Stream        bool           `json:"stream,omitempty"`
-	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+	Model     string        `json:"model"`
+	Messages  []chatMessage `json:"messages"`
+	Tools     []chatTool    `json:"tools,omitempty"`
+	MaxTokens int           `json:"max_tokens,omitempty"`
+	// ReasoningEffort is omitted when empty.
+	ReasoningEffort string         `json:"reasoning_effort,omitempty"`
+	Stream          bool           `json:"stream,omitempty"`
+	StreamOptions   *streamOptions `json:"stream_options,omitempty"`
 }
 
 type streamOptions struct {

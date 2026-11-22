@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -115,7 +117,7 @@ func extractJSON(content string) (string, error) {
 func ValidateOutput(_ context.Context, req agentcore.OutputValidationRequest) (*agentcore.OutputValidationResult, error) {
 	raw, err := extractJSON(req.Content)
 	if err != nil {
-		return nil, err
+		return nil, &OutputError{Reason: "no_json", err: err}
 	}
 	schema, err := outputSchema()
 	if err != nil {
@@ -123,13 +125,49 @@ func ValidateOutput(_ context.Context, req agentcore.OutputValidationRequest) (*
 	}
 	instance, err := jsonschema.UnmarshalJSON(strings.NewReader(raw))
 	if err != nil {
-		return nil, fmt.Errorf("final answer is not valid JSON: %w", err)
+		return nil, &OutputError{Reason: "bad_json", err: fmt.Errorf("final answer is not valid JSON: %w", err)}
 	}
 	if err := schema.Validate(instance); err != nil {
-		return nil, fmt.Errorf("final answer does not match the schema: %w", err)
+		return nil, &OutputError{Reason: schemaReason(err), err: fmt.Errorf("final answer does not match the schema: %w", err)}
 	}
 	return &agentcore.OutputValidationResult{
 		Structured: json.RawMessage(raw),
 		Metadata:   map[string]any{"output_format": "icu_handoff_patient"},
 	}, nil
 }
+
+// OutputError is a rejected final answer. Reason is content-free: "no_json",
+// "bad_json", or the failing schema keyword and where, such as
+// "minItems@/points" or "required@/points/*" (array indexes become *).
+type OutputError struct {
+	Reason string
+	err    error
+}
+
+func (e *OutputError) Error() string { return e.err.Error() }
+func (e *OutputError) Unwrap() error { return e.err }
+
+// schemaReason names the first leaf failure of a schema validation error.
+func schemaReason(err error) string {
+	var verr *jsonschema.ValidationError
+	if !errors.As(err, &verr) {
+		return "schema"
+	}
+	for len(verr.Causes) > 0 {
+		verr = verr.Causes[0]
+	}
+	keyword := "schema"
+	if path := verr.ErrorKind.KeywordPath(); len(path) > 0 {
+		keyword = path[len(path)-1]
+	}
+	loc := make([]string, len(verr.InstanceLocation))
+	for i, part := range verr.InstanceLocation {
+		if _, err := strconv.Atoi(part); err == nil {
+			part = "*"
+		}
+		loc[i] = part
+	}
+	return sanitizeID(keyword) + "@/" + unsafeLocation.ReplaceAllString(strings.Join(loc, "/"), "")
+}
+
+var unsafeLocation = regexp.MustCompile(`[^A-Za-z0-9_/*]`)

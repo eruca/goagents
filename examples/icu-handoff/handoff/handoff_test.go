@@ -151,7 +151,7 @@ func (e *echoTool) Execute(_ context.Context, input json.RawMessage, _ ports.Too
 
 func TestPinnedTool(t *testing.T) {
 	inner := &echoTool{}
-	a := &attempt{key: "k", stay: "S1ab", asOf: "2026-11-22 08:00", runID: "h-01", maxCalls: 2, evidence: NewEvidence(), counters: newToolCounters()}
+	a := &attempt{key: "k", stay: "S1ab", asOf: "2026-11-22 08:00", runID: "h-01", maxCalls: 2, evidence: NewEvidence(), counters: newToolCounters(), cache: newToolCache()}
 	tool, err := newPinnedTool(inner, a)
 	if err != nil {
 		t.Fatal(err)
@@ -181,12 +181,16 @@ func TestPinnedTool(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if i == 1 && res.ForLLM != "血钾 3.2↓ mmol/L[L202bb]" {
+			t.Fatalf("repeated call = %q, want the cached result", res.ForLLM)
+		}
 		if i == 2 && res.ForLLM != ToolLimitMessage {
 			t.Fatalf("third call = %q, want the limit message", res.ForLLM)
 		}
 	}
-	if len(inner.got) != 2 {
-		t.Fatalf("inner calls = %d, want 2", len(inner.got))
+	// The repeat was answered from the cache but still counted.
+	if len(inner.got) != 1 || a.counters.duplicates != 1 {
+		t.Fatalf("inner calls = %d, duplicates = %d; want 1, 1", len(inner.got), a.counters.duplicates)
 	}
 	var args map[string]any
 	_ = json.Unmarshal(inner.got[0], &args)
@@ -197,7 +201,7 @@ func TestPinnedTool(t *testing.T) {
 	if !a.evidence.HasRef("L202bb") {
 		t.Fatal("tool result not recorded as evidence")
 	}
-	if a.counters.limitHits != 1 || a.counters.byTool["labs"] != 2 {
+	if a.counters.limitHits != 1 || a.counters.byTool["labs"] != 1 {
 		t.Fatalf("counters = %+v", a.counters)
 	}
 }
@@ -247,5 +251,41 @@ func TestSummarize(t *testing.T) {
 	s := summarize([]int{5, 1, 3, 2, 4})
 	if s != (Summary5{N: 5, Min: 1, Median: 3, P95: 5, Max: 5, Total: 15}) {
 		t.Fatalf("summarize = %+v", s)
+	}
+}
+
+func TestVerifyNotesAndDirectionWords(t *testing.T) {
+	ev := NewEvidence()
+	ev.Add("RASS 2（前一次 -2）[A101aa]；血钾 6.8↑↑ mmol/L")
+	checks := VerifyNotes([]string{"关注 RASS 变化", "复查血钾 6.8", "复查血钾到 4.0", "数据可能不是最新"}, ev)
+	if len(checks) != 4 || !reflect.DeepEqual(checks[3].Flags, []string{FlagMetaWord}) || !checks[0].Verified || !checks[1].Verified || checks[2].Verified {
+		t.Fatalf("checks = %+v", checks)
+	}
+	if !reflect.DeepEqual(checks[2].MissingNumbers, []string{"4.0"}) {
+		t.Fatalf("missing = %v", checks[2].MissingNumbers)
+	}
+	if VerifyNotes(nil, ev) != nil {
+		t.Fatal("no notes, no checks")
+	}
+	points, _ := Verify(context.Background(), Summary{Points: []Point{
+		{Text: "RASS 2（前一次 -2），镇静程度加深。"},
+		{Text: "RASS 2（前一次 -2）。"},
+	}}, "S1ab", ev, nil)
+	if !points[0].Verified || !reflect.DeepEqual(points[0].Flags, []string{FlagDirectionWord}) || len(points[1].Flags) != 0 {
+		t.Fatalf("points = %+v", points)
+	}
+}
+
+func TestModelOverviewDropsSystemLines(t *testing.T) {
+	in := "【ICU1 01床 女 79岁｜S1il】现在 11-22 16:44；统计日 07:00 起；⚠ 数据可能不是最新：无同步记录\n" +
+		"诊断：急性胰腺炎\n待处理：提醒 1 条（血钾 6.8 mmol/L，危急值）\n可展开：vitals drugs io\n"
+	want := "【ICU1 01床 女 79岁｜S1il】现在 11-22 16:44；统计日 07:00 起\n" +
+		"诊断：急性胰腺炎\n待处理：提醒 1 条（血钾 6.8 mmol/L，危急值）\n"
+	if got := modelText(in, false); got != want {
+		t.Fatalf("got %q\nwant %q", got, want)
+	}
+	alerts := "【ICU1 01床｜S1il】现在 11-22 16:59；⚠ 数据可能不是最新：无同步记录\n⚠ 只有部分数据\n提醒 1 条：\n  血钾 6.8 mmol/L，危急值[M1ii]"
+	if got := modelText(alerts, true); got != "提醒 1 条：\n  血钾 6.8 mmol/L，危急值[M1ii]" {
+		t.Fatalf("alerts: got %q", got)
 	}
 }

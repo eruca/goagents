@@ -154,6 +154,11 @@ func (f *fakeGocms) handler(t *testing.T) http.Handler {
 				return p.labs, nil, false
 			case "vitals":
 				return p.vitals, nil, false
+			case "alerts":
+				if p.stay == "S3ef" {
+					return "【ICU9 03床｜S3ef】现在 11-22 08:00；⚠ 数据可能不是最新\n提醒：SOFA 24 小时内上升 3 分（07:30），未处理", nil, false
+				}
+				return "【ICU9｜S】现在 11-22 08:00\n提醒 0 条", nil, false
 			}
 			return "范围：近24h\n没有记录", nil, false
 		})
@@ -232,6 +237,8 @@ type scriptedLLM struct {
 	mu        sync.Mutex
 	toolNames map[string]bool
 	schemas   []string
+	// withheld counts requests for S3ef that came without tools.
+	withheld int
 }
 
 func (l *scriptedLLM) Chat(ctx context.Context, req ports.ChatRequest) (*ports.ChatResponse, error) {
@@ -245,7 +252,7 @@ func (l *scriptedLLM) Chat(ctx context.Context, req ports.ChatRequest) (*ports.C
 	}
 	l.mu.Unlock()
 
-	user, toolMessages, lastTool := "", 0, ""
+	user, toolMessages := "", 0
 	for _, m := range req.Messages {
 		switch m.Role {
 		case "user":
@@ -254,7 +261,6 @@ func (l *scriptedLLM) Chat(ctx context.Context, req ports.ChatRequest) (*ports.C
 			}
 		case "tool":
 			toolMessages++
-			lastTool = m.Content
 		}
 	}
 	stay := regexp.MustCompile(`病人：(S[0-9a-z]+)`).FindStringSubmatch(user)
@@ -305,14 +311,35 @@ func (l *scriptedLLM) Chat(ctx context.Context, req ports.ChatRequest) (*ports.C
 			point("GCS 10（06:00）。", "A301cc"),
 		))
 	case "S3ef":
-		if lastTool != handoff.ToolLimitMessage {
-			return call("vitals", `{"items":["FiO2"]}`)
+		// Asks the same thing twice (the host answers the repeat from its
+		// cache), then something else; the fourth request has no tools.
+		if len(req.Tools) > 0 {
+			if toolMessages < 2 {
+				return call("vitals", `{"items":["FiO2"]}`)
+			}
+			return call("vitals", `{"items":["FiO2"],"hours":12}`)
 		}
-		return answer(summary(
-			point("去甲肾上腺素泵入第4天。", "O401da"),
-			point("SOFA 9（07:00）。", "A401db"),
+		l.mu.Lock()
+		l.withheld++
+		l.mu.Unlock()
+		if last := req.Messages[len(req.Messages)-1]; last.Role != "user" || last.Content != handoff.FinalAnswerNote {
+			return nil, fmt.Errorf("no final-answer note after the tools were withheld")
+		}
+		// First writes a tool call as text, as Qwen does; the host asks again.
+		if prev := req.Messages[len(req.Messages)-2]; prev.Role != "assistant" || !strings.HasPrefix(prev.Content, "<tool_call>") {
+			return &ports.ChatResponse{Content: "<tool_call>\n<function=io>\n</function>\n</tool_call>"}, nil
+		}
+		if !strings.Contains(user, "待处理提醒原文") || !strings.Contains(user, "上升 3 分（07:30）") ||
+			strings.Contains(user, "⚠") || strings.Count(user, "【") != 1 {
+			return nil, fmt.Errorf("prefetched alerts missing from the user message, or system lines kept")
+		}
+		s := summary(
+			point("去甲肾上腺素泵入第4天，SOFA 上升 3 分（07:30）。", "O401da"),
+			point("SOFA 9（07:00），较前恶化。", "A401db"),
 			point("FiO2 40–45%，末次 45（06:00）。", "C401dc"),
-		))
+		)
+		s["watch"] = []string{"FiO2 能否降到 35%", "关注升压药能否下调"}
+		return answer(s)
 	default:
 		return &ports.ChatResponse{Content: "not json"}, nil
 	}
@@ -328,7 +355,7 @@ func TestRunHandoffEndToEnd(t *testing.T) {
 
 	out := t.TempDir()
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"run", "--gocms", server.URL, "--ward", "ICU9", "--out", out, "--concurrency", "3"}, &stdout, &stderr)
+	code := run(context.Background(), []string{"run", "--gocms", server.URL, "--ward", "ICU9", "--out", out, "--concurrency", "3", "--reasoning-effort", "low"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit %d: %s", code, stderr.String())
 	}
@@ -366,12 +393,31 @@ func TestRunHandoffEndToEnd(t *testing.T) {
 			t.Fatalf("model tool %s forwarded with_data", c.tool)
 		}
 	}
+	openAlerts := 0
+	for _, c := range calls {
+		if c.tool == "alerts" && c.args["status"] == "open" {
+			openAlerts++
+		}
+	}
+	if openAlerts != len(fakePatients) {
+		t.Fatalf("open alerts prefetched for %d patients, want %d", openAlerts, len(fakePatients))
+	}
 	if !sawLabs {
 		t.Fatal("the scripted labs call never reached gocms")
 	}
-	// Tool limit: three calls reach gocms, the fourth gets the limit message.
-	if vitalsS3 != 3 {
-		t.Fatalf("S3ef vitals calls = %d, want 3", vitalsS3)
+	// Three calls, one a repeat answered by the host: two reach gocms, and
+	// the next request comes without tools.
+	if vitalsS3 != 2 {
+		t.Fatalf("S3ef vitals calls = %d, want 2", vitalsS3)
+	}
+	if llm.withheld != 2 {
+		t.Fatalf("S3ef requests without tools = %d, want 2 (one asked again)", llm.withheld)
+	}
+	if lastEffort != "low" {
+		t.Fatalf("model built with reasoning effort %q", lastEffort)
+	}
+	if !strings.Contains(stderr.String(), "failed output_invalid") || strings.Contains(stderr.String(), "S4gh") {
+		t.Fatalf("stderr should name the failure by code only:\n%s", stderr.String())
 	}
 	if len(expands) == 0 {
 		t.Fatal("verification never called expand")
@@ -414,8 +460,8 @@ func TestRunHandoffEndToEnd(t *testing.T) {
 			t.Fatalf("handoff.md lacks %q:\n%s", want, md)
 		}
 	}
-	if strings.Count(md, "未核实：") != 1 {
-		t.Fatalf("want exactly one unverified point:\n%s", md)
+	if strings.Count(md, "未核实：") != 2 || !strings.Contains(md, "FiO2 能否降到 35% 〔未核实：数字 35 在工具返回里找不到〕") {
+		t.Fatalf("want one unverified point and one unverified watch note:\n%s", md)
 	}
 	if strings.Contains(md, "104") || strings.Contains(md, "<think>") {
 		t.Fatalf("handoff.md kept the first draft or the reasoning:\n%s", md)
@@ -457,14 +503,21 @@ func TestRunHandoffEndToEnd(t *testing.T) {
 	if stats.Runs.OK != 3 || stats.Runs.Failed != 1 || stats.Runs.SchemaRetries != 2 || stats.Runs.Rewrites != 1 {
 		t.Fatalf("runs = %+v", stats.Runs)
 	}
-	if stats.Tools.LimitHits != 1 || stats.Tools.ByTool["vitals"] != 3 || stats.Tools.ByTool["labs"] != 1 {
+	if stats.Tools.LimitHits != 0 || stats.Tools.Duplicates != 1 || stats.Tools.ByTool["vitals"] != 2 || stats.Tools.ByTool["labs"] != 1 {
 		t.Fatalf("tools = %+v", stats.Tools)
 	}
-	if stats.Check.Points != 9 || stats.Check.Unverified != 1 || stats.Check.ByIssue[handoff.IssueNumberNotInTools] != 1 {
+	if stats.Config.ReasoningEffort != "low" || stats.Config.ToolSpec != handoff.ToolSpecCompact || stats.LLM.ToolsWithheld != 1 || stats.LLM.TextToolCalls != 1 {
+		t.Fatalf("config = %+v, llm = %+v", stats.Config, stats.LLM)
+	}
+	if len(stats.LLM.Rounds) == 0 || stats.LLM.Rounds[0].Round != 1 || stats.LLM.Rounds[0].MeanInputTokens == 0 {
+		t.Fatalf("rounds = %+v", stats.LLM.Rounds)
+	}
+	if stats.Check.Points != 9 || stats.Check.Unverified != 1 || stats.Check.ByIssue[handoff.IssueNumberNotInTools] != 1 ||
+		stats.Check.NotesUnverified != 1 || stats.Check.ByIssue[handoff.FlagDirectionWord] != 1 {
 		t.Fatalf("check = %+v", stats.Check)
 	}
-	if stats.Errors["output_invalid"] != 1 {
-		t.Fatalf("errors = %v", stats.Errors)
+	if stats.Errors["output_invalid"] != 1 || stats.AttemptErrors["output_invalid:no_json"] != 2 || stats.AttemptErrors["output_invalid:required@/"] != 1 {
+		t.Fatalf("errors = %v, attempt errors = %v", stats.Errors, stats.AttemptErrors)
 	}
 }
 
@@ -651,11 +704,15 @@ func (copyingLLM) Chat(ctx context.Context, req ports.ChatRequest) (*ports.ChatR
 	return &ports.ChatResponse{Content: string(raw)}, nil
 }
 
+// lastEffort is the reasoning effort the last stubbed newLLM received.
+var lastEffort string
+
 func stubEnvironment(t *testing.T, vars map[string]string, llm ports.LLMClient) func() {
 	t.Helper()
 	oldEnv, oldLLM := env, newLLM
 	env = func(key string) string { return vars[key] }
-	newLLM = func() (ports.LLMClient, error) {
+	newLLM = func(effort string) (ports.LLMClient, error) {
+		lastEffort = effort
 		if llm == nil {
 			return nil, fmt.Errorf("no model in this test")
 		}

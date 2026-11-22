@@ -154,3 +154,33 @@ func TestChatStreamKeepsReasoningFieldDeltasApart(t *testing.T) {
 		}
 	}
 }
+
+func TestReasoningEffortIsSentOnlyWhenSet(t *testing.T) {
+	request := ports.ChatRequest{Messages: []ports.ChatMessage{{Role: "user", Content: "q"}}}
+	for _, effort := range []string{"", "none", "low"} {
+		var body map[string]any
+		server := jsonServer(t, chatJSON(`{"content":"ok"}`), func(b []byte) { _ = json.Unmarshal(b, &body) })
+		client, err := New(Config{BaseURL: server.URL, Model: "m", ReasoningEffort: effort})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := client.Chat(context.Background(), request); err != nil {
+			t.Fatal(err)
+		}
+		got, present := body["reasoning_effort"]
+		if effort == "" && present {
+			t.Fatalf("empty effort sent reasoning_effort %v", got)
+		}
+		if effort != "" && got != effort {
+			t.Fatalf("effort %q: request had reasoning_effort %v", effort, got)
+		}
+		// The streaming body is built the same way.
+		payload, err := client.requestPayload(request, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(payload), `"reasoning_effort"`) != (effort != "") {
+			t.Fatalf("effort %q: stream request %s", effort, payload)
+		}
+	}
+}
