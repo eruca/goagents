@@ -31,7 +31,20 @@ go run ./examples/context-eval \
 
 The report gives, per strategy, correct answers overall and per kind, input
 and output tokens, model calls, tool calls, context tool calls, summarizer
-calls, failed runs, and time. Results for qwen3.8-27b are in
+calls, context overflows, failed runs, and time.
+
+To test reactive compression, make the document larger than the model's
+context window and the budget larger still, so compression only happens when
+the provider rejects a call as too long (`ports.ErrContextTooLong`):
+
+```bash
+go run ./examples/context-eval --pages 12 --page-chars 60000 --budget 100000000 \
+  --strategies none,pull,summary --run-timeout 60m
+```
+
+`overflows` counts calls the provider rejected and the agent retried after
+compressing again, and runs that still ended on a rejection (`none` has no
+projector, so every run that outgrows the window ends there). Results for qwen3.8-27b are in
 [`docs/evals/contextkit-strategies-qwen3.8-27b.md`](../../docs/evals/contextkit-strategies-qwen3.8-27b.md).
 
 The test runs every strategy with a deterministic stand-in model that answers

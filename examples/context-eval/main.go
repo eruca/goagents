@@ -160,8 +160,13 @@ type StrategyReport struct {
 	ContextReads     int            `json:"context_tool_calls"`
 	SummarizerCalls  int            `json:"summarizer_calls"`
 	SummarizerTokens int            `json:"summarizer_tokens"`
-	Seconds          float64        `json:"seconds"`
-	Answers          []RunAnswer    `json:"answers"`
+	// ContextOverflows counts model calls the provider rejected as too long
+	// for its context window and the agent retried after compressing again;
+	// OverflowFailures counts runs that still ended on such a rejection.
+	ContextOverflows int         `json:"context_overflows"`
+	OverflowFailures int         `json:"overflow_failures"`
+	Seconds          float64     `json:"seconds"`
+	Answers          []RunAnswer `json:"answers"`
 }
 
 // RunAnswer is one run's outcome.
@@ -231,6 +236,8 @@ func evaluate(ctx context.Context, opts options, llm ports.LLMClient, progress i
 		strategyReport.ContextReads = int(stats.contextCalls.Load())
 		strategyReport.SummarizerCalls = int(stats.summarizerCalls.Load())
 		strategyReport.SummarizerTokens = int(stats.summarizerTokens.Load())
+		strategyReport.ContextOverflows = int(stats.overflows.Load())
+		strategyReport.OverflowFailures = int(stats.overflowFailures.Load())
 		report.Strategies = append(report.Strategies, strategyReport)
 	}
 	return report, nil
@@ -238,6 +245,17 @@ func evaluate(ctx context.Context, opts options, llm ports.LLMClient, progress i
 
 type runStats struct {
 	contextCalls, summarizerCalls, summarizerTokens atomic.Int64
+	overflows, overflowFailures                     atomic.Int64
+}
+
+// overflowCounter counts the agent's context overflow events.
+type overflowCounter struct{ stats *runStats }
+
+func (c overflowCounter) Emit(_ context.Context, event agentcore.Event) error {
+	if event.Type == agentcore.EventContextOverflow {
+		c.stats.overflows.Add(1)
+	}
+	return nil
 }
 
 func summarizeRun(result *evalkit.RunResult, err error) string {
@@ -263,6 +281,7 @@ func runTask(ctx context.Context, opts options, strategy string, llm ports.LLMCl
 		agentcore.WithPromptBlocks([]prompt.Block{{Name: "task", Mode: prompt.ModeCacheable, Content: instructions}}),
 		agentcore.WithMaxIterations(task.document.pages() + 16),
 		agentcore.WithMaxOutputTokens(opts.maxOutput),
+		agentcore.WithEventSink(overflowCounter{stats: stats}),
 	}
 	scope := func(map[string]any) string { return task.id }
 	budget := contextkit.Budget{MaxChars: opts.budget}
@@ -317,6 +336,9 @@ func runTask(ctx context.Context, opts options, strategy string, llm ports.LLMCl
 	}
 	result, err := agent.RunDetailed(ctx, agentcore.RunRequest{Input: task.question, Metadata: map[string]any{"task": task.id}})
 	if err != nil {
+		if errors.Is(err, ports.ErrContextTooLong) {
+			stats.overflowFailures.Add(1)
+		}
 		return nil, err
 	}
 	return &evalkit.RunResult{
@@ -523,12 +545,12 @@ func printReport(w io.Writer, report *Report) {
 	fmt.Fprintf(w, "model %s: %d tasks x %d trials, %d pages of %d chars, budget %d chars\n",
 		report.Model, report.Tasks, report.Trials, report.Pages, report.PageChars, report.Budget)
 	table := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(table, "strategy\tcorrect\tlookup\tsum\tmax\tinput tokens\tmodel calls\ttool calls\tcontext tools\tsummaries\terrors\tseconds")
+	fmt.Fprintln(table, "strategy\tcorrect\tlookup\tsum\tmax\tinput tokens\tmodel calls\ttool calls\tcontext tools\tsummaries\toverflows\terrors\tseconds")
 	perKind := report.Tasks / 3 * report.Trials
 	for _, s := range report.Strategies {
-		fmt.Fprintf(table, "%s\t%d/%d\t%d/%d\t%d/%d\t%d/%d\t%d\t%d\t%d\t%d\t%d\t%d\t%.0f\n", s.Name, s.Correct, s.Runs,
+		fmt.Fprintf(table, "%s\t%d/%d\t%d/%d\t%d/%d\t%d/%d\t%d\t%d\t%d\t%d\t%d\t%d/%d\t%d\t%.0f\n", s.Name, s.Correct, s.Runs,
 			s.CorrectByKind["lookup"], perKind, s.CorrectByKind["sum"], perKind, s.CorrectByKind["max"], perKind,
-			s.InputTokens, s.ModelCalls, s.ToolCalls, s.ContextReads, s.SummarizerCalls, s.Failed, s.Seconds)
+			s.InputTokens, s.ModelCalls, s.ToolCalls, s.ContextReads, s.SummarizerCalls, s.ContextOverflows, s.OverflowFailures, s.Failed, s.Seconds)
 	}
 	_ = table.Flush()
 }

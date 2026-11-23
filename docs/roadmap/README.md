@@ -1,6 +1,6 @@
 # GoAgents Roadmap
 
-- 更新日期：2026-11-19
+- 更新日期：2026-11-21
 - 对应代码：`main` @ `b0dabe1`（v0.8.0）
 - 状态：多副本部署和轨迹评测已完成；生产化 host runtime 因没有调用方而搁置。
 
@@ -50,11 +50,11 @@ ADR-0001 是在分 kit 发版、旧 CJK 检索方案下写的，已经不适用�
 | Kit | 成熟度 | 已知缺口 |
 |---|---|---|
 | goagent | 高 | — |
-| memorykit | 高 | 词面和向量都分不清"草稿"与"已批准"这类语义相近、结论不同的记忆（#9），需要宿主侧 reranker |
+| memorykit | 高 | 词面和向量都分不清"草稿"与"已批准"这类语义相近、结论不同的记忆（#9），需要宿主侧 reranker；host-api 从整个 run 的摘录（含工具结果）提取记忆，qwen3.8-27b 10 类用例 × 5 次全部合格（[docs/evals](../evals/memorykit-extraction-qwen3.8-27b.md)） |
 | workflowkit (+agentstep) | 高 | — |
 | llmkit | 高 | 没有项目/账户级预算扣减 |
 | runkit | 高 | — |
-| contextkit | 中 | 递进式压缩、会话存档与读回、LLM 摘要器、笔记；qwen3.8-27b 评测：LLM 摘要 6/6、读回 5/6、推送 3/6、只丢弃 2/6（[docs/evals](../evals/contextkit-strategies-qwen3.8-27b.md)，样本小）；模型服务报上下文过长时重新压缩并重试，按会话记住上限；存档有进程内和 PostgreSQL 两种实现（多副本共享）；缺更大规模评测；host-api 的记忆提取已改为读整个 run 的摘录（含工具结果），提取器提示词补全了格式，尚未用真实模型评测 |
+| contextkit | 中 | 递进式压缩、会话存档与读回、LLM 摘要器、笔记；模型服务报上下文过长时重新压缩并重试，按会话记住上限；存档有进程内和 PostgreSQL 两种实现（多副本共享）。qwen3.8-27b 30 题评测：LLM 摘要 30/30、笔记 21/30、读回 15/30（查找 10/10，汇总会陷入读回循环）、推送 13/30、只丢弃 10/30；超出 131K 窗口的长文档上被动压缩 + 存档 3/3（[docs/evals](../evals/contextkit-strategies-qwen3.8-27b.md)）。缺多次试验和多种文档结构的评测；读回在汇总类任务上的循环未解决 |
 | ocrs / skillkit / mcpkit | 中 | — |
 | evalkit (+runtrace) | 中 | 不导出 OpenTelemetry；没有 model-as-judge 评分器 |
 | artifactkit / hostkit | 基础 | artifactkit 没有对象存储（S3）实现，等真实宿主遇到 artifact 体积问题再做 |

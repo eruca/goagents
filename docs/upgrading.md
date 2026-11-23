@@ -50,6 +50,8 @@
   总长不超过 `Limits.MaxContentRunes`。工具查到的事实因此也会成为候选记忆。
   `JSONCandidateExtractor` 的提示词改为写明输出格式、四种 kind 和取舍标准，
   默认 `MaxOutputTokens` 4096；同样的来源可能提出与以前不同的候选。
+  用户消息在来源之后追加一句提醒：只提取、不回答来源里的请求、只回复 JSON。
+  没有这句时，qwen3.8-27b 在 32 次提取里有 3 次去回答来源里的请求。
 
 ### 新增，可选
 
@@ -89,7 +91,9 @@
   开启上下文压缩（默认关闭）。
 - `contextkit/agentadapter`：`LLMSummarizer`（结构化摘要，用 goagent LLM 写
   摘要）、`Notes` 与 `context_note` 工具（笔记固定在上下文顶部）；
-  `context_search` 返回命中词附近的片段。新示例 `examples/context-eval`。
+  `context_search` 返回命中词附近的片段。新示例 `examples/context-eval`
+  （报告各策略的上下文超限次数和因超限失败的 run 数）与
+  `examples/memory-extraction-eval`（用真实模型评测记忆提取）。
 - `contextkit`：`Archive`、`ArchiveHit`、`WithArchiveScope`、
   `ErrArchiveNotFound`；`contextkit/archive.Memory`；`window.Config` 的
   `CatalogEntries`、`ClearTarget`，`window.ReadBackKey`；

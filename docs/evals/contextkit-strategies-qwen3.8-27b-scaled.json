@@ -1,0 +1,1281 @@
+{
+  "model": "qwen3.8-27b",
+  "pages": 8,
+  "page_chars": 2500,
+  "budget_chars": 8000,
+  "tasks": 30,
+  "trials": 1,
+  "strategies": [
+    {
+      "name": "none",
+      "runs": 30,
+      "correct": 30,
+      "correct_by_kind": {
+        "lookup": 10,
+        "max": 10,
+        "sum": 10
+      },
+      "failed_runs": 0,
+      "input_tokens": 619528,
+      "output_tokens": 26624,
+      "model_calls": 253,
+      "tool_calls": 238,
+      "context_tool_calls": 0,
+      "summarizer_calls": 0,
+      "summarizer_tokens": 0,
+      "context_overflows": 0,
+      "overflow_failures": 0,
+      "seconds": 649.438521667,
+      "answers": [
+        {
+          "task": "INV-1-lookup",
+          "want": "5900",
+          "got": "5900",
+          "correct": true
+        },
+        {
+          "task": "INV-1-sum",
+          "want": "49960",
+          "got": "49960",
+          "correct": true
+        },
+        {
+          "task": "INV-1-max",
+          "want": "Yunfan Textiles",
+          "got": "Yunfan Textiles",
+          "correct": true
+        },
+        {
+          "task": "INV-2-lookup",
+          "want": "9600",
+          "got": "9600",
+          "correct": true
+        },
+        {
+          "task": "INV-2-sum",
+          "want": "35200",
+          "got": "35200",
+          "correct": true
+        },
+        {
+          "task": "INV-2-max",
+          "want": "Mingyue Printing",
+          "got": "Mingyue Printing",
+          "correct": true
+        },
+        {
+          "task": "INV-3-lookup",
+          "want": "5730",
+          "got": "5730",
+          "correct": true
+        },
+        {
+          "task": "INV-3-sum",
+          "want": "34750",
+          "got": "34750",
+          "correct": true
+        },
+        {
+          "task": "INV-3-max",
+          "want": "Qinghe Foods",
+          "got": "Qinghe Foods",
+          "correct": true
+        },
+        {
+          "task": "INV-4-lookup",
+          "want": "3770",
+          "got": "3770",
+          "correct": true
+        },
+        {
+          "task": "INV-4-sum",
+          "want": "34560",
+          "got": "34560",
+          "correct": true
+        },
+        {
+          "task": "INV-4-max",
+          "want": "Jinhe Hardware",
+          "got": "Jinhe Hardware",
+          "correct": true
+        },
+        {
+          "task": "INV-5-lookup",
+          "want": "8000",
+          "got": "8000",
+          "correct": true
+        },
+        {
+          "task": "INV-5-sum",
+          "want": "53220",
+          "got": "53220",
+          "correct": true
+        },
+        {
+          "task": "INV-5-max",
+          "want": "Qinghe Foods",
+          "got": "Qinghe Foods",
+          "correct": true
+        },
+        {
+          "task": "INV-6-lookup",
+          "want": "3350",
+          "got": "3350",
+          "correct": true
+        },
+        {
+          "task": "INV-6-sum",
+          "want": "42520",
+          "got": "42520",
+          "correct": true
+        },
+        {
+          "task": "INV-6-max",
+          "want": "Dongpo Tea",
+          "got": "Dongpo Tea",
+          "correct": true
+        },
+        {
+          "task": "INV-7-lookup",
+          "want": "7650",
+          "got": "7650",
+          "correct": true
+        },
+        {
+          "task": "INV-7-sum",
+          "want": "43370",
+          "got": "43370",
+          "correct": true
+        },
+        {
+          "task": "INV-7-max",
+          "want": "Yunfan Textiles",
+          "got": "Yunfan Textiles",
+          "correct": true
+        },
+        {
+          "task": "INV-8-lookup",
+          "want": "6900",
+          "got": "6900",
+          "correct": true
+        },
+        {
+          "task": "INV-8-sum",
+          "want": "53190",
+          "got": "53190",
+          "correct": true
+        },
+        {
+          "task": "INV-8-max",
+          "want": "Ruifeng Chemicals",
+          "got": "Ruifeng Chemicals",
+          "correct": true
+        },
+        {
+          "task": "INV-9-lookup",
+          "want": "7140",
+          "got": "7140",
+          "correct": true
+        },
+        {
+          "task": "INV-9-sum",
+          "want": "29240",
+          "got": "29240",
+          "correct": true
+        },
+        {
+          "task": "INV-9-max",
+          "want": "Mingyue Printing",
+          "got": "Mingyue Printing",
+          "correct": true
+        },
+        {
+          "task": "INV-10-lookup",
+          "want": "4520",
+          "got": "4520",
+          "correct": true
+        },
+        {
+          "task": "INV-10-sum",
+          "want": "42840",
+          "got": "42840",
+          "correct": true
+        },
+        {
+          "task": "INV-10-max",
+          "want": "Huaxin Logistics",
+          "got": "Huaxin Logistics",
+          "correct": true
+        }
+      ]
+    },
+    {
+      "name": "drop",
+      "runs": 30,
+      "correct": 10,
+      "correct_by_kind": {
+        "lookup": 9,
+        "sum": 1
+      },
+      "failed_runs": 17,
+      "input_tokens": 310912,
+      "output_tokens": 36766,
+      "model_calls": 193,
+      "tool_calls": 416,
+      "context_tool_calls": 0,
+      "summarizer_calls": 0,
+      "summarizer_tokens": 0,
+      "context_overflows": 0,
+      "overflow_failures": 0,
+      "seconds": 3007.5584625,
+      "answers": [
+        {
+          "task": "INV-1-lookup",
+          "want": "5900",
+          "got": "5900",
+          "correct": true
+        },
+        {
+          "task": "INV-1-sum",
+          "want": "49960",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-1-max",
+          "want": "Yunfan Textiles",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-2-lookup",
+          "want": "9600",
+          "got": "9600",
+          "correct": true
+        },
+        {
+          "task": "INV-2-sum",
+          "want": "35200",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-2-max",
+          "want": "Mingyue Printing",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-3-lookup",
+          "want": "5730",
+          "got": "5730",
+          "correct": true
+        },
+        {
+          "task": "INV-3-sum",
+          "want": "34750",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-3-max",
+          "want": "Qinghe Foods",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-4-lookup",
+          "want": "3770",
+          "got": "3770",
+          "correct": true
+        },
+        {
+          "task": "INV-4-sum",
+          "want": "34560",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-4-max",
+          "want": "Jinhe Hardware",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-5-lookup",
+          "want": "8000",
+          "got": "8000",
+          "correct": true
+        },
+        {
+          "task": "INV-5-sum",
+          "want": "53220",
+          "got": "40670",
+          "correct": false
+        },
+        {
+          "task": "INV-5-max",
+          "want": "Qinghe Foods",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-6-lookup",
+          "want": "3350",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-6-sum",
+          "want": "42520",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-6-max",
+          "want": "Dongpo Tea",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-7-lookup",
+          "want": "7650",
+          "got": "7650",
+          "correct": true
+        },
+        {
+          "task": "INV-7-sum",
+          "want": "43370",
+          "got": "43370",
+          "correct": true
+        },
+        {
+          "task": "INV-7-max",
+          "want": "Yunfan Textiles",
+          "got": "Mingli Steel",
+          "correct": false
+        },
+        {
+          "task": "INV-8-lookup",
+          "want": "6900",
+          "got": "6900",
+          "correct": true
+        },
+        {
+          "task": "INV-8-sum",
+          "want": "53190",
+          "got": "47920",
+          "correct": false
+        },
+        {
+          "task": "INV-8-max",
+          "want": "Ruifeng Chemicals",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-9-lookup",
+          "want": "7140",
+          "got": "7140",
+          "correct": true
+        },
+        {
+          "task": "INV-9-sum",
+          "want": "29240",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-9-max",
+          "want": "Mingyue Printing",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-10-lookup",
+          "want": "4520",
+          "got": "4520",
+          "correct": true
+        },
+        {
+          "task": "INV-10-sum",
+          "want": "42840",
+          "got": "",
+          "correct": false,
+          "error": "model returned an empty response"
+        },
+        {
+          "task": "INV-10-max",
+          "want": "Huaxin Logistics",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        }
+      ]
+    },
+    {
+      "name": "summary",
+      "runs": 30,
+      "correct": 30,
+      "correct_by_kind": {
+        "lookup": 10,
+        "max": 10,
+        "sum": 10
+      },
+      "failed_runs": 0,
+      "input_tokens": 436107,
+      "output_tokens": 36028,
+      "model_calls": 293,
+      "tool_calls": 332,
+      "context_tool_calls": 0,
+      "summarizer_calls": 117,
+      "summarizer_tokens": 427012,
+      "context_overflows": 0,
+      "overflow_failures": 0,
+      "seconds": 1876.17128925,
+      "answers": [
+        {
+          "task": "INV-1-lookup",
+          "want": "5900",
+          "got": "5900",
+          "correct": true
+        },
+        {
+          "task": "INV-1-sum",
+          "want": "49960",
+          "got": "49960",
+          "correct": true
+        },
+        {
+          "task": "INV-1-max",
+          "want": "Yunfan Textiles",
+          "got": "Yunfan Textiles",
+          "correct": true
+        },
+        {
+          "task": "INV-2-lookup",
+          "want": "9600",
+          "got": "9600",
+          "correct": true
+        },
+        {
+          "task": "INV-2-sum",
+          "want": "35200",
+          "got": "35200",
+          "correct": true
+        },
+        {
+          "task": "INV-2-max",
+          "want": "Mingyue Printing",
+          "got": "Mingyue Printing",
+          "correct": true
+        },
+        {
+          "task": "INV-3-lookup",
+          "want": "5730",
+          "got": "5730",
+          "correct": true
+        },
+        {
+          "task": "INV-3-sum",
+          "want": "34750",
+          "got": "34750",
+          "correct": true
+        },
+        {
+          "task": "INV-3-max",
+          "want": "Qinghe Foods",
+          "got": "Qinghe Foods",
+          "correct": true
+        },
+        {
+          "task": "INV-4-lookup",
+          "want": "3770",
+          "got": "3770",
+          "correct": true
+        },
+        {
+          "task": "INV-4-sum",
+          "want": "34560",
+          "got": "34560",
+          "correct": true
+        },
+        {
+          "task": "INV-4-max",
+          "want": "Jinhe Hardware",
+          "got": "Jinhe Hardware",
+          "correct": true
+        },
+        {
+          "task": "INV-5-lookup",
+          "want": "8000",
+          "got": "8000",
+          "correct": true
+        },
+        {
+          "task": "INV-5-sum",
+          "want": "53220",
+          "got": "53220",
+          "correct": true
+        },
+        {
+          "task": "INV-5-max",
+          "want": "Qinghe Foods",
+          "got": "Qinghe Foods",
+          "correct": true
+        },
+        {
+          "task": "INV-6-lookup",
+          "want": "3350",
+          "got": "3350",
+          "correct": true
+        },
+        {
+          "task": "INV-6-sum",
+          "want": "42520",
+          "got": "42520",
+          "correct": true
+        },
+        {
+          "task": "INV-6-max",
+          "want": "Dongpo Tea",
+          "got": "Dongpo Tea",
+          "correct": true
+        },
+        {
+          "task": "INV-7-lookup",
+          "want": "7650",
+          "got": "7650",
+          "correct": true
+        },
+        {
+          "task": "INV-7-sum",
+          "want": "43370",
+          "got": "43370",
+          "correct": true
+        },
+        {
+          "task": "INV-7-max",
+          "want": "Yunfan Textiles",
+          "got": "Yunfan Textiles",
+          "correct": true
+        },
+        {
+          "task": "INV-8-lookup",
+          "want": "6900",
+          "got": "6900",
+          "correct": true
+        },
+        {
+          "task": "INV-8-sum",
+          "want": "53190",
+          "got": "53190",
+          "correct": true
+        },
+        {
+          "task": "INV-8-max",
+          "want": "Ruifeng Chemicals",
+          "got": "Ruifeng Chemicals",
+          "correct": true
+        },
+        {
+          "task": "INV-9-lookup",
+          "want": "7140",
+          "got": "7140",
+          "correct": true
+        },
+        {
+          "task": "INV-9-sum",
+          "want": "29240",
+          "got": "29240",
+          "correct": true
+        },
+        {
+          "task": "INV-9-max",
+          "want": "Mingyue Printing",
+          "got": "Mingyue Printing",
+          "correct": true
+        },
+        {
+          "task": "INV-10-lookup",
+          "want": "4520",
+          "got": "4520",
+          "correct": true
+        },
+        {
+          "task": "INV-10-sum",
+          "want": "42840",
+          "got": "42840",
+          "correct": true
+        },
+        {
+          "task": "INV-10-max",
+          "want": "Huaxin Logistics",
+          "got": "Huaxin Logistics",
+          "correct": true
+        }
+      ]
+    },
+    {
+      "name": "pull",
+      "runs": 30,
+      "correct": 15,
+      "correct_by_kind": {
+        "lookup": 10,
+        "max": 3,
+        "sum": 2
+      },
+      "failed_runs": 10,
+      "input_tokens": 476117,
+      "output_tokens": 41319,
+      "model_calls": 253,
+      "tool_calls": 382,
+      "context_tool_calls": 485,
+      "summarizer_calls": 0,
+      "summarizer_tokens": 0,
+      "context_overflows": 0,
+      "overflow_failures": 0,
+      "seconds": 743.484772625,
+      "answers": [
+        {
+          "task": "INV-1-lookup",
+          "want": "5900",
+          "got": "5900",
+          "correct": true
+        },
+        {
+          "task": "INV-1-sum",
+          "want": "49960",
+          "got": "49380",
+          "correct": false
+        },
+        {
+          "task": "INV-1-max",
+          "want": "Yunfan Textiles",
+          "got": "Yunfan Textiles",
+          "correct": true
+        },
+        {
+          "task": "INV-2-lookup",
+          "want": "9600",
+          "got": "9600",
+          "correct": true
+        },
+        {
+          "task": "INV-2-sum",
+          "want": "35200",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-2-max",
+          "want": "Mingyue Printing",
+          "got": "Mingyue Printing",
+          "correct": true
+        },
+        {
+          "task": "INV-3-lookup",
+          "want": "5730",
+          "got": "5730",
+          "correct": true
+        },
+        {
+          "task": "INV-3-sum",
+          "want": "34750",
+          "got": "34750",
+          "correct": true
+        },
+        {
+          "task": "INV-3-max",
+          "want": "Qinghe Foods",
+          "got": "Ruifeng Chemicals",
+          "correct": false
+        },
+        {
+          "task": "INV-4-lookup",
+          "want": "3770",
+          "got": "3770",
+          "correct": true
+        },
+        {
+          "task": "INV-4-sum",
+          "want": "34560",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-4-max",
+          "want": "Jinhe Hardware",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-5-lookup",
+          "want": "8000",
+          "got": "8000",
+          "correct": true
+        },
+        {
+          "task": "INV-5-sum",
+          "want": "53220",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-5-max",
+          "want": "Qinghe Foods",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-6-lookup",
+          "want": "3350",
+          "got": "3350",
+          "correct": true
+        },
+        {
+          "task": "INV-6-sum",
+          "want": "42520",
+          "got": "42520",
+          "correct": true
+        },
+        {
+          "task": "INV-6-max",
+          "want": "Dongpo Tea",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-7-lookup",
+          "want": "7650",
+          "got": "7650",
+          "correct": true
+        },
+        {
+          "task": "INV-7-sum",
+          "want": "43370",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-7-max",
+          "want": "Yunfan Textiles",
+          "got": "Yunfan Textiles",
+          "correct": true
+        },
+        {
+          "task": "INV-8-lookup",
+          "want": "6900",
+          "got": "6900",
+          "correct": true
+        },
+        {
+          "task": "INV-8-sum",
+          "want": "53190",
+          "got": "44980",
+          "correct": false
+        },
+        {
+          "task": "INV-8-max",
+          "want": "Ruifeng Chemicals",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-9-lookup",
+          "want": "7140",
+          "got": "7140",
+          "correct": true
+        },
+        {
+          "task": "INV-9-sum",
+          "want": "29240",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-9-max",
+          "want": "Mingyue Printing",
+          "got": "Lantian Electronics",
+          "correct": false
+        },
+        {
+          "task": "INV-10-lookup",
+          "want": "4520",
+          "got": "4520",
+          "correct": true
+        },
+        {
+          "task": "INV-10-sum",
+          "want": "42840",
+          "got": "49460",
+          "correct": false
+        },
+        {
+          "task": "INV-10-max",
+          "want": "Huaxin Logistics",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        }
+      ]
+    },
+    {
+      "name": "push",
+      "runs": 30,
+      "correct": 13,
+      "correct_by_kind": {
+        "lookup": 10,
+        "max": 3
+      },
+      "failed_runs": 15,
+      "input_tokens": 300172,
+      "output_tokens": 22162,
+      "model_calls": 142,
+      "tool_calls": 191,
+      "context_tool_calls": 705,
+      "summarizer_calls": 0,
+      "summarizer_tokens": 0,
+      "context_overflows": 0,
+      "overflow_failures": 0,
+      "seconds": 1017.552551875,
+      "answers": [
+        {
+          "task": "INV-1-lookup",
+          "want": "5900",
+          "got": "5900",
+          "correct": true
+        },
+        {
+          "task": "INV-1-sum",
+          "want": "49960",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-1-max",
+          "want": "Yunfan Textiles",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-2-lookup",
+          "want": "9600",
+          "got": "9600",
+          "correct": true
+        },
+        {
+          "task": "INV-2-sum",
+          "want": "35200",
+          "got": "23200",
+          "correct": false
+        },
+        {
+          "task": "INV-2-max",
+          "want": "Mingyue Printing",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-3-lookup",
+          "want": "5730",
+          "got": "5730",
+          "correct": true
+        },
+        {
+          "task": "INV-3-sum",
+          "want": "34750",
+          "got": "39900",
+          "correct": false
+        },
+        {
+          "task": "INV-3-max",
+          "want": "Qinghe Foods",
+          "got": "Qinghe Foods",
+          "correct": true
+        },
+        {
+          "task": "INV-4-lookup",
+          "want": "3770",
+          "got": "3770",
+          "correct": true
+        },
+        {
+          "task": "INV-4-sum",
+          "want": "34560",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-4-max",
+          "want": "Jinhe Hardware",
+          "got": "Jinhe Hardware",
+          "correct": true
+        },
+        {
+          "task": "INV-5-lookup",
+          "want": "8000",
+          "got": "8000",
+          "correct": true
+        },
+        {
+          "task": "INV-5-sum",
+          "want": "53220",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-5-max",
+          "want": "Qinghe Foods",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-6-lookup",
+          "want": "3350",
+          "got": "3350",
+          "correct": true
+        },
+        {
+          "task": "INV-6-sum",
+          "want": "42520",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-6-max",
+          "want": "Dongpo Tea",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-7-lookup",
+          "want": "7650",
+          "got": "7650",
+          "correct": true
+        },
+        {
+          "task": "INV-7-sum",
+          "want": "43370",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-7-max",
+          "want": "Yunfan Textiles",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-8-lookup",
+          "want": "6900",
+          "got": "6900",
+          "correct": true
+        },
+        {
+          "task": "INV-8-sum",
+          "want": "53190",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-8-max",
+          "want": "Ruifeng Chemicals",
+          "got": "Ruifeng Chemicals",
+          "correct": true
+        },
+        {
+          "task": "INV-9-lookup",
+          "want": "7140",
+          "got": "7140",
+          "correct": true
+        },
+        {
+          "task": "INV-9-sum",
+          "want": "29240",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-9-max",
+          "want": "Mingyue Printing",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-10-lookup",
+          "want": "4520",
+          "got": "4520",
+          "correct": true
+        },
+        {
+          "task": "INV-10-sum",
+          "want": "42840",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-10-max",
+          "want": "Huaxin Logistics",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        }
+      ]
+    },
+    {
+      "name": "notes",
+      "runs": 30,
+      "correct": 21,
+      "correct_by_kind": {
+        "lookup": 10,
+        "max": 5,
+        "sum": 6
+      },
+      "failed_runs": 7,
+      "input_tokens": 595967,
+      "output_tokens": 39811,
+      "model_calls": 281,
+      "tool_calls": 361,
+      "context_tool_calls": 442,
+      "summarizer_calls": 0,
+      "summarizer_tokens": 0,
+      "context_overflows": 0,
+      "overflow_failures": 0,
+      "seconds": 628.803723917,
+      "answers": [
+        {
+          "task": "INV-1-lookup",
+          "want": "5900",
+          "got": "5900",
+          "correct": true
+        },
+        {
+          "task": "INV-1-sum",
+          "want": "49960",
+          "got": "46200",
+          "correct": false
+        },
+        {
+          "task": "INV-1-max",
+          "want": "Yunfan Textiles",
+          "got": "Yunfan Textiles",
+          "correct": true
+        },
+        {
+          "task": "INV-2-lookup",
+          "want": "9600",
+          "got": "9600",
+          "correct": true
+        },
+        {
+          "task": "INV-2-sum",
+          "want": "35200",
+          "got": "33895",
+          "correct": false
+        },
+        {
+          "task": "INV-2-max",
+          "want": "Mingyue Printing",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-3-lookup",
+          "want": "5730",
+          "got": "5730",
+          "correct": true
+        },
+        {
+          "task": "INV-3-sum",
+          "want": "34750",
+          "got": "34750",
+          "correct": true
+        },
+        {
+          "task": "INV-3-max",
+          "want": "Qinghe Foods",
+          "got": "Qinghe Foods",
+          "correct": true
+        },
+        {
+          "task": "INV-4-lookup",
+          "want": "3770",
+          "got": "3770",
+          "correct": true
+        },
+        {
+          "task": "INV-4-sum",
+          "want": "34560",
+          "got": "34560",
+          "correct": true
+        },
+        {
+          "task": "INV-4-max",
+          "want": "Jinhe Hardware",
+          "got": "Jinhe Hardware",
+          "correct": true
+        },
+        {
+          "task": "INV-5-lookup",
+          "want": "8000",
+          "got": "8000",
+          "correct": true
+        },
+        {
+          "task": "INV-5-sum",
+          "want": "53220",
+          "got": "53220",
+          "correct": true
+        },
+        {
+          "task": "INV-5-max",
+          "want": "Qinghe Foods",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-6-lookup",
+          "want": "3350",
+          "got": "3350",
+          "correct": true
+        },
+        {
+          "task": "INV-6-sum",
+          "want": "42520",
+          "got": "42520",
+          "correct": true
+        },
+        {
+          "task": "INV-6-max",
+          "want": "Dongpo Tea",
+          "got": "Dongpo Tea",
+          "correct": true
+        },
+        {
+          "task": "INV-7-lookup",
+          "want": "7650",
+          "got": "7650",
+          "correct": true
+        },
+        {
+          "task": "INV-7-sum",
+          "want": "43370",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-7-max",
+          "want": "Yunfan Textiles",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-8-lookup",
+          "want": "6900",
+          "got": "6900",
+          "correct": true
+        },
+        {
+          "task": "INV-8-sum",
+          "want": "53190",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-8-max",
+          "want": "Ruifeng Chemicals",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        },
+        {
+          "task": "INV-9-lookup",
+          "want": "7140",
+          "got": "7140",
+          "correct": true
+        },
+        {
+          "task": "INV-9-sum",
+          "want": "29240",
+          "got": "29240",
+          "correct": true
+        },
+        {
+          "task": "INV-9-max",
+          "want": "Mingyue Printing",
+          "got": "Mingyue Printing",
+          "correct": true
+        },
+        {
+          "task": "INV-10-lookup",
+          "want": "4520",
+          "got": "4520",
+          "correct": true
+        },
+        {
+          "task": "INV-10-sum",
+          "want": "42840",
+          "got": "42840",
+          "correct": true
+        },
+        {
+          "task": "INV-10-max",
+          "want": "Huaxin Logistics",
+          "got": "",
+          "correct": false,
+          "error": "max iterations reached"
+        }
+      ]
+    }
+  ],
+  "generated_at": "2026-11-20T14:00:38.945258Z",
+  "task_kinds": {
+    "lookup": "the amount of one early page's invoice",
+    "max": "the vendor with the largest invoice",
+    "sum": "the sum of every invoice"
+  }
+}
